@@ -37,6 +37,7 @@
 !bin/*
 
 # for test files
+test/
 *.faa
 *.fasta
 *.FT2

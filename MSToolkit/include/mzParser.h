@@ -452,7 +452,7 @@ private:
 // X!Tandem borrowed headers
 //------------------------------------------------
 
-int b64_decode_mio (char *dest, char *src, size_t size);
+int b64_decode_mio (char *dest, const char *src, size_t size);
 int b64_encode (char *dest, const char *src, int len);
 
 class mzpSAXHandler{
@@ -551,6 +551,7 @@ private:
   void  pushChromatogram();
   void  pushSpectrum();  // Load current data into pvSpec, may have to guess charge
   f_off readIndexOffset();
+  bool  generateIndexOffset();
   void  stopParser();
 
   //  mzpSAXMzmlHandler Base64 conversion functions
@@ -649,6 +650,7 @@ private:
   //  mzpSAXMzxmlHandler private functions
   void  pushSpectrum();  // Load current data into pvSpec, may have to guess charge
   f_off readIndexOffset();
+  bool  generateIndexOffset();
   void  stopParser();
 
   //  mzpSAXMzxmlHandler Base64 conversion functions
@@ -1585,7 +1587,7 @@ public:
   std::vector<cindex>*  getChromatIndex();
   int   highChromat();
   int   highScan();
-  bool  load(char* fname);
+  bool  load(const char* fname);
   int   lowScan();
   bool  readChromatogram(int num=-1);
   bool  readSpectrum(int num=-1);
@@ -1601,7 +1603,7 @@ protected:
 
 private:
   //private functions
-  int checkFileType(char* fname);
+  int checkFileType(const char* fname);
 
   //private data members
   BasicChromatogram*  chromat;

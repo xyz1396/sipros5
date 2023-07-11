@@ -3,9 +3,11 @@
 
 add_executable(SiprosEnsembleOMP ${SRC_LIST} ${PROJECT_SOURCE_DIR}/openmp/main.cpp)
 
-# target_compile_options(SiprosEnsembleOMP PUBLIC -ffast-math -march=native)
-target_compile_options(SiprosEnsembleOMP PUBLIC -ffast-math)
+target_compile_options(SiprosEnsembleOMP PUBLIC -ffast-math -march=native)
+# target_compile_options(SiprosEnsembleOMP PUBLIC -ffast-math)
 
-target_link_libraries(SiprosEnsembleOMP PUBLIC OpenMP::OpenMP_CXX MStoolkit gomp dl -static)
+# target_link_libraries(SiprosEnsembleOMP PUBLIC OpenMP::OpenMP_CXX MStoolkit gomp dl -static)
+# for conda only have libgomp.so
+target_link_libraries(SiprosEnsembleOMP PUBLIC OpenMP::OpenMP_CXX MStoolkit gomp dl)
 
 target_compile_definitions(SiprosEnsembleOMP PUBLIC GCC _FILE_OFFSET_BITS=64)

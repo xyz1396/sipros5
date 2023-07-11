@@ -30,73 +30,65 @@ using namespace std;
 //  delete spectraData;
 //}
 
-string CInputs::addSearchDatabase(string& s){
-  //check if DB is already in list
+CSearchDatabase* CInputs::addSearchDatabase(string loc){
+
   size_t i;
-  for (i = 0; i < searchDatabase.size(); i++){
-    if (searchDatabase[i].location.compare(s) == 0) return searchDatabase[i].id;
-  }
+
+  //not using the path+name (i.e. location) anymore. This causes duplicates when someone passes the same file from multiple locations.
+  //check if DB is already in list  
+  //for (i = 0; i < searchDatabase.size(); i++){
+  //  if (searchDatabase[i].location.compare(loc) == 0) return &searchDatabase[i];
+  //}
 
   CSearchDatabase sdb;
   char cID[32];
-  sprintf(cID, "SDB%zu", spectraData.size());
+  sprintf(cID, "SDB%d", (int)spectraData.size());
   sdb.id = cID;
-  sdb.location = s;
-  i = s.find_last_of("\\/");
-  sdb.databaseName.userParam.name = s.substr(i + 1);
+  sdb.location = loc;
+  i = loc.find_last_of("\\/");
+  sdb.databaseName.userParam.name = loc.substr(i + 1);
   
-  i = s.find_last_of(".");
-  string format = s.substr(i+1);
+  i = loc.find_last_of(".");
+  string format = loc.substr(i+1);
   if (format.compare("fasta") == 0){
     sdb.fileFormat.cvParam.cvRef = "PSI-MS";
     sdb.fileFormat.cvParam.accession = "MS:1001348";
     sdb.fileFormat.cvParam.name = "FASTA format";
   }
 
+  //check if DB is already in list  
+  for (i = 0; i < searchDatabase.size(); i++){
+    if (searchDatabase[i].databaseName.userParam.name.compare(sdb.databaseName.userParam.name) == 0) return &searchDatabase[i];
+  }
+
   //TODO: add optional information
 
   searchDatabase.push_back(sdb);
-  return sdb.id;
+  return &searchDatabase.back();
 }
 
 //Adds the spectrum data file information and returns a reference id.
 //FileFormat is determined by evaluating the extension
-string CInputs::addSpectraData(string& s){
-  //overwrite null file
-  //if (spectraData->at(0).id.compare("null") == 0) spectraData->clear();
+CSpectraData* CInputs::addSpectraData(string loc){
 
   //check if file is already in list
   size_t i;
   for (i = 0; i < spectraData.size(); i++){
-    if (spectraData[i].location.compare(s) == 0) return spectraData[i].id;
+    if (spectraData[i].location.compare(loc) == 0) return &spectraData[i];
   }
 
-  CSpectraData sd;
+  CSpectraData c;
   char cID[32];
-  sprintf(cID, "SF%zu", spectraData.size());
-  sd.id = cID;
-  sd.location = s;
+  sprintf(cID, "SF%d", (int)spectraData.size());
+  c.id = cID;
+  c.location = loc;
 
   //TODO: check file format & spectrumIDFormat (I think this is the spectrum.scan.scan.charge format....)
-  sd.fileFormat.cvParam = checkFileFormat(s);
-  sd.spectrumIDFormat.cvParam = checkSpectrumIDFormat(sd.fileFormat.cvParam);
-
-  spectraData.push_back(sd);
-  return sd.id;
-}
-
-string CInputs::addSpectraData(CSpectraData& c){
-  //overwrite null file
-  //if (spectraData->at(0).id.compare("null") == 0) spectraData->clear();
-
-  if (c.id.compare("null") == 0){
-    char cID[32];
-    sprintf(cID, "SF%zu", spectraData.size());
-    c.id = cID;
-  }
+  c.fileFormat.cvParam = checkFileFormat(loc);
+  c.spectrumIDFormat.cvParam = checkSpectrumIDFormat(c.fileFormat.cvParam);
 
   spectraData.push_back(c);
-  return c.id;
+  return &spectraData.back();
 }
 
 sCvParam CInputs::checkFileFormat(string s){
@@ -109,8 +101,20 @@ sCvParam CInputs::checkFileFormat(string s){
   i = s.rfind('.');
   if (i != string::npos){
     ext = s.substr(i);
-    for (i = 0; i<ext.size(); i++) ext[i] = toupper(ext[i]);
-    if (ext.compare(".MGF") == 0) {
+    for (size_t a = 0; a<ext.size(); a++) ext[a] = toupper(ext[a]);
+    if (ext.compare(".GZ") == 0) {
+      size_t j = s.rfind('.',i-1);
+      string ext2=s.substr(j);
+      for (size_t a = 0; a < ext2.size(); a++) ext2[a] = toupper(ext2[a]);
+      if(ext2.compare(".MZML.GZ")==0){
+        cv.accession = "MS:1000584"; cv.name = "mzML format";
+      } else if(ext2.compare(".MZXML.GZ")==0){
+        cv.accession = "MS:1000566"; cv.name = "ISB mzXML format";
+      } else {
+        cerr  << "mzIMLTools CInputs::checkFileFormat(): Cannot find CV for extension: " << ext2 << endl;
+        exit(1);
+      }
+    } else if (ext.compare(".MGF") == 0) {
       cv.accession="MS:1001062"; cv.name="Mascot MGF file";
     } else if (ext.compare(".MZXML") == 0){
       cv.accession = "MS:1000566"; cv.name = "ISB mzXML format";
@@ -118,6 +122,9 @@ sCvParam CInputs::checkFileFormat(string s){
       cv.accession = "MS:1000584"; cv.name = "mzML format";
     } else if (ext.compare(".MZ5") == 0){
       cv.accession = "MS:1001881"; cv.name = "mz5 format";
+    } else {
+      cerr << "mzIMLTools CInputs::checkFileFormat(): Cannot find CV for extension: " << ext << endl;
+      exit(1);
     }
   }
   if (cv.accession.compare("null") != 0) cv.cvRef = "PSI-MS";
@@ -135,6 +142,8 @@ sCvParam CInputs::checkSpectrumIDFormat(sCvParam& s){
     cv.accession = "MS:1001530"; cv.name = "mzML unique identifier";
   } else if (s.accession.compare("MS:1000566") == 0){ //note that mzXML is being given mzML identifier
     cv.accession = "MS:1001530"; cv.name = "mzML unique identifier"; 
+  } else if (s.accession.compare("MS:1001062") == 0){ 
+    cv.accession = "MS:1000774"; cv.name = "multiple peak list nativeID format";
   }
   if (cv.accession.compare("null") != 0) cv.cvRef = "PSI-MS";
 

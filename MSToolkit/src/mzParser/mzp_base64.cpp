@@ -115,15 +115,15 @@ inline int getPosition( char buf )
 
 
 // Returns the total number of bytes decoded
-int mzParser::b64_decode_mio ( char *dest,  char *src, size_t size )
+int mzParser::b64_decode_mio ( char *dest,  const char *src, size_t size )
 {
 	char *temp = dest;
 	char *end = dest + size;
 
 	for (;;)
 	{
-		int a;
-		int b;
+		int register a;
+		int register b;
 		int t1,t2,t3,t4;
 
 		if (!(t1 = *src++) || !(t2 = *src++) || !(t3 = *src++) || !(t4 = *src++))

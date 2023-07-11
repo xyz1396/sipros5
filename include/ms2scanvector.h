@@ -6,6 +6,7 @@
 #include <sstream>
 #include <vector>
 #include <algorithm>
+#include <filesystem>
 
 #include "ms2scan.h"
 #include "tokenvector.h"
