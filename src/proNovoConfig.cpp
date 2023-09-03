@@ -92,6 +92,13 @@ int ProNovoConfig::iRank = 0;
 double AminoAcidMasses::dNULL = -1;
 double AminoAcidMasses::dERROR = -2;
 
+string ProNovoConfig::SIPelement = "C";
+double ProNovoConfig::minValue = 0;
+double ProNovoConfig::fold = 0;
+double ProNovoConfig::deductionCoefficient = 0;
+// carbon isotopic delta mass in default
+double ProNovoConfig::neutronMass = 1.003355;
+
 AminoAcidMasses::AminoAcidMasses() {
 	vdMasses.clear();
 	vdMasses.resize(AminoAcidMassesSize, 0);
@@ -162,6 +169,10 @@ bool ProNovoConfig::setFilename(const string & sConfigFileName) {
 
 	//parse neutral loss
 	ProNovoConfigSingleton->NeutralLoss();
+
+	// compute deduction coefficient in score function
+	// only suitbale for carbon SIP now
+	ProNovoConfigSingleton->setDeductionCoefficient();
 
 	// If everything goes fine return 0.
 	return true;
@@ -584,3 +595,24 @@ bool ProNovoConfig::getPeptideMassWindows(double dPeptideMass, vector<pair<doubl
 	return bReVal;
 }
 
+// compute deduction coefficient in score function
+// only suitbale for carbon and nitrogen SIP now
+void ProNovoConfig::setDeductionCoefficient()
+{
+	getConfigValue("[Stable_Isotope_Probing]SIP_Element", getSetSIPelement());
+	string minValueStr, foldStr;
+	getConfigValue("[Stable_Isotope_Probing]minValue", minValueStr);
+	getSetMinValue() = stod(minValueStr);
+	getConfigValue("[Stable_Isotope_Probing]fold", foldStr);
+	getSetFold() = stod(foldStr);
+	if (getSetSIPelement() == "N")
+	{
+		// average averagin delta mass in N15 labeling
+		neutronMass = 0.9991403;
+		deductionCoefficient =
+			-(getSetMinValue() + getSetFold() * std::pow((configIsotopologue.get_vAtomIsotopicDistribution()[3].vProb[1] - 0.5), 8));
+	}
+	else
+		deductionCoefficient =
+			-(getSetMinValue() + getSetFold() * std::pow((configIsotopologue.get_vAtomIsotopicDistribution()[0].vProb[1] - 0.5), 8));
+}

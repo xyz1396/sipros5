@@ -19,32 +19,41 @@ using namespace std;
 typedef long long INT64;
 
 // To keep time information of functions.
-#define CLOCKSTART INT64 mem_start = checkMemoryUsage(); double begin = omp_get_wtime(); cout<<"Currently in file: " << __FILE__ << " Function: "<< __FUNCTION__ << "()" << endl;
-#define CLOCKSTOP INT64 mem_end = checkMemoryUsage(); double end = omp_get_wtime(); cout << "Function " << __FUNCTION__ << "() finished in " <<(end - begin)<< " Seconds." << endl << "Memory used: " << mem_end << " - " <<  mem_start << " = "<< mem_end - mem_start << " MB."<< endl << endl;
+#define CLOCKSTART                        \
+	INT64 mem_start = checkMemoryUsage(); \
+	double begin = omp_get_wtime();       \
+	cout << "Currently in file: " << __FILE__ << " Function: " << __FUNCTION__ << "()" << endl;
+#define CLOCKSTOP                                                                                              \
+	INT64 mem_end = checkMemoryUsage();                                                                        \
+	double end = omp_get_wtime();                                                                              \
+	cout << "Function " << __FUNCTION__ << "() finished in " << (end - begin) << " Seconds." << endl           \
+		 << "Memory used: " << mem_end << " - " << mem_start << " = " << mem_end - mem_start << " MB." << endl \
+		 << endl;
 
 // Get the memory usage with a Linux kernel.
 inline unsigned int checkMemoryUsage()
 {
-    // get KB memory into count
-    unsigned int count=0;
+	// get KB memory into count
+	unsigned int count = 0;
 
-    #if defined(__linux__)
-    ifstream f("/proc/self/status"); // read the linux file
-    while(!f.eof()){
-        string key;
-        f>>key;
-        if(key=="VmData:"){     // size of data
-            f>>count;
-        break;
-        }
-    }
-    f.close();
-    #endif
+#if defined(__linux__)
+	ifstream f("/proc/self/status"); // read the linux file
+	while (!f.eof())
+	{
+		string key;
+		f >> key;
+		if (key == "VmData:")
+		{ // size of data
+			f >> count;
+			break;
+		}
+	}
+	f.close();
+#endif
 
-    // return MBs memory (size of data)
-    return (count/1024);
+	// return MBs memory (size of data)
+	return (count / 1024);
 };
-
 
 class Isotopologue;
 
@@ -53,48 +62,51 @@ class Isotopologue;
 #define NUM_ION_SERIES 9
 #define NUM_SP_IONS 200 // num ions for preliminary scoring
 
-#define ION_SERIES_A                0
-#define ION_SERIES_B                1
-#define ION_SERIES_C                2
-#define ION_SERIES_X                3
-#define ION_SERIES_Y                4
-#define ION_SERIES_Z                5
+#define ION_SERIES_A 0
+#define ION_SERIES_B 1
+#define ION_SERIES_C 2
+#define ION_SERIES_X 3
+#define ION_SERIES_Y 4
+#define ION_SERIES_Z 5
 
-#define SPARSE_MATRIX_SIZE          100
-#define FLOAT_ZERO                  1e-6     // 0.000001
+#define SPARSE_MATRIX_SIZE 100
+#define FLOAT_ZERO 1e-6 // 0.000001
 
-#define MAX_FRAGMENT_CHARGE         5
-#define MAX_PEPTIDE_LEN             150       // max # of AA for a peptide
+#define MAX_FRAGMENT_CHARGE 5
+#define MAX_PEPTIDE_LEN 150 // max # of AA for a peptide
 
-struct Options             // output parameters
+struct Options // output parameters
 {
-	int iNumStored;               // # of search results to store for xcorr analysis
+	int iNumStored; // # of search results to store for xcorr analysis
 	int iStartCharge;
 	int iEndCharge;
 	int iMaxFragmentCharge;
 	int iMaxPrecursorCharge;
-	int iRemovePrecursor;         // 0=no, 1=yes, 2=ETD precursors
+	int iRemovePrecursor; // 0=no, 1=yes, 2=ETD precursors
 	double dMinIntensity;
 	double dRemovePrecursorTol;
 
-	Options() {
-		iNumStored = 0;               // # of search results to store for xcorr analysis
+	Options()
+	{
+		iNumStored = 0; // # of search results to store for xcorr analysis
 		iStartCharge = 0;
 		iEndCharge = 0;
 		iMaxFragmentCharge = 0;
 		iMaxPrecursorCharge = 0;
-		iRemovePrecursor = 0;         // 0=no, 1=yes, 2=ETD precursors
+		iRemovePrecursor = 0; // 0=no, 1=yes, 2=ETD precursors
 		dMinIntensity = 0;
 		dRemovePrecursorTol = 0;
 	}
 };
 
-struct IonInfo {
+struct IonInfo
+{
 	int iNumIonSeriesUsed;
 	int piSelectedIonSeries[NUM_ION_SERIES];
 	int bUseNeutralLoss;
 	int iIonVal[NUM_ION_SERIES];
-	IonInfo() {
+	IonInfo()
+	{
 		bUseNeutralLoss = 0;
 		iIonVal[ION_SERIES_A] = 0;
 		iIonVal[ION_SERIES_B] = 1;
@@ -108,12 +120,13 @@ struct IonInfo {
 	}
 };
 
-struct PrecalcMasses {
-	double dNtermProton;          // dAddNterminusPeptide + PROTON_MASS
-	double dCtermOH2Proton;       // dAddCterminusPeptide + dOH2fragment + PROTON_MASS
-	double dCtermOH2;       // dAddCterminusPeptide + dOHfragment
-	double dOH2ProtonCtermNterm;  // dOH2parent + PROTON_MASS + dAddCterminusPeptide + dAddNterminusPeptide
-	int iMinus17HighRes; // BIN'd value of mass(NH3)
+struct PrecalcMasses
+{
+	double dNtermProton;		 // dAddNterminusPeptide + PROTON_MASS
+	double dCtermOH2Proton;		 // dAddCterminusPeptide + dOH2fragment + PROTON_MASS
+	double dCtermOH2;			 // dAddCterminusPeptide + dOHfragment
+	double dOH2ProtonCtermNterm; // dOH2parent + PROTON_MASS + dAddCterminusPeptide + dAddNterminusPeptide
+	int iMinus17HighRes;		 // BIN'd value of mass(NH3)
 	int iMinus17LowRes;
 	int iMinus18HighRes; // BIN'd value of mass(H2O)
 	int iMinus18LowRes;
@@ -125,7 +138,8 @@ struct PrecalcMasses {
 
 #define AminoAcidMassesSize 256
 // store the mass for different amino acids
-class AminoAcidMasses{
+class AminoAcidMasses
+{
 public:
 	static double dNULL;
 	static double dERROR;
@@ -143,102 +157,118 @@ public:
 
 	double operator[](char _cAminoAcid) const;
 
-	double & operator[](char _cAminoAcid);
-
+	double &operator[](char _cAminoAcid);
 };
 //--------------Comet End------------
-class ProNovoConfig {
+class ProNovoConfig
+{
 public:
 	/*
 	 * Sets up sessionwide configuration
 	 * the configurations are loaded in to memory as static variables
 	 */
 
-	static bool setFilename(const string & sConfigFileName);
+	static bool setFilename(const string &sConfigFileName);
 
-	static bool setWorkingDirectory(const string & sDirectoryName);
+	static bool setWorkingDirectory(const string &sDirectoryName);
 
-	static vector<pair<string, string> > getNeutralLossList() {
+	static vector<pair<string, string>> getNeutralLossList()
+	{
 		return vpNeutralLossList;
 	}
 
-	static string getWorkingDirectory() {
+	static string getWorkingDirectory()
+	{
 		return sWorkingDirectory;
 	}
 
-	static string getSearchName() {
+	static string getSearchName()
+	{
 		return sSearchName;
 	}
 
-	static string getSearchType() {
+	static string getSearchType()
+	{
 		return sSearchType;
 	}
 
 	static char getSeparator();
 
 	// retrieve <FASTA_Database>
-	static string getFASTAfilename() {
+	static string getFASTAfilename()
+	{
 		return sFASTAFilename;
 	}
 
 	// retrieve <Fragmentation_Method>
-	static string getFragmentationMethod() {
+	static string getFragmentationMethod()
+	{
 		return sFragmentationMethod;
 	}
 
 	// retrieve the Minimum length of a peptide
-	static int getMinPeptideLength() {
+	static int getMinPeptideLength()
+	{
 		return iMinPeptideLength;
 	}
 
 	// retrieve the max length of a peptide
-	static int getMaxPeptideLength() {
+	static int getMaxPeptideLength()
+	{
 		return iMaxPeptideLength;
 	}
 
 	// retrieve <Mass_Accuracy>	<Parent_Ion>
-	static double getMassAccuracyParentIon() {
+	static double getMassAccuracyParentIon()
+	{
 		return dMassAccuracyParentIon;
 	}
 
 	// retrieve <Mass_Accuracy>	<Fragment_Ions>
-	static double getMassAccuracyFragmentIon() {
+	static double getMassAccuracyFragmentIon()
+	{
 		return dMassAccuracyFragmentIon;
 	}
 
 	// retrieve <Parent_Mass_Windows>
-	static vector<int> getParentMassWindows() {
+	static vector<int> getParentMassWindows()
+	{
 		return viParentMassWindows;
 	}
 
 	static bool getPeptideMassWindows(double dPeptideMass,
-			vector<pair<double, double> > & vpPeptideMassWindows);
+									  vector<pair<double, double>> &vpPeptideMassWindows);
 
 	// retrieve <Max_PTM_Count>
-	static int getMaxPTMcount() {
+	static int getMaxPTMcount()
+	{
 		return iMaxPTMcount;
 	}
 
 	// retrieve <Cleavage_Rules>
-	static string getCleavageAfterResidues() {
+	static string getCleavageAfterResidues()
+	{
 		return sCleavageAfterResidues;
 	}
-	static string getCleavageBeforeResidues() {
+	static string getCleavageBeforeResidues()
+	{
 		return sCleavageBeforeResidues;
 	}
-	static int getMaxMissedCleavages() {
+	static int getMaxMissedCleavages()
+	{
 		return iMaxMissedCleavages;
 	}
-	static bool getTestStartRemoval() {
+	static bool getTestStartRemoval()
+	{
 		return bTestStartRemoval;
 	}
 
-	static bool getPTMinfo(map<string, string> & mPTMinfo);
+	static bool getPTMinfo(map<string, string> &mPTMinfo);
 
 	// retrieve <ATOM_ISOTOPIC_COMPOSITION>
 	// the input character is the atom name CHONPS
 	static bool getAtomIsotopicComposition(char cAtom,
-			vector<double> & vdAtomicMass, vector<double> & vdComposition);
+										   vector<double> &vdAtomicMass, vector<double> &vdComposition);
 
 	static Isotopologue configIsotopologue;
 	static vector<string> vsSingleResidueNames;
@@ -246,40 +276,47 @@ public:
 
 	static double getResidueMass(string sResidue);
 
-	static double getTerminusMassN() {
+	static double getTerminusMassN()
+	{
 		return dTerminusMassN;
 	}
-	static double getTerminusMassC() {
+	static double getTerminusMassC()
+	{
 		return dTerminusMassC;
 	}
 
-	static double getProtonMass() {
+	static double getProtonMass()
+	{
 		return 1.007276466;
 	}
 
-	static double getNeutronMass() {
-		return 1.003355;
+	static double getNeutronMass()
+	{
+		// return 1.003355;
+		// adjust for 15N and 13C
+		return neutronMass;
 	}
 
-	static double dnorm(double mean, double sd, double x) {
+	static double dnorm(double mean, double sd, double x)
+	{
 		double SQRT2PI = 2.506628;
 		double a = (x - mean) / sd;
 		return exp(-a * a / 2) / (SQRT2PI * sd);
 	}
 
 	static double pnorm(double dMean, double dStandardDeviation,
-			double dRandomVariable) {
+						double dRandomVariable)
+	{
 		double dZScore = (dRandomVariable - dMean) / dStandardDeviation;
 		double dProbability = 0.5 * erfc(-dZScore / sqrt(2.0));
 		return dProbability;
 	}
 
-	static double scoreError(double dMassError) {
+	static double scoreError(double dMassError)
+	{
 
 		//	pnorm function
-		return (1.0
-				- pnorm(0, (getMassAccuracyFragmentIon() / 2), fabs(dMassError)))
-				* 2.0;
+		return (1.0 - pnorm(0, (getMassAccuracyFragmentIon() / 2), fabs(dMassError))) * 2.0;
 
 		//	dnorm function
 		//	return  ( dnorm( 0, (getMassAccuracyFragmentIon() / 2.0), fabs(dMassError) ) ) /
@@ -287,13 +324,21 @@ public:
 
 		//  sigmoid function
 		//	return ( 1/(1+exp(dMassError*600-3)));
-
 	}
+
+	static string &getSetSIPelement() { return SIPelement; }
+	static double &getSetMinValue() { return minValue; }
+	static double &getSetFold() { return fold; }
+	// compute deduction coefficient in score function
+	// only suitbale for carbon and nitrogen SIP now
+	static void setDeductionCoefficient();
+	// get deduction coefficient in score function
+	static double getDeductionCoefficient() { return deductionCoefficient; }
 
 	//---------------Comet Begin---------------------
 	static bool bXcorrEnable;
 	static Options options;
-	static double dInverseBinWidth; // this is used in BIN() many times so use inverse binWidth to do multiply vs. divide
+	static double dInverseBinWidth;	  // this is used in BIN() many times so use inverse binWidth to do multiply vs. divide
 	static double dOneMinusBinOffset; // this is used in BIN() many times so calculate once
 	static IonInfo ionInformation;
 	static int iXcorrProcessingOffset;
@@ -341,8 +386,7 @@ protected:
 	ProNovoConfig();
 
 private:
-
-	static ProNovoConfig* ProNovoConfigSingleton;
+	static ProNovoConfig *ProNovoConfigSingleton;
 
 	// the filename of the configuration file
 	static string sFilename;
@@ -353,8 +397,8 @@ private:
 	static string sWorkingDirectory;
 
 	// replace delimitor in a line
-	static void replaceDelimitor(string & sLine, char cOldDelimitor,
-			char cNewDelimitor);
+	static void replaceDelimitor(string &sLine, char cOldDelimitor,
+								 char cNewDelimitor);
 
 	// variables from the PEPTIDE_IDENTIFICATION element
 	static string sFASTAFilename;
@@ -374,19 +418,23 @@ private:
 	static double dMassAccuracyFragmentIon;
 	static vector<int> viParentMassWindows;
 
-	static vector<pair<double, double> > vpPeptideMassWindowOffset;
+	static vector<pair<double, double>> vpPeptideMassWindowOffset;
 
-	static vector<pair<string, string> > vpNeutralLossList;
+	static vector<pair<string, string>> vpNeutralLossList;
 
 	static double dTerminusMassN;
 	static double dTerminusMassC;
 
 	static string sElementList;
 
+	static string SIPelement;
+	// for deductionCoefficient compute in SIP search
+	static double neutronMass, deductionCoefficient, minValue, fold;
+
 	// this is used to setup configIsotopologue
 	// retrieve Elemental composition of amino acid residues
 	static bool getResidueElementalComposition(
-			string & sResidueElementalComposition);
+		string &sResidueElementalComposition);
 
 	static bool calculatePeptideMassWindowOffset();
 
@@ -400,21 +448,21 @@ private:
 	// parse the cfg file to populate mapConfigKeyValues
 	bool parseConfigKeyValues();
 
-	bool parseConfigLine(const string & sLine);
+	bool parseConfigLine(const string &sLine);
 
 	// get the value of a key;
 	// return false, if can't find the key in the mapConfigKeyValues
-	static bool getConfigValue(string sConfigKey, string & sConfigValue);
+	static bool getConfigValue(string sConfigKey, string &sConfigValue);
 
 	// get a set of key-value pairs, given a master key
 	// return false, if can't find the key in the mapConfigKeyValues
 	static bool getConfigMasterKeyValue(string sMasterKey,
-			map<string, string> & mapKeyValueSet);
+										map<string, string> &mapKeyValueSet);
 
 	// new version based on cfg config files
 	bool getParameters();
 
-	//handle neural loss
+	// handle neural loss
 	static void NeutralLoss();
 };
 

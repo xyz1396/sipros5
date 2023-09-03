@@ -13,7 +13,8 @@
 using namespace std;
 
 /**/
-class IsotopeDistribution {
+class IsotopeDistribution
+{
 public:
 	IsotopeDistribution();
 	IsotopeDistribution(vector<double> vItsMass, vector<double> vItsComposition);
@@ -31,20 +32,20 @@ public:
 	// print out the isotoptic distribution
 	// this is mainly used for debuging
 	void print();
-
 };
 
-class Isotopologue {
+class Isotopologue
+{
 public:
 	Isotopologue();
 	~Isotopologue();
 
 	// setup all variables from configuration
-	bool setupIsotopologue(const string & sTable, const string & AtomNameInput);
+	bool setupIsotopologue(const string &sTable, const string &AtomNameInput);
 
 	// get the MostAbundant masses of  residues
-	bool getSingleResidueMostAbundantMasses(vector<string> & vsResidues, vector<double> & vdMostAbundantMasses, double & dTerminusMassN,
-			double & dTerminusMassC);
+	bool getSingleResidueMostAbundantMasses(vector<string> &vsResidues, vector<double> &vdMostAbundantMasses, double &dTerminusMassN,
+											double &dTerminusMassC);
 
 	// compute the mass of the most abundant isotopologue
 	double computeMostAbundantMass(string sSequence);
@@ -56,32 +57,39 @@ public:
 	// The first dimension of vvdYionMass and vvdYionProb is from y1, y2, ...
 	// The first dimension of vvdBionMass and vvdBionProb is from b1, b2, ...
 	// the mass is calculated assuming cleavage of the peptide bond
-	bool computeProductIon(string sSequence, vector<vector<double> > & vvdYionMass, vector<vector<double> > & vvdYionProb,
-			vector<vector<double> > & vvdBionMass, vector<vector<double> > & vvdBionProb);
+	bool computeProductIon(string sSequence, vector<vector<double>> &vvdYionMass, vector<vector<double>> &vvdYionProb,
+						   vector<vector<double>> &vvdBionMass, vector<vector<double>> &vvdBionProb);
 
 	// compute isotoptic distribution for an amino acid sequence
-	bool computeIsotopicDistribution(string sSequence, IsotopeDistribution & myIsotopeDistribution);
+	bool computeIsotopicDistribution(string sSequence, IsotopeDistribution &myIsotopeDistribution);
 
 	// compute isotoptic distribution for a given atomic composition,
 	// which can be that of a residue's or a amino acid sequence's
-	bool computeIsotopicDistribution(vector<int> AtomicComposition, IsotopeDistribution & myIsotopeDistribution);
+	bool computeIsotopicDistribution(vector<int> AtomicComposition, IsotopeDistribution &myIsotopeDistribution);
 
 	// compute the atomic composition for an amino acid sequence
-	bool computeAtomicComposition(string sSequence, vector<int> & myAtomicComposition);
+	bool computeAtomicComposition(string sSequence, vector<int> &myAtomicComposition);
+
+	vector<IsotopeDistribution> &get_vAtomIsotopicDistribution()
+	{
+		return vAtomIsotopicDistribution;
+	}
 
 private:
 	// emass functions for IsotopeDistribution's arithmetic
-	IsotopeDistribution sum(const IsotopeDistribution & distribution0, const IsotopeDistribution & distribution1);
+	IsotopeDistribution sum(const IsotopeDistribution &distribution0, const IsotopeDistribution &distribution1);
 	// functions for IsotopeDistribution's arithmetic
-	IsotopeDistribution sum_backup(const IsotopeDistribution & distribution0, const IsotopeDistribution & distribution1);
-	IsotopeDistribution multiply(const IsotopeDistribution & distribution0, int count);
-	void shiftMass(IsotopeDistribution & distribution0, double dMass);
+	IsotopeDistribution sum_backup(const IsotopeDistribution &distribution0, const IsotopeDistribution &distribution1);
+	IsotopeDistribution multiply(const IsotopeDistribution &distribution0, int count);
+	void shiftMass(IsotopeDistribution &distribution0, double dMass);
 
 	// implementation of max and min
-	double maximum(double a, double b) {
+	double maximum(double a, double b)
+	{
 		return (a > b) ? a : b;
 	}
-	double minimum(double a, double b) {
+	double minimum(double a, double b)
+	{
 		return (a < b) ? a : b;
 	}
 
@@ -100,13 +108,13 @@ private:
 	unsigned int AtomNumber;
 
 	// variables for this isotopologue
-	map<string, vector<int> > mResidueAtomicComposition;
+	map<string, vector<int>> mResidueAtomicComposition;
 	vector<IsotopeDistribution> vAtomIsotopicDistribution;
 	map<string, IsotopeDistribution> vResidueIsotopicDistribution;
 
 	// Sipros Ensemble
 	// emass needs the mass to be one nucleus difference
-	bool CheckMass(vector<double> & vdMass, vector<double> & vdNaturalCompositionTemp);
+	bool CheckMass(vector<double> &vdMass, vector<double> &vdNaturalCompositionTemp);
 };
 
-#endif //ISOTOPOLOGUE_H
+#endif // ISOTOPOLOGUE_H

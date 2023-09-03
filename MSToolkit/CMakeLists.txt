@@ -17,7 +17,8 @@ add_library(MStoolkit ${expatSRC} ${MSToolkitSRC} ${mzIMLToolsSRC} ${mzParserSRC
 # target_compile_definitions(MStoolkit PUBLIC GCC HAVE_GETRANDOM _FILE_OFFSET_BITS=64 _NO_THERMORAW _NOSQLITE)
 ## for kernel version < 3.17 without SYS_getrandom
 # target_compile_definitions(MStoolkit PUBLIC GCC HAVE_SYSCALL_GETRANDOM _FILE_OFFSET_BITS=64 _NO_THERMORAW _NOSQLITE)
-target_compile_definitions(MStoolkit PUBLIC GCC XML_POOR_ENTROPY _FILE_OFFSET_BITS=64 _NO_THERMORAW _NOSQLITE)
+# target_compile_definitions(MStoolkit PUBLIC GCC XML_POOR_ENTROPY _FILE_OFFSET_BITS=64 _NO_THERMORAW _NOSQLITE)
+target_compile_definitions(MStoolkit PUBLIC GCC XML_DEV_URANDOM _FILE_OFFSET_BITS=64 _NO_THERMORAW _NOSQLITE)
 ## add sqlite
 # target_compile_definitions(MStoolkit PUBLIC GCC HAVE_GETRANDOM _FILE_OFFSET_BITS=64 _NO_THERMORAW)
 

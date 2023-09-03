@@ -305,6 +305,7 @@ public:
 	//-----------WDP End---------------------
 	double scoreWeightSum(string * currentPeptide, vector<double> * pvdYionMass, vector<double> * pvdBionMass);
 	// void scoreRankSum_test(Peptide * currentPeptide);
+	double scoreIntensity(const bool observed, const double realIntensity, const double expectedIntensity);
 	double scoreWeightSumHighMS2(string * currentPeptide, vector<vector<double> > * vvdYionMass,
 			vector<vector<double> > * vvdYionProb, vector<vector<double> > * vvdBionMass,
 			vector<vector<double> > * vvdBionProb);
