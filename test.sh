@@ -44,16 +44,16 @@ case $1 in
     wait
 
     printf "\n=====Filter PSM=====\n\n"
-    conda activate py2
+    conda activate sklearn
     starttime=$(date +'%Y-%m-%d %H:%M:%S')
-    python ../script/sipros_psm_tabulating.py \
+    python ../script3/sipros_psm_tabulating.py \
         -i regular \
         -c SiprosEnsembleConfig.cfg -o regular
-    python ../script/sipros_ensemble_filtering.py \
-        -i regular/*.tab \
+    python ../script3/sipros_ensemble_filtering.py \
+        -i regular \
         -c SiprosEnsembleConfig.cfg \
         -o regular
-    python ../script/sipros_peptides_assembling.py \
+    python ../script3/sipros_peptides_assembling.py \
         -c SiprosEnsembleConfig.cfg \
         -w regular
     endtime=$(date +'%Y-%m-%d %H:%M:%S')
@@ -74,16 +74,16 @@ case $1 in
     wait
 
     printf "\n=====Filter PSM=====\n\n"
-    conda activate py2
+    conda activate sklearn
     starttime=$(date +'%Y-%m-%d %H:%M:%S')
-    python ../script/sipros_psm_tabulating.py \
+    python ../script3/sipros_psm_tabulating.py \
         -i sip \
         -c SiprosEnsembleC13.cfg -o sip
-    python ../script/sipros_ensemble_filtering.py \
-        -i sip/*.tab \
+    python ../script3/sipros_ensemble_filtering.py \
+        -i sip \
         -c SiprosEnsembleC13.cfg \
         -o sip
-    python ../script/sipros_peptides_assembling.py \
+    python ../script3/sipros_peptides_assembling.py \
         -c SiprosEnsembleC13.cfg \
         -w sip
     endtime=$(date +'%Y-%m-%d %H:%M:%S')

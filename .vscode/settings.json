@@ -15,5 +15,9 @@
         "system_error": "c",
         "xmlfile.h": "c",
         "fcntl.h": "c"
-    }
+    },
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.autopep8"
+    },
+    "python.formatting.provider": "none"
 }

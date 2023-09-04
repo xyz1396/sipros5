@@ -10,10 +10,11 @@ import csv
 import math
 import re
 
-try:
-    from sets import Set
-except ImportError:
-    pass
+# py3 use set()
+# try:
+#     from sets import Set
+# except ImportError:
+#     pass
 
 from datetime import datetime, date, time
 from collections import namedtuple
@@ -493,7 +494,7 @@ def read_psm_table(input_file):
     
     # read line with csv
     for file_str in sip_files_list:
-        f = csv.reader(CommentedFile(open(file_str, 'rb')), delimiter='\t')
+        f = csv.reader(CommentedFile(open(file_str, 'r')), delimiter='\t')
         # skip header
         _sHeader = next(f)
         # get data
@@ -571,7 +572,7 @@ def show_Fdr_Pep(psm_list, fdr_float, charge_left_given = -1, charge_right_given
     
     list_sorted = sorted(psm_list, key=lambda x: (-x.fPredictProbability, -x.fMassDiff, -x.PTMscore, x.IdentifiedPeptide))
     
-    peptide_set = Set()
+    peptide_set = set()
     num_forward_pep = 0
     num_training_pep = 0
     num_testing_pep = 0
@@ -856,7 +857,7 @@ def generate_Prophet_features_sip_diff(lPsm, config_dict):
     # peptide without PTM dictionary is for OPSC, original peptide
     peptide_dict = {}
     peptide_protein_dict = {}
-    # psm_set = Set()
+    # psm_set = set()
     for oPsm in lPsm:
         oPsm.NMC = get_num_missed_cleavage_sites(oPsm.OriginalPeptide, 
                                                  config_dict[pep_iden_str + cleave_after_residues_str],
@@ -1098,7 +1099,7 @@ def generate_Prophet_features_test(lPsm, config_dict):
     # peptide without PTM dictionary is for OPSC
     peptide_dict = {}
     peptide_protein_dict = {}
-    # psm_set = Set()
+    # psm_set = set()
     for oPsm in lPsm:
         oPsm.NMC = get_num_missed_cleavage_sites(oPsm.OriginalPeptide, 
                                                  config_dict[pep_iden_str + cleave_after_residues_str],
@@ -1569,7 +1570,7 @@ def generate_psm_pep_txt(base_out, out_folder, psm_filtered_list, config_dict):
     psm_decoy_int = 0
     pep_target_int = 0
     pep_decoy_int = 0
-    pep_set = Set()
+    pep_set = set()
     for oPsm in psm_filtered_list:
         if oPsm.RealLabel == LabelTrain or oPsm.RealLabel == LabelReserve:
             continue
@@ -1734,7 +1735,7 @@ def remark_concensus(psm_list):
         else:
             psm_dict[unique_id_str] = 1
     
-    psm_set = Set()
+    psm_set = set()
     for oPsm in psm_list:
         unique_id_str = str(oPsm.FileName) + '_' + str(oPsm.ScanNumber) + '_' + oPsm.IdentifiedPeptide
         count_int = psm_dict[unique_id_str]

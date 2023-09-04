@@ -17,11 +17,7 @@ Copyright (c) 2012 Tae-Hyuk Ahn (ORNL). Allrights reserved.
 import sys, getopt, warnings, os, re
 from datetime import datetime, date, time
 from collections import defaultdict
-import csv 
-try:
-    from sets import Set
-except ImportError:
-    pass
+import csv
 
 ## Import Sipros package modules
 import sipros_post_module
@@ -297,7 +293,7 @@ test_decoy_fwr_ratio = 1
 ## Read fasta file and only save the description in the filtered PSM
 def read_fasta_necessary_file(working_dir, config_dict, pro_greedy_list):
     
-    pro_set = Set()
+    pro_set = set()
     # if pro_greedy_list length > 0
     if len(pro_greedy_list) > 0:
 
@@ -452,7 +448,7 @@ def read_run_files(run_num_dict):
     for pep_file, run_num in sorted(list(run_num_dict.items()), key=lambda x: x[1][-1]):
 
         # read line with csv
-        pep_reader = csv.reader(CommentedFile(open(pep_file, 'rb')),
+        pep_reader = csv.reader(CommentedFile(open(pep_file, 'r')),
                                    delimiter='\t')
         # skip header
         headline = next(pep_reader)
@@ -535,7 +531,7 @@ def read_run_files(run_num_dict):
         check_file_exist(psm_file)
 
         # read line with csv
-        psm_reader = csv.reader(CommentedFile(open(psm_file, 'rb')),
+        psm_reader = csv.reader(CommentedFile(open(psm_file, 'r')),
                                    delimiter='\t')
         # skip header
         headline = next(psm_reader)
@@ -1355,11 +1351,11 @@ def main(argv=None):
     sys.stderr.write('[Step 5] Report output:                                       Running -> ')
     # Open output files
     global pro_out_file
-    pro_out_file = open(base_out + ".pro.txt", 'wb')
+    pro_out_file = open(base_out + ".pro.txt", 'w')
     global pro2pep_out_file
-    pro2pep_out_file = open(base_out + ".pro2pep.txt", 'wb')
+    pro2pep_out_file = open(base_out + ".pro2pep.txt", 'w')
     global pro2psm_out_file
-    pro2psm_out_file = open(base_out + ".pro2psm.txt", 'wb')
+    pro2psm_out_file = open(base_out + ".pro2psm.txt", 'w')
     # Report output files
     report_output(config_dict,
                   run_num_dict,
