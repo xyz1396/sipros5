@@ -1,0 +1,35 @@
+{
+    "tasks": [
+        {
+            "type": "shell",
+            "label": "build release",
+            "command": "./make.sh",
+            "args": ["build"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "detail": "build release"
+        },
+        {
+            "label": "cmake debug",
+            "type": "shell",
+            "command": "./make.sh debug",
+            "options": {
+                "cwd": "${workspaceFolder}",
+            },
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            }
+        }
+    ],
+    "version": "2.0.0"
+}

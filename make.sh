@@ -32,17 +32,17 @@ case $1 in
     ;;
 "buildTick")
     cd build
-    cmake -DCMAKE_BUILD_TYPE=Release -DTicktock=Ticktock
-    make -j4
+    cmake -DCMAKE_BUILD_TYPE=Release -DTicktock=Ticktock ..
+    make -j8
     ;;
 "debug")
     cd build
-    cmake -DCMAKE_BUILD_TYPE=Debug
-    make -j4
+    cmake -DCMAKE_BUILD_TYPE=Debug ..
+    make -j8
     ;;
 "make")
     cd build
-    make
+    make .. -j8
     ;;
 "run")
     cd timeCompare

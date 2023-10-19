@@ -5,6 +5,7 @@ cd test
 case $1 in
 "mkdir")
     mkdir raw ft mzml sip fasta regular configs
+    /scratch/yixiong/benchmark/configGenerator -i SiprosEnsembleC13.cfg -o configs -e C
     ;;
 "mkdb")
     # conda activate py2
@@ -18,6 +19,10 @@ case $1 in
         -i fasta/EcoliWithCrapNodup.fasta \
         -o fasta/DecoySIP.fasta \
         -c SiprosEnsembleC13.cfg
+    ${binPath}/configGenerator \
+        -i SiprosEnsembleC13.cfg \
+        -o configs \
+        -e C
     ;;
 "convert")
     conda activate mono
@@ -26,7 +31,7 @@ case $1 in
     mono tools/ThermoRawFileParser/ThermoRawFileParser.exe -d=raw -f=1 -o mzml
     ;;
 "clean")
-    rm -r regular/*
+    rm -r regular/* sip/*
     ;;
 "run")
     printf "\n=====Regular Search=====\n\n"
@@ -34,9 +39,12 @@ case $1 in
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_PREFIX}/lib
     starttime=$(date +'%Y-%m-%d %H:%M:%S')
     # ${binPath}/SiprosEnsembleOMP -w ft -c SiprosEnsembleConfig.cfg -o regular
-    ../bin/SiprosEnsembleOMP -w mzml -c SiprosEnsembleConfig.cfg -o regular
+    # ../bin/SiprosEnsembleOMP -w mzml -c SiprosEnsembleConfig.cfg -o regular
     # ../bin/SiprosEnsembleOMP -w ft -c SiprosEnsembleConfig.cfg -o regular
     # /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/SiprosEnsembleOMP -w mzml -c SiprosEnsembleConfig.cfg -o regular
+    # ft='/ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct1ensemble/ft'
+    ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct1/ft'
+    ../bin/SiprosEnsembleOMP -w ${ft} -c SiprosEnsembleConfig.cfg -o regular
     endtime=$(date +'%Y-%m-%d %H:%M:%S')
     start_seconds=$(date --date="$starttime" +%s)
     end_seconds=$(date --date="$endtime" +%s)
@@ -61,12 +69,25 @@ case $1 in
     end_seconds=$(date --date="$endtime" +%s)
     echo "running time： "$((end_seconds - start_seconds))"s"
     ;;
+"runSIPone")
+    conda activate mpi
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_PREFIX}/lib
+    ../bin/SiprosEnsembleOMP -w ft -c configs/C13_5000Pct.cfg -o sip
+    ;;
 "runSIP")
     printf "\n=====SIP Search=====\n\n"
     conda activate mpi
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_PREFIX}/lib
     starttime=$(date +'%Y-%m-%d %H:%M:%S')
-    ../bin/SiprosEnsembleOMP -w ft -c SiprosEnsembleC13.cfg -o sip
+
+    export OMP_NUM_THREADS=10
+    export configs=(configs/*.cfg)
+    export ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct1/ft'
+    # export ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct50/ft'
+    # export ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct99/ft'
+    echo "${configs[@]}" | xargs -n 1 -P 10 \
+        bash -c '../bin/SiprosEnsembleOMP -w ${ft} -c $0 -o sip'
+
     endtime=$(date +'%Y-%m-%d %H:%M:%S')
     start_seconds=$(date --date="$starttime" +%s)
     end_seconds=$(date --date="$endtime" +%s)

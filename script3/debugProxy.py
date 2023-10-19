@@ -7,6 +7,9 @@ import runpy
 os.chdir('test')
 
 # 2A. python test.py 4 5
+args = 'python ../script3/sipros_psm_tabulating.py \
+        -i sip \
+        -c SiprosEnsembleC13.cfg -o sip'
 # args = 'python ../script3/sipros_prepare_protein_database.py \
 #         -i fasta/EcoliWithCrapNodup.fasta \
 #         -o fasta/DecoySIP.fasta \
@@ -17,9 +20,9 @@ os.chdir('test')
 #         -c SiprosEnsembleC13.cfg \
 #         -o sip'
 
-args = 'python ../script3/sipros_peptides_assembling.py \
-        -c SiprosEnsembleC13.cfg \
-        -w sip'
+# args = 'python ../script3/sipros_peptides_assembling.py \
+#         -c SiprosEnsembleC13.cfg \
+#         -w sip'
 
 # 2B. python -m mymodule.test 4 5
 # args = 'python -m mymodule.test 4 5'

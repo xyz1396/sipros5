@@ -52,6 +52,14 @@ public:
 	double computeAverageMass(string sSequence);
 	double computeMonoisotopicMass(string sSequence);
 
+	// variables for this isotopologue
+	map<string, vector<int>> mResidueAtomicComposition;
+	vector<IsotopeDistribution> vAtomIsotopicDistribution;
+	map<string, IsotopeDistribution> vResidueIsotopicDistribution;
+
+	// emass functions for IsotopeDistribution's arithmetic
+	IsotopeDistribution sum(const IsotopeDistribution &distribution0, const IsotopeDistribution &distribution1);
+
 	// compute isotoptic distributions for all product ions of a sequence
 	// this isotopologue class is modified by only adding this function
 	// The first dimension of vvdYionMass and vvdYionProb is from y1, y2, ...
@@ -76,8 +84,6 @@ public:
 	}
 
 private:
-	// emass functions for IsotopeDistribution's arithmetic
-	IsotopeDistribution sum(const IsotopeDistribution &distribution0, const IsotopeDistribution &distribution1);
 	// functions for IsotopeDistribution's arithmetic
 	IsotopeDistribution sum_backup(const IsotopeDistribution &distribution0, const IsotopeDistribution &distribution1);
 	IsotopeDistribution multiply(const IsotopeDistribution &distribution0, int count);
@@ -107,10 +113,7 @@ private:
 	// the number of natural CHONPS and enriched CHONPS
 	unsigned int AtomNumber;
 
-	// variables for this isotopologue
-	map<string, vector<int>> mResidueAtomicComposition;
-	vector<IsotopeDistribution> vAtomIsotopicDistribution;
-	map<string, IsotopeDistribution> vResidueIsotopicDistribution;
+	
 
 	// Sipros Ensemble
 	// emass needs the mass to be one nucleus difference

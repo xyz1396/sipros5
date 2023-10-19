@@ -641,7 +641,7 @@ class PepSpectrumMatch:
         lPep = sorted(self.lPepScores, key=lambda pep: (-pep.lfScores[SIP_WDP_score_idx], pep.fPct))
         pep_new_list = []
         # keep all the pep with the highest score
-        pep_new_list.extend(lPep[0:self.iPurgeTrigger/2])
+        pep_new_list.extend(lPep[0:self.iPurgeTrigger//2])
 
     def purge(self):
         iNumScores = len(self.lPepScores[0].lfScores)
