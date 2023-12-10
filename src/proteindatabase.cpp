@@ -415,7 +415,7 @@ void ProteinDatabase::setProtein()
 
 	ibeginCleavagePos = -1;
 
-	// migrate to the new precusor mass estimate by NP
+	// migrate to the new precusor mass estimate method by binomial NP
 	// mass_map.clear();
 	// msum_map.clear();
 	// for (i = 0; i < (int)scurrentProtein.length(); i++)
@@ -448,6 +448,7 @@ bool ProteinDatabase::getNextOriginalPeptide(Peptide *originalPeptide)
 		{
 			if (isPeptideLengthGood(vicleavageSite.at(iendCleavagePos) - vicleavageSite.at(ibeginCleavagePos)))
 			{
+				// migrate to the new precusor mass estimate method by binomial NP
 				sOriginalPeptide = scurrentProtein.substr(vicleavageSite.at(ibeginCleavagePos) + 1, vicleavageSite.at(iendCleavagePos) - vicleavageSite.at(ibeginCleavagePos));
 				dOriginalPeptideMass = mAveragine.calPrecusorMass(sOriginalPeptide);
 				sOriginalPeptide = "[" + sOriginalPeptide + "]";

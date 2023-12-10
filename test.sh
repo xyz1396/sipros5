@@ -82,9 +82,9 @@ case $1 in
 
     export OMP_NUM_THREADS=10
     export configs=(configs/*.cfg)
-    export ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct1/ft'
+    # export ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct1/ft'
     # export ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct50/ft'
-    # export ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct99/ft'
+    export ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct99/ft'
     echo "${configs[@]}" | xargs -n 1 -P 10 \
         bash -c '../bin/SiprosEnsembleOMP -w ${ft} -c $0 -o sip'
 

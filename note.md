@@ -12,3 +12,7 @@ conda activate sklearn
 nohup ./test.sh runSIP > test/test.log 2>&1 &
 nohup ./test.sh run > test/test.log 2>&1 &
 ```
+
+```bash
+python script3/makeReverseDecoyDB.py test/fasta/EcoliWithCrapNodup.fasta test/fasta/FullDecoy.fasta
+```
