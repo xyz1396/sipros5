@@ -24,6 +24,20 @@
             "options": {
                 "cwd": "${workspaceFolder}",
             },
+            "dependsOn":["get debug Args"],
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            }
+        },
+        {
+            "label": "get debug Args",
+            "type": "shell",
+            "command": "./debug.sh",
+            "options": {
+                "cwd": "${workspaceFolder}",
+            },
             "group": "test",
             "presentation": {
                 "reveal": "always",

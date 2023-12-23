@@ -38,13 +38,19 @@ case $1 in
     conda activate mpi
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_PREFIX}/lib
     starttime=$(date +'%Y-%m-%d %H:%M:%S')
+
     # ${binPath}/SiprosEnsembleOMP -w ft -c SiprosEnsembleConfig.cfg -o regular
     # ../bin/SiprosEnsembleOMP -w mzml -c SiprosEnsembleConfig.cfg -o regular
     # ../bin/SiprosEnsembleOMP -w ft -c SiprosEnsembleConfig.cfg -o regular
     # /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/SiprosEnsembleOMP -w mzml -c SiprosEnsembleConfig.cfg -o regular
     # ft='/ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct1ensemble/ft'
-    ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct1/ft'
-    ../bin/SiprosEnsembleOMP -w ${ft} -c SiprosEnsembleConfig.cfg -o regular
+    # ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct1/ft'
+    # ../bin/SiprosEnsembleOMP -w ${ft} -c SiprosEnsembleConfig.cfg -o regular
+    # cfg='SiprosEnsembleConfig.cfg'
+    cfg='SiprosEnsembleConfigAstral.cfg'
+    ft='AstraMzml/ID110156_01_OA10034_10302_120823.mzML'
+    ../bin/SiprosEnsembleOMP -f $ft -c $cfg -o regular
+
     endtime=$(date +'%Y-%m-%d %H:%M:%S')
     start_seconds=$(date --date="$starttime" +%s)
     end_seconds=$(date --date="$endtime" +%s)
@@ -56,13 +62,13 @@ case $1 in
     starttime=$(date +'%Y-%m-%d %H:%M:%S')
     python ../script3/sipros_psm_tabulating.py \
         -i regular \
-        -c SiprosEnsembleConfig.cfg -o regular
+        -c $cfg -o regular
     python ../script3/sipros_ensemble_filtering.py \
         -i regular \
-        -c SiprosEnsembleConfig.cfg \
+        -c $cfg \
         -o regular
     python ../script3/sipros_peptides_assembling.py \
-        -c SiprosEnsembleConfig.cfg \
+        -c $cfg \
         -w regular
     endtime=$(date +'%Y-%m-%d %H:%M:%S')
     start_seconds=$(date --date="$starttime" +%s)
@@ -70,9 +76,31 @@ case $1 in
     echo "running time： "$((end_seconds - start_seconds))"s"
     ;;
 "runSIPone")
+    starttime=$(date +'%Y-%m-%d %H:%M:%S')
     conda activate mpi
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_PREFIX}/lib
-    ../bin/SiprosEnsembleOMP -w ft -c configs/C13_5000Pct.cfg -o sip
+    # cfg='configs/C13_5000Pct.cfg'
+    cfg='C13_50000PctAstral.cfg'
+    # ../bin/SiprosEnsembleOMP -w ft -c $cfg -o sip
+    ../bin/SiprosEnsembleOMP -f AstraMzml/X15_ID110159_01_OA10034_10302_120823.mzML -c $cfg -o sip
+
+    printf "\n=====Filter PSM=====\n\n"
+    conda activate sklearn
+    python ../script3/sipros_psm_tabulating.py \
+        -i sip \
+        -c $cfg \
+        -o sip
+    python ../script3/sipros_ensemble_filtering.py \
+        -i sip \
+        -c $cfg \
+        -o sip
+    python ../script3/sipros_peptides_assembling.py \
+        -c $cfg \
+        -w sip
+    endtime=$(date +'%Y-%m-%d %H:%M:%S')
+    start_seconds=$(date --date="$starttime" +%s)
+    end_seconds=$(date --date="$endtime" +%s)
+    echo "running time： "$((end_seconds - start_seconds))"s"
     ;;
 "runSIP")
     printf "\n=====SIP Search=====\n\n"

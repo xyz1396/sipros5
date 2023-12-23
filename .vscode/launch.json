@@ -9,15 +9,10 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/bin/SiprosEnsembleOMP",
-            "args": [
-                "-c",
-                "SiprosEnsembleConfig.cfg",
-                "-w",
-                "ft",
-                "-o",
-                "regular"
+            "args": ["$SiprosArgs"
             ],
             "stopAtEntry": false,
+            "envFile": "${workspaceFolder}/.vscode/.env",
             "cwd": "${workspaceFolder}/test",
             "environment": [],
             "externalConsole": false,

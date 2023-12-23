@@ -194,6 +194,8 @@ public:
 
 	static char getSeparator();
 
+	// set <FASTA_Database>
+	static void setFASTAfilename(const string &fastaFilename);
 	// retrieve <FASTA_Database>
 	static string getFASTAfilename()
 	{

@@ -10,6 +10,7 @@ conda activate sklearn
 
 ```bash
 nohup ./test.sh runSIP > test/test.log 2>&1 &
+nohup ./test.sh runSIPone > test/test.log 2>&1 &
 nohup ./test.sh run > test/test.log 2>&1 &
 ```
 

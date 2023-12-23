@@ -1,5 +1,6 @@
 {
     "files.associations": {
+        "*.Rmd": "rmd",
         "*.rmd": "markdown",
         "numeric": "cpp",
         "vector": "cpp",
@@ -14,7 +15,8 @@
         "fstream": "c",
         "system_error": "c",
         "xmlfile.h": "c",
-        "fcntl.h": "c"
+        "fcntl.h": "c",
+        "iostream": "cpp"
     },
     "[python]": {
         "editor.defaultFormatter": "ms-python.autopep8"
