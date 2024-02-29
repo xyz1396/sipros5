@@ -1,0 +1,20 @@
+{
+  "version": "0.2.1",
+  "defaults": {},
+  "configurations": [
+    {
+        "type": "default",
+        "project": "CMakeLists.txt",
+        "projectTarget": "Sipros.exe (D:\\work\\202402\\sipros5\\bin\\Sipros.exe)",
+        "name": "OMP",
+        "args": [
+            "-f",
+            "D:\\work\\202203\\ecoliPct1\\ft\\Pan_022822_X1.FT2",
+            "-c",
+            "D:\\work\\202402\\sipros5\\test\\forWindowsTest.cfg",
+            "-o",
+            "D:\\work\\202402\\sipros5\\test\\sip"
+        ]
+    }
+  ]
+}

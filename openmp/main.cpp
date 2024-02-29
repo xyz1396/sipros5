@@ -1,59 +1,56 @@
 #include <iostream>
 #include <string>
 #include <cstdlib>
-
-#include "directoryStructure.h"
+#include <filesystem>
 #include "proNovoConfig.h"
 #include "ms2scanvector.h"
 
 using namespace std;
+namespace fs = std::filesystem;
 
-void searchFT2Files(vector<string> &vsFT2Filenames, const string &sWorkingDirectory)
-{
-	int i, iFileNum;
-	DirectoryStructure working_dir(sWorkingDirectory);
-	working_dir.setPattern(".ft2");
-	working_dir.getFiles(vsFT2Filenames);
-	working_dir.setPattern(".FT2");
-	working_dir.getFiles(vsFT2Filenames);
-	working_dir.setPattern(".ms2");
-	working_dir.getFiles(vsFT2Filenames);
-	working_dir.setPattern(".MS2");
-	working_dir.getFiles(vsFT2Filenames);
-
-	// get mzML
-	working_dir.setPattern(".mzml");
-	working_dir.getFiles(vsFT2Filenames);
-	working_dir.setPattern(".mzML");
-	working_dir.getFiles(vsFT2Filenames);
-
-	iFileNum = (int)vsFT2Filenames.size();
-	if (iFileNum == 0)
-	{
-		cerr << "no scan file in the working directory" << endl;
-		exit(1);
-	}
-	for (i = 0; i < iFileNum; i++)
-		vsFT2Filenames.at(i) = sWorkingDirectory + ProNovoConfig::getSeparator() + vsFT2Filenames.at(i);
+static void searchFT2Files(std::vector<std::string> &vsFT2Filenames, const std::string &sWorkingDirectory) {
+    const std::vector<std::string> patterns = {".ft2", ".FT2", ".ms2", ".MS2", ".mzml", ".mzML"};    
+    for (const auto &entry : fs::directory_iterator(sWorkingDirectory)) {
+        if (entry.is_regular_file()) {
+            for (const auto &pattern : patterns) {
+                if (entry.path().extension() == pattern) {
+                    vsFT2Filenames.push_back(entry.path().string());
+                    break;
+                }
+            }
+        }
+    }
+    if (vsFT2Filenames.empty()) {
+        std::cerr << "no scan file in the working directory" << std::endl;
+        exit(1);
+    }
+    char separator = ProNovoConfig::getSeparator();
+    for (auto &filename : vsFT2Filenames) {
+        filename = sWorkingDirectory + separator + filename;
+    }
 }
 
-void searchConfigureFiles(vector<string> &vsConfigureFilenames, const string &sConfigFileDirectory)
+static void searchConfigureFiles(vector<string> &vsConfigureFilenames, const string &sConfigFileDirectory)
 {
-	int i, iFileNum;
-	DirectoryStructure working_dir(sConfigFileDirectory);
-	working_dir.setPattern(".cfg");
-	working_dir.getFiles(vsConfigureFilenames);
-	working_dir.setPattern(".CFG");
-	working_dir.getFiles(vsConfigureFilenames);
-
-	iFileNum = (int)vsConfigureFilenames.size();
-	if (iFileNum == 0)
-	{
-		cerr << "no configure file in the directory" << endl;
+	const std::vector<std::string> patterns = { ".CFG", ".cfg"};
+	for (const auto& entry : fs::directory_iterator(sConfigFileDirectory)) {
+		if (entry.is_regular_file()) {
+			for (const auto& pattern : patterns) {
+				if (entry.path().extension() == pattern) {
+					vsConfigureFilenames.push_back(entry.path().string());
+					break;
+				}
+			}
+		}
+	}
+	if (vsConfigureFilenames.empty()) {
+		std::cerr << "no scan file in the working directory" << std::endl;
 		exit(1);
 	}
-	for (i = 0; i < iFileNum; i++)
-		vsConfigureFilenames.at(i) = sConfigFileDirectory + ProNovoConfig::getSeparator() + vsConfigureFilenames.at(i);
+	char separator = ProNovoConfig::getSeparator();
+	for (auto& filename : vsConfigureFilenames) {
+		filename = sConfigFileDirectory + separator + filename;
+	}
 }
 
 /*
@@ -62,7 +59,7 @@ void searchConfigureFiles(vector<string> &vsConfigureFilenames, const string &sC
  * Set up SiprosConfig
  */
 
-void initializeArguments(int argc, char **argv, vector<string> &vsFT2Filenames, string &sWorkingDirectory, vector<string> &vsConfigureFilenames,
+static void initializeArguments(int argc, char **argv, vector<string> &vsFT2Filenames, string &sWorkingDirectory, vector<string> &vsConfigureFilenames,
 						 string &sSingleWorkingFile, string &sFastaFile, string &sOutputDirectory, bool &bScreenOutput)
 {
 	int i;
@@ -147,7 +144,7 @@ void initializeArguments(int argc, char **argv, vector<string> &vsFT2Filenames, 
 		sOutputDirectory = sWorkingDirectory;
 }
 
-void handleScan(const string &sFT2filename, const string &sOutputDirectory, const string &sConfigFilename, bool bScreenOutput)
+static void handleScan(const string &sFT2filename, const string &sOutputDirectory, const string &sConfigFilename, bool bScreenOutput)
 {
 	MS2ScanVector *pMainMS2ScanVector = new MS2ScanVector(sFT2filename, sOutputDirectory, sConfigFilename, bScreenOutput);
 

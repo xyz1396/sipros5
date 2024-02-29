@@ -36,6 +36,10 @@
 **/build/*
 !bin/*
 
+# for vs
+.vs/
+out/
+
 # for test files
 test/
 !test/configs/

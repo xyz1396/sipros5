@@ -1,8 +1,8 @@
-#! /bin/sh
+#!/bin/bash 
 # conda create -n mpi -c conda-forge openmpi gxx_linux-64 gcc_linux-64 cmake gperftools
 # compiler name x86_64-conda_cos6-linux-gnu-g++
-. ~/miniconda3/etc/profile.d/conda.sh
-conda activate mpi
+# . ~/miniconda3/etc/profile.d/conda.sh
+# conda activate mpi
 # run follows to load dynamic libs when running bin/SiprosV3omp bin/SiprosV3mpi bin/SiprosV3test
 # conda activate mpi
 # export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_PREFIX}/lib
@@ -26,9 +26,9 @@ case $1 in
     cmake --build . --parallel 8
     # add share lib for mpi version
     cd ..
-    deplist=$(ldd bin/SiprosEnsembleMPI | awk '{if (match($3,"/")){ print $3}}')
-    mkdir bin/libSiprosEnsembleMPI
-    cp -L -n $deplist bin/libSiprosEnsembleMPI
+    deplist=$(ldd bin/SiprosMPI | awk '{if (match($3,"/")){ print $3}}')
+    mkdir bin/libSiprosMPI
+    cp -L -n $deplist bin/libSiprosMPI
     ;;
 "buildTick")
     cd build

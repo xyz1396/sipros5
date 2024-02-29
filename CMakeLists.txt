@@ -1,5 +1,5 @@
-project(SiprosEnsemble)
-cmake_minimum_required(VERSION 3.1)
+project(Sipros)
+cmake_minimum_required(VERSION 3.12)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 message("${CMAKE_BUILD_TYPE}")
@@ -12,8 +12,6 @@ find_package(OpenMP REQUIRED)
 
 aux_source_directory(${PROJECT_SOURCE_DIR}/src SRC_LIST)
 include_directories(${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/MSToolkit/include)
-include_directories(${PROJECT_SOURCE_DIR}/MSToolkit/src/zlib-1.2.11/include)
-include_directories(${PROJECT_SOURCE_DIR}/MSToolkit/src/expat-2.2.9/include)
 
 SET(EXECUTABLE_OUTPUT_PATH "${PROJECT_SOURCE_DIR}/bin")
 
