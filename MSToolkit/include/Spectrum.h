@@ -35,32 +35,22 @@ class Spectrum {
   //Operator Functions
   Spectrum& operator=(const Spectrum&);
 	Peak_T& operator[](const int&);
-  Peak_T& operator[](const unsigned int&);
-  Peak_T& operator[](const size_t&);
 
   //Functions
   void	    			add(Peak_T&);
   void			    	add(double,float);
-  void			    	add(double, float, double); //third value is ion mobility
   void            addEZState(int,double,float,float);
   void            addEZState(EZState&);
 	void						addMZ(double, double mono=0);
-  void            addPrecursor(MSPrecursorInfo&);
   void            addSPS(double);
   void    				addZState(int,double);
   void		    		addZState(ZState&);
   Peak_T&			    at(const int&);
   Peak_T&	    		at(const unsigned int&);
-  Peak_T&         at(const size_t&);
   EZState&        atEZ(const int&);
   EZState&        atEZ(const unsigned int&);
-  EZState&        atEZ(const size_t&);
-  double&         atIM(const int&);
-  double&         atIM(const unsigned int&);
-  double&         atIM(const size_t&);
   ZState&			    atZ(const int&);
   ZState&	    		atZ(const unsigned int&);
-  ZState&         atZ(const size_t&);
   void			    	clear();
 	void						clearMZ();
 	void						clearPeaks();
@@ -85,17 +75,13 @@ class Spectrum {
   double          getConversionI();
   std::string     getFileID();
   MSSpectrumType  getFileType();
-  double          getInverseReducedIonMobility();
   float           getIonInjectionTime();
-  double          getIonMobilityDriftTime();
   double    			getMonoMZ(int index=0);
   double    			getMZ(int index=0);
   bool            getNativeID(char*,int);
-  MSPrecursorInfo getPrecursor(int index=0);
   bool            getRawFilter(char*,int,bool bLock=false);
   float		    		getRTime();
   float           getRTimeApex();
-  std::string     getScanDescription();
   int	      			getScanNumber(bool second=false);
   double          getScanWindowLower();
   double          getScanWindowUpper();
@@ -119,15 +105,12 @@ class Spectrum {
   void            setConversionI(double);
   void            setFileID(std::string);
   void    				setFileType(MSSpectrumType);
-  void            setInverseReducedIonMobility(double);
   void            setIonInjectionTime(float);
-  void            setIonMobilityDriftTime(double);
   void		    		setMZ(double, double mono=0);
   void            setNativeID(const char*);
   void            setRawFilter(char*);
   void				    setRTime(float);
   void            setRTimeApex(float);
-  void            setScanDescription(std::string);
   void    				setScanNumber(int, bool second=false);
   void            setScanWindow(double lower, double upper); //the mass range of the spectrum
   void            setSelWindow(double lower, double upper); //the mass range of the selected/acquired ions
@@ -137,7 +120,6 @@ class Spectrum {
   int             sizeEZ();
 	int							sizeMZ();   //also returns size of monoMZ
   int             sizeSPS();
-  int             sizePrecursor();
   int     				sizeZ();
   void		    		sortIntensity();
   void				    sortIntensityRev();
@@ -162,7 +144,6 @@ class Spectrum {
   //Data Members
   std::vector<Peak_T>   *vPeaks;
   std::vector<EZState>  *vEZ;        //extended z-lines with charge state, M+H, and peak information.
-  std::vector<double>   *vIonMobility;
   std::vector<ZState>   *vZ;         //presumed charge states and M+H; M can be monoisotopic or selected.
   int		           charge;
   float		         rTime;
@@ -171,7 +152,6 @@ class Spectrum {
   int              msLevel;
   std::vector<double>   *monoMZ;     //the monoisotopic m/z of the selected ion(s)
   std::vector<double>   *mz;         //the selected ion(s) in m/z
-  std::vector<MSPrecursorInfo> *precursor;
   std::vector<double>   *sps;        //SPS masses
   std::string      fileID;
   MSSpectrumType   fileType;
@@ -186,8 +166,6 @@ class Spectrum {
 	double           convD;
 	double           convE;
 	double           convI;
-  double           inverseReducedIonMobility;
-  double           ionMobilityDriftTime;
   double           selectionWinLower;
   double           selectionWinUpper;
   double           TIC;
@@ -199,7 +177,6 @@ class Spectrum {
   int              centroidStatus;  //0=profile, 1=centroid, 2=unknown
   double           scanWinLower;    //the instrument spectrum m/z range
   double           scanWinUpper;    //the instrument spectrum m/z range
-  std::string      scanDescription;
 
   //private:
   //Functions

@@ -45,7 +45,6 @@ enum MSFileFormat {
   mzXML,
   mz5,
 	mzML,
-  mzMLb,
   raw,
   sqlite,
   psm,
@@ -80,16 +79,6 @@ enum MSActivation {
 struct MSHeader {
 	char header[16][128];
 };
-
-struct MSPrecursorInfo {
-  double mz=0;
-  int charge=0;
-  MSActivation activation=mstNA;
-  int precursorScanNumber=0;
-  double isoOffsetLower=0;
-  double isoOffsetUpper=0;
-};
-
 
 struct MSScanInfo {
 	int scanNumber[2];

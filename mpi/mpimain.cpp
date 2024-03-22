@@ -19,7 +19,7 @@ struct unit_of_workload_t {
 };
 
 void searchFT2Files(vector<string> & vsFT2Filenames, const string & sWorkingDirectory) {
-	    const std::vector<std::string> patterns = {".ft2", ".FT2", ".ms2", ".MS2", ".mzml", ".mzML"};    
+	    const std::vector<std::string> patterns = {".ft2", ".FT2", ".mzml", ".mzML"};    
     for (const auto &entry : fs::directory_iterator(sWorkingDirectory)) {
         if (entry.is_regular_file()) {
             for (const auto &pattern : patterns) {

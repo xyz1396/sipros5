@@ -8,9 +8,8 @@
             "name": "debug openmp regular",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/bin/SiprosEnsembleOMP",
-            "args": ["$SiprosArgs"
-            ],
+            "program": "${workspaceFolder}/bin/Sipros",
+            "args": ["$SiprosArgs"],
             "stopAtEntry": false,
             "envFile": "${workspaceFolder}/.vscode/.env",
             "cwd": "${workspaceFolder}/test",
@@ -19,7 +18,12 @@
             "MIMode": "gdb",
             "setupCommands": [
                 {
-                    "description": "为 gdb 启用整齐打印",
+                    "description": "Enable g3 level debug for gdb",
+                    "text": "python import sys; sys.path.insert(0, '/home/yixiong/miniconda3/envs/mpi/share/gcc-13.2.0/python/'); from libstdcxx.v6.printers import register_libstdcxx_printers; register_libstdcxx_printers(None)",
+                    "ignoreFailures": false
+                },
+                {
+                    "description": "Enable pretty-printing for gdb",
                     "text": "-enable-pretty-printing",
                     "ignoreFailures": true
                 }

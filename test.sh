@@ -40,16 +40,15 @@ case $1 in
     starttime=$(date +'%Y-%m-%d %H:%M:%S')
 
     # ${binPath}/SiprosEnsembleOMP -w ft -c SiprosEnsembleConfig.cfg -o regular
-    # ../bin/SiprosEnsembleOMP -w mzml -c SiprosEnsembleConfig.cfg -o regular
-    # ../bin/SiprosEnsembleOMP -w ft -c SiprosEnsembleConfig.cfg -o regular
+    # ../bin/Sipros -w mzml -c SiprosEnsembleConfig.cfg -o regular
+    ../bin/Sipros -w ft -c SiprosEnsembleConfig.cfg -o regular
     # /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/SiprosEnsembleOMP -w mzml -c SiprosEnsembleConfig.cfg -o regular
     # ft='/ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct1ensemble/ft'
     # ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct1/ft'
     # ../bin/SiprosEnsembleOMP -w ${ft} -c SiprosEnsembleConfig.cfg -o regular
-    # cfg='SiprosEnsembleConfig.cfg'
-    cfg='SiprosEnsembleConfigAstral.cfg'
-    ft='AstraMzml/ID110156_01_OA10034_10302_120823.mzML'
-    ../bin/SiprosEnsembleOMP -f $ft -c $cfg -o regular
+    cfg='SiprosEnsembleConfig.cfg'
+    ft='/scratch/yixiong/benchmark/astral/ftPct1/X3_ID110156_01_OA10034_10302_120823.1.FT2'
+    # ../bin/Sipros -f $ft -c $cfg -o regular
 
     endtime=$(date +'%Y-%m-%d %H:%M:%S')
     start_seconds=$(date --date="$starttime" +%s)

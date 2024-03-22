@@ -553,9 +553,9 @@ double MVH::lnCombin(int n, int k) {
 	}
 }
 
-bool MVH::ScoreSequenceVsSpectrum(string & currentPeptide, MS2Scan * Spectrum, vector<double>* seqIons, vector<double> * _pdAAforward,
+bool MVH::ScoreSequenceVsSpectrum(string & currentPeptide, int precursorCharge, MS2Scan * Spectrum, vector<double>* seqIons, vector<double> * _pdAAforward,
 		vector<double> * _pdAAreverse, double & dMvh, vector<char> * seq) {
-	if (!CalculateSequenceIons(currentPeptide, Spectrum->iParentChargeState, bUseSmartPlusThreeModel, seqIons, _pdAAforward, _pdAAreverse, seq)) {
+	if (!CalculateSequenceIons(currentPeptide, precursorCharge, bUseSmartPlusThreeModel, seqIons, _pdAAforward, _pdAAreverse, seq)) {
 		return false;
 	}
 	int totalPeaks = (int) seqIons->size();
@@ -605,10 +605,10 @@ bool MVH::ScoreSequenceVsSpectrum(string & currentPeptide, MS2Scan * Spectrum, v
 	return true;
 }
 
-bool MVH::ScoreSequenceVsSpectrumSIP(string & currentPeptide, MS2Scan * Spectrum, vector<double>* seqIons, vector<vector<double> > & vvdYionMass,
+bool MVH::ScoreSequenceVsSpectrumSIP(string & currentPeptide, int precursorCharge, MS2Scan * Spectrum, vector<double>* seqIons, vector<vector<double> > & vvdYionMass,
 		vector<vector<double> > & vvdYionProb, vector<vector<double> > & vvdBionMass, vector<vector<double> > & vvdBionProb, double & dMvh,
 		vector<char> * seq) {
-	if (!CalculateSequenceIonsSIP(currentPeptide, Spectrum->iParentChargeState, bUseSmartPlusThreeModel, seqIons, vvdYionMass, vvdYionProb, vvdBionMass,
+	if (!CalculateSequenceIonsSIP(currentPeptide, precursorCharge, bUseSmartPlusThreeModel, seqIons, vvdYionMass, vvdYionProb, vvdBionMass,
 			vvdBionProb, seq)) {
 		return false;
 	}

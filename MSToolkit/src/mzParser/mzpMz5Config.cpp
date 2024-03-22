@@ -9,12 +9,7 @@ Version 1.1, March 14, 2012.
 */
 
 #include "mzParser.h"
-#ifdef MZP_HDF
-
-using namespace mzParser;
-using namespace H5;
-using namespace std;
-
+#ifdef MZP_MZ5
 mzpMz5Config::mzpMz5Config(){
 	init(false, true, true);
 }

@@ -100,11 +100,12 @@ bool MS2Scan::mergePeptide(vector<PeptideUnit *> &vpTopPeptides, const string &s
 void MS2Scan::scorePeptidesHighMS2()
 {
 	int i;
-	for (i = 0; i < (int)vpPeptides.size(); i++)
+	for (i = 0; i < (int)vMassChargePeptidePtrTuples.size(); i++)
 	{
 
-		if (!mergePeptide(vpWeightSumTopPeptides, vpPeptides.at(i)->getPeptideSeq(), vpPeptides.at(i)->getProteinName()))
-			scoreWeightSumHighMS2(vpPeptides.at(i));
+		if (!mergePeptide(vpWeightSumTopPeptides, get<2>(vMassChargePeptidePtrTuples[i])->getPeptideSeq(),
+						  get<2>(vMassChargePeptidePtrTuples[i])->getProteinName()))
+			scoreWeightSumHighMS2(vMassChargePeptidePtrTuples[i]);
 		// scoreRankSumHighMS2(vpPeptides.at(i));
 	}
 }
@@ -112,11 +113,11 @@ void MS2Scan::scorePeptidesHighMS2()
 void MS2Scan::scorePeptidesLowMS2()
 {
 	int i;
-	for (i = 0; i < (int)vpPeptides.size(); i++)
+	for (i = 0; i < (int)vMassChargePeptidePtrTuples.size(); i++)
 	{
-		if (!mergePeptide(vpWeightSumTopPeptides, vpPeptides.at(i)->getPeptideSeq(), vpPeptides.at(i)->getProteinName()))
+		if (!mergePeptide(vpWeightSumTopPeptides, get<2>(vMassChargePeptidePtrTuples[i])->getPeptideSeq(), get<2>(vMassChargePeptidePtrTuples[i])->getProteinName()))
 		{
-			scoreWeightSum(vpPeptides.at(i));
+			scoreWeightSum(vMassChargePeptidePtrTuples[i]);
 			//	    scoreRankSum(vpPeptides.at(i));
 		}
 	}
@@ -140,8 +141,9 @@ void MS2Scan::cleanup()
 	//   viCharge.clear();
 }
 
-void MS2Scan::scoreWeightSum(Peptide *currentPeptide)
+void MS2Scan::scoreWeightSum(const tuple<double, int, Peptide *> currentMassChargePeptidePtrTuple)
 {
+	Peptide *currentPeptide = get<2>(currentMassChargePeptidePtrTuple);
 	double dScore = 0;
 	// calculate score
 	vector<bool> vbFragmentZ2; // true: y side gets the +2; false: b ion gets +2, only calculated for +3 peptides
@@ -229,7 +231,7 @@ void MS2Scan::scoreWeightSum(Peptide *currentPeptide)
 		iExBreward = iCurrentBreward;
 	}
 	// save score
-	saveScoreSIP(dScore, currentPeptide, vpWeightSumTopPeptides);
+	saveScoreSIP(dScore, currentMassChargePeptidePtrTuple, vpWeightSumTopPeptides);
 }
 
 /*
@@ -336,11 +338,10 @@ void MS2Scan::scoreWeightSum(Peptide *currentPeptide)
  saveScore(dScore, currentPeptide, vpWeightSumTopPeptides, vdWeightSumAllScores, "RankSum");
  }*/
 
-void MS2Scan::scoreRankSumHighMS2(Peptide *currentPeptide)
+void MS2Scan::scoreRankSumHighMS2(const tuple<double, int, Peptide *> currentMassChargePeptidePtrTuple)
 {
-
+	Peptide *currentPeptide = get<2>(currentMassChargePeptidePtrTuple);
 	double dScore = 0;
-
 	vector<bool> vbFragmentZ2; // true: y side gets the +2; false: b ion gets +2, only calculated for +3 peptides
 	int iNumFragments = 0, iIndex4MostAbundunt = 0;
 	double dExpectedMZ;
@@ -435,14 +436,13 @@ void MS2Scan::scoreRankSumHighMS2(Peptide *currentPeptide)
 	dUvalue = iUnMatchPeakSum + (iMZSize - (iNumFragments * 2 - iUnOberserve) + 0.5 * iEmptyMZ) * iUnOberserve;
 	if (iMZSize > 0)
 		dScore = CalculateRankSum(dUvalue, iIonNumber, iUnMatchPeakNumber);
-	saveScore(dScore, currentPeptide, vpWeightSumTopPeptides, "RankSum");
+	saveScore(dScore, currentMassChargePeptidePtrTuple, vpWeightSumTopPeptides, "RankSum");
 }
 
-void MS2Scan::scoreRankSum(Peptide *currentPeptide)
+void MS2Scan::scoreRankSum(const tuple<double, int, Peptide *> currentMassChargePeptidePtrTuple)
 {
-
+	Peptide *currentPeptide = get<2>(currentMassChargePeptidePtrTuple);
 	double dScore = 0;
-
 	vector<bool> vbFragmentZ2; // true: y side gets the +2; false: b ion gets +2, only calculated for +3 peptides
 	int iNumFragments = 0, iIndex4MostAbundunt = 0;
 	double dExpectedMZ;
@@ -537,7 +537,7 @@ void MS2Scan::scoreRankSum(Peptide *currentPeptide)
 	dUvalue = iUnMatchPeakSum + (iMZSize - (iNumFragments * 2 - iUnOberserve) + 0.5 * iEmptyMZ) * iUnOberserve;
 	if (iMZSize > 0)
 		dScore = CalculateRankSum(dUvalue, iIonNumber, iUnMatchPeakNumber);
-	saveScore(dScore, currentPeptide, vpWeightSumTopPeptides, "RankSum");
+	saveScore(dScore, currentMassChargePeptidePtrTuple, vpWeightSumTopPeptides, "RankSum");
 }
 
 /*
@@ -660,8 +660,9 @@ void MS2Scan::WeightCompare(const string &sPeptide, vector<bool> &vbFragmentZ2)
 		vbFragmentZ2.push_back(subscore.at(i) > threshold);
 }
 
-void MS2Scan::saveScore(const double &dScore, const Peptide *currentPeptide, vector<PeptideUnit *> &vpTopPeptides,
-						string sScoreFunction)
+void MS2Scan::saveScore(const double &dScore,
+						const tuple<double, int, Peptide *> currentMassChargePeptidePtrTuple,
+						vector<PeptideUnit *> &vpTopPeptides, string sScoreFunction)
 {
 	PeptideUnit *copyPeptide;
 
@@ -677,22 +678,23 @@ void MS2Scan::saveScore(const double &dScore, const Peptide *currentPeptide, vec
 	if ((int)vpTopPeptides.size() < TOP_N)
 	{
 		copyPeptide = new PeptideUnit;
-		copyPeptide->setPeptideUnitInfo(currentPeptide, dScore, sScoreFunction);
+		copyPeptide->setPeptideUnitInfo(currentMassChargePeptidePtrTuple, dScore, sScoreFunction);
 		vpTopPeptides.push_back(copyPeptide);
 		sort(vpTopPeptides.begin(), vpTopPeptides.end(), GreaterScore);
 	}
 	else if (dScore > vpTopPeptides.at(TOP_N - 1)->dScore)
 	{
 		copyPeptide = new PeptideUnit;
-		copyPeptide->setPeptideUnitInfo(currentPeptide, dScore, sScoreFunction);
+		copyPeptide->setPeptideUnitInfo(currentMassChargePeptidePtrTuple, dScore, sScoreFunction);
 		delete vpTopPeptides.at(TOP_N - 1);
 		vpTopPeptides.at(TOP_N - 1) = copyPeptide;
 		sort(vpTopPeptides.begin(), vpTopPeptides.end(), GreaterScore);
 	}
 }
 
-void MS2Scan::saveScoreSIP(const double &dScore, const Peptide *currentPeptide, vector<PeptideUnit *> &vpTopPeptides,
-						   string sScoreFunction)
+void MS2Scan::saveScoreSIP(const double &dScore,
+						   const tuple<double, int, Peptide *> currentMassChargePeptidePtrTuple,
+						   vector<PeptideUnit *> &vpTopPeptides, string sScoreFunction)
 {
 	PeptideUnit *copyPeptide;
 
@@ -706,16 +708,16 @@ void MS2Scan::saveScoreSIP(const double &dScore, const Peptide *currentPeptide, 
 	if ((int)vpTopPeptides.size() < TOP_N_SIP)
 	{
 		copyPeptide = new PeptideUnit;
-		copyPeptide->setPeptideUnitInfo(currentPeptide, dScore, sScoreFunction);
-		copyPeptide->setIonMassProb(currentPeptide);
+		copyPeptide->setPeptideUnitInfo(currentMassChargePeptidePtrTuple, dScore, sScoreFunction);
+		copyPeptide->setIonMassProb(get<2>(currentMassChargePeptidePtrTuple));
 		vpTopPeptides.push_back(copyPeptide);
 		sort(vpTopPeptides.begin(), vpTopPeptides.end(), GreaterScore);
 	}
 	else if (dScore > vpTopPeptides.at(TOP_N_SIP - 1)->dScore)
 	{
 		copyPeptide = new PeptideUnit;
-		copyPeptide->setPeptideUnitInfo(currentPeptide, dScore, sScoreFunction);
-		copyPeptide->setIonMassProb(currentPeptide);
+		copyPeptide->setPeptideUnitInfo(currentMassChargePeptidePtrTuple, dScore, sScoreFunction);
+		copyPeptide->setIonMassProb(get<2>(currentMassChargePeptidePtrTuple));
 		delete vpTopPeptides.at(TOP_N_SIP - 1);
 		vpTopPeptides.at(TOP_N_SIP - 1) = copyPeptide;
 		sort(vpTopPeptides.begin(), vpTopPeptides.end(), GreaterScore);
@@ -729,16 +731,13 @@ bool MS2Scan::GreaterScore(PeptideUnit *p1, PeptideUnit *p2)
 
 void MS2Scan::scorePeptides()
 {
-
 	if (bSetMS2Flag)
 	{
 		if (isMS2HighRes)
 			scorePeptidesHighMS2();
 		else
-
 			scorePeptidesLowMS2();
-
-		vpPeptides.clear();
+		vMassChargePeptidePtrTuples.clear();
 	}
 }
 
@@ -748,14 +747,19 @@ void MS2Scan::scorePeptidesMVH(vector<double> *sequenceIonMasses, vector<double>
 	{
 		int i = 0;
 		double dMvh = 0;
-		for (i = 0; i < (int)vpPeptides.size(); i++)
+		Peptide *peptidePtr;
+		int precursorCharge = 0;
+		for (i = 0; i < (int)vMassChargePeptidePtrTuples.size(); i++)
 		{
 			dMvh = 0;
-			if (!mergePeptide(vpWeightSumTopPeptides, vpPeptides.at(i)->getPeptideSeq(), vpPeptides.at(i)->getProteinName()))
+			peptidePtr = get<2>(vMassChargePeptidePtrTuples[i]);
+			precursorCharge = get<1>(vMassChargePeptidePtrTuples[i]);
+			if (!mergePeptide(vpWeightSumTopPeptides, peptidePtr->getPeptideSeq(), peptidePtr->getProteinName()))
 			{
-				if (MVH::ScoreSequenceVsSpectrum(vpPeptides.at(i)->sNeutralLossPeptide, this, sequenceIonMasses, pdAAforward, pdAAreverse, dMvh, Seqs))
+				if (MVH::ScoreSequenceVsSpectrum(peptidePtr->sNeutralLossPeptide, precursorCharge,
+												 this, sequenceIonMasses, pdAAforward, pdAAreverse, dMvh, Seqs))
 				{
-					saveScore(dMvh, vpPeptides.at(i), vpWeightSumTopPeptides);
+					saveScore(dMvh, vMassChargePeptidePtrTuples[i], vpWeightSumTopPeptides);
 				}
 			}
 		}
@@ -765,29 +769,30 @@ void MS2Scan::scorePeptidesMVH(vector<double> *sequenceIonMasses, vector<double>
 		// cerr << "error scorePeptidesMVH" << endl;
 		// exit(1);
 	}
-	vpPeptides.clear();
+	vMassChargePeptidePtrTuples.clear();
 }
 
 void MS2Scan::scorePeptidesXcorr(bool *pbDuplFragment, double *_pdAAforward, double *_pdAAreverse, unsigned int ***_uiBinnedIonMasses)
 {
 	int i = 0;
 	double dXcorr = 0;
-	for (i = 0; i < (int)vpPeptides.size(); i++)
+	for (i = 0; i < (int)vMassChargePeptidePtrTuples.size(); i++)
 	{
 		dXcorr = 0;
-		if (!mergePeptide(vpWeightSumTopPeptides, vpPeptides.at(i)->getPeptideSeq(), vpPeptides.at(i)->getProteinName()))
+		Peptide *peptidePtr = get<2>(vMassChargePeptidePtrTuples[i]);
+		if (!mergePeptide(vpWeightSumTopPeptides, peptidePtr->getPeptideSeq(), peptidePtr->getProteinName()))
 		{
-			if (CometSearchMod::ScorePeptides(&(vpPeptides.at(i)->sNeutralLossPeptide), pbDuplFragment, _pdAAforward, _pdAAreverse, this, _uiBinnedIonMasses,
+			if (CometSearchMod::ScorePeptides(&(peptidePtr->sNeutralLossPeptide), pbDuplFragment, _pdAAforward, _pdAAreverse, this, _uiBinnedIonMasses,
 											  dXcorr))
 			{
 				if (dXcorr > 0)
 				{
-					saveScore(dXcorr, vpPeptides.at(i), vpWeightSumTopPeptides);
+					saveScore(dXcorr, vMassChargePeptidePtrTuples[i], vpWeightSumTopPeptides);
 				}
 			}
 		}
 	}
-	vpPeptides.clear();
+	vMassChargePeptidePtrTuples.clear();
 }
 
 void MS2Scan::preprocessHighMS2()
@@ -1280,6 +1285,7 @@ bool MS2Scan::findProductIonSIP(const vector<double> &vdIonMass,
 	vector<bool> vbObserved(vdIonProb.size(), false);
 	vector<double> vdObservedMZ(vdIonProb.size(), 0);
 	vector<double> vdObservedRelativeInt(vdIonProb.size(), 0);
+	vector<int> viObservedCharge(vdIonProb.size(), 0);
 	vector<double> vdMZError(vdIonProb.size(), dMassTolerance);
 	vector<double> vdExpectedMZ(vdIonProb.size(), 0);
 	vector<double> vdExpectedRelativeInt(vdIonProb.size(), 0);
@@ -1333,6 +1339,7 @@ bool MS2Scan::findProductIonSIP(const vector<double> &vdIonMass,
 					vdObservedMZ[i] = vdpreprocessedMZ[iIndex4SelectedFound];
 					vdMZError[i] = vdObservedMZ[i] - vdExpectedMZ[i];
 					vdObservedRelativeInt[i] = dCurrentRelativeInt;
+					viObservedCharge[i] = vipreprocessedCharge[iIndex4SelectedFound];
 					minIntensityError = currentIntensityError;
 					// for test
 					// Rcout << vdExpectedRelativeInt[i] << " " << dCurrentRelativeInt << " " << minIntensityError << endl;
@@ -1362,6 +1369,7 @@ bool MS2Scan::findProductIonSIP(const vector<double> &vdIonMass,
 					vdObservedMZ[i] = vdpreprocessedMZ[iIndex4SelectedFound];
 					vdMZError[i] = vdObservedMZ[i] - vdExpectedMZ[i];
 					vdObservedRelativeInt[i] = dCurrentRelativeInt;
+					viObservedCharge[i] = vipreprocessedCharge[iIndex4SelectedFound];
 					minIntensityError = currentIntensityError;
 				}
 			}
@@ -1380,7 +1388,7 @@ bool MS2Scan::findProductIonSIP(const vector<double> &vdIonMass,
 	// add score of isotopic peak intensity
 	for (size_t i = 0; i < vbObserved.size(); i++)
 	{
-		if (i != (size_t)iIndex4MaxInt)
+		if (i != (size_t)iIndex4MaxInt && viObservedCharge[i] == iCharge)
 			dScoreWeight += scoreIntensity(vbObserved[i], vdObservedRelativeInt[i], vdExpectedRelativeInt[i]);
 	}
 	// avoid negtive
@@ -1391,11 +1399,9 @@ bool MS2Scan::findProductIonSIP(const vector<double> &vdIonMass,
 	}
 	// test whether the iCharge is consistant with viZinput
 	// if not, lower the dScoreWeight
-	if (vipreprocessedCharge[iMostAbundantPeakIndex] != 0)
-	{
-		if (vipreprocessedCharge[iMostAbundantPeakIndex] != iCharge)
-			dScoreWeight = dScoreWeight / 2;
-	}
+	if (vipreprocessedCharge[iMostAbundantPeakIndex] != iCharge &&
+		vipreprocessedCharge[iMostAbundantPeakIndex] != 0)
+		dScoreWeight = dScoreWeight / 2.0;
 	// calculate average mass error for this product ion
 	double dTotalRelativeIntensity = 0;
 	double dTotalMZError = 0;
@@ -1413,10 +1419,12 @@ bool MS2Scan::findProductIonSIP(const vector<double> &vdIonMass,
 };
 
 // it's primaryScorePetide in the previous version
-// but only for SIP now
-void MS2Scan::scoreWeightSumHighMS2(Peptide *currentPeptide) 
+// for frist time scoring for SIP search now
+void MS2Scan::scoreWeightSumHighMS2(tuple<double, int, Peptide *> currentMassChargePeptidePtrTuple) // it's primaryScorePetide in the previous version
 {
 	double dScore = 0;
+	Peptide *currentPeptide = get<2>(currentMassChargePeptidePtrTuple);
+	int measuredCharge = get<1>(currentMassChargePeptidePtrTuple);
 	int iPeptideLength = currentPeptide->getPeptideLength(), i, j, iMostAbundantPeakIndex = 0;
 	int n; // Ion number starting from one
 	int z; // charge state
@@ -1425,8 +1433,12 @@ void MS2Scan::scoreWeightSumHighMS2(Peptide *currentPeptide)
 		   dBonus4ComplementaryFragmentObserved = 1.0;
 	string sPeptide = currentPeptide->getPeptideSeq();
 	//    cout<<currentPeptide->vvdYionMass.size()<<endl;
+	int chargeThresh = (2 < measuredCharge)
+						   ? 2
+						   : measuredCharge;
+	// int chargeThresh = 1;
 	for (n = 0; n < (int)currentPeptide->vvdYionMass.size(); ++n)
-		for (z = 1; z <= iParentChargeState; ++z)
+		for (z = 1; z <= chargeThresh; ++z)
 		{
 			ProductIon currentIon;
 			currentIon.setProductIon('y', n + 1, z);
@@ -1451,7 +1463,7 @@ void MS2Scan::scoreWeightSumHighMS2(Peptide *currentPeptide)
 		}
 
 	for (n = 0; n < (int)currentPeptide->vvdBionMass.size(); ++n)
-		for (z = 1; z <= iParentChargeState; ++z)
+		for (z = 1; z <= chargeThresh; ++z)
 		{
 			ProductIon currentIon;
 			currentIon.setProductIon('b', n + 1, z);
@@ -1512,7 +1524,7 @@ void MS2Scan::scoreWeightSumHighMS2(Peptide *currentPeptide)
 		// cout<<dScore<<endl;
 	}
 
-	saveScoreSIP(dScore, currentPeptide, vpWeightSumTopPeptides);
+	saveScoreSIP(dScore, currentMassChargePeptidePtrTuple, vpWeightSumTopPeptides);
 }
 
 bool MS2Scan::binarySearch(const double &dTarget, const vector<double> &vdList, const double &dTolerance, vector<int> &viIndex4Found)
@@ -1801,10 +1813,9 @@ double MS2Scan::scoreWeightSum(string *currentPeptide, vector<double> *pvdYionMa
 	return dScore;
 }
 
-double MS2Scan::scoreWeightSumHighMS2(string *currentPeptide, vector<vector<double>> *vvdYionMass, vector<vector<double>> *vvdYionProb,
+double MS2Scan::scoreWeightSumHighMS2(string *currentPeptide, const int measuredCharge, vector<vector<double>> *vvdYionMass, vector<vector<double>> *vvdYionProb,
 									  vector<vector<double>> *vvdBionMass, vector<vector<double>> *vvdBionProb)
 {
-
 	double dScore = 0;
 	int iPeptideLength = 0;
 	for (int i = 0; i < (int)currentPeptide->length(); ++i)
@@ -1819,35 +1830,28 @@ double MS2Scan::scoreWeightSumHighMS2(string *currentPeptide, vector<vector<doub
 	int z; // charge state
 	vector<ProductIon> vFoundIons;
 	double dScoreWeight = 0, dMZError = 1, dMostAbundantObservedMZ = 0, dAverageMZError = 0, dBonus4ComplementaryFragmentObserved = 1.0;
-
+	int chargeThresh = (2 < measuredCharge)
+						   ? 2
+						   : measuredCharge;
+	// int chargeThresh = 1;
 	for (n = 0; n < (int)vvdYionMass->size(); ++n)
 	{
-		for (z = 1; z <= iParentChargeState; ++z)
+		for (z = 1; z <= chargeThresh; ++z)
 		{
 			ProductIon currentIon;
 			currentIon.setProductIon('y', n + 1, z);
-			if (ProNovoConfig::getSearchType() == "SIP")
+			// use findProductIonSIP for both SIP and regular search
+			if (findProductIonSIP((*vvdYionMass)[n], (*vvdYionProb)[n], z, dScoreWeight, dMZError, dMostAbundantObservedMZ, iMostAbundantPeakIndex))
 			{
-				if (findProductIonSIP((*vvdYionMass)[n], (*vvdYionProb)[n], z, dScoreWeight, dMZError, dMostAbundantObservedMZ, iMostAbundantPeakIndex))
-				{
-					currentIon.setObservedInfo(dMZError, dScoreWeight, dMostAbundantObservedMZ, iMostAbundantPeakIndex);
-					vFoundIons.push_back(currentIon);
-				}
-			}
-			else
-			{
-				if (findProductIon((*vvdYionMass)[n], (*vvdYionProb)[n], z, dScoreWeight, dMZError, dMostAbundantObservedMZ, iMostAbundantPeakIndex))
-				{
-					currentIon.setObservedInfo(dMZError, dScoreWeight, dMostAbundantObservedMZ, iMostAbundantPeakIndex);
-					vFoundIons.push_back(currentIon);
-				}
+				currentIon.setObservedInfo(dMZError, dScoreWeight, dMostAbundantObservedMZ, iMostAbundantPeakIndex);
+				vFoundIons.push_back(currentIon);
 			}
 		}
 	}
 
 	for (n = 0; n < (int)vvdBionMass->size(); ++n)
 	{
-		for (z = 1; z <= iParentChargeState; ++z)
+		for (z = 1; z <= chargeThresh; ++z)
 		{
 			ProductIon currentIon;
 			currentIon.setProductIon('b', n + 1, z);
@@ -1960,8 +1964,14 @@ void ProductIon::setComplementaryFragmentObserved(bool bComplementaryFragmentObs
 
 int PeptideUnit::iNumScores = 0;
 
-void PeptideUnit::setPeptideUnitInfo(const Peptide *currentPeptide, const double &dScore, string sScoringFunction)
+void PeptideUnit::setPeptideUnitInfo(const tuple<double, int, Peptide *> currentMassChargePeptidePtrTuple, const double &dScore, string sScoringFunction)
 {
+	double measuredMass;
+	int measuredCharge;
+	Peptide *currentPeptide;
+	tie(measuredMass, measuredCharge, currentPeptide) = currentMassChargePeptidePtrTuple;
+	dMeasuredParentMass = measuredMass;
+	iMeasuredParentCharge = measuredCharge;
 	dCalculatedParentMass = currentPeptide->getPeptideMass();
 	sIdentifiedPeptide = currentPeptide->getPeptideSeq();
 	sOriginalPeptide = currentPeptide->getOriginalPeptideSeq();

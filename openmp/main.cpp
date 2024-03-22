@@ -8,47 +8,61 @@
 using namespace std;
 namespace fs = std::filesystem;
 
-static void searchFT2Files(std::vector<std::string> &vsFT2Filenames, const std::string &sWorkingDirectory) {
-    const std::vector<std::string> patterns = {".ft2", ".FT2", ".ms2", ".MS2", ".mzml", ".mzML"};    
-    for (const auto &entry : fs::directory_iterator(sWorkingDirectory)) {
-        if (entry.is_regular_file()) {
-            for (const auto &pattern : patterns) {
-                if (entry.path().extension() == pattern) {
-                    vsFT2Filenames.push_back(entry.path().string());
-                    break;
-                }
-            }
-        }
-    }
-    if (vsFT2Filenames.empty()) {
-        std::cerr << "no scan file in the working directory" << std::endl;
-        exit(1);
-    }
-    char separator = ProNovoConfig::getSeparator();
-    for (auto &filename : vsFT2Filenames) {
-        filename = sWorkingDirectory + separator + filename;
-    }
-}
-
-static void searchConfigureFiles(vector<string> &vsConfigureFilenames, const string &sConfigFileDirectory)
+static void searchFT2Files(std::vector<std::string> &vsFT2Filenames, const std::string &sWorkingDirectory)
 {
-	const std::vector<std::string> patterns = { ".CFG", ".cfg"};
-	for (const auto& entry : fs::directory_iterator(sConfigFileDirectory)) {
-		if (entry.is_regular_file()) {
-			for (const auto& pattern : patterns) {
-				if (entry.path().extension() == pattern) {
-					vsConfigureFilenames.push_back(entry.path().string());
+	const std::vector<std::string> patterns = {".ft2", ".FT2", ".mzml", ".mzML"};
+	for (const auto &entry : fs::directory_iterator(sWorkingDirectory))
+	{
+		if (entry.is_regular_file())
+		{
+			for (const auto &pattern : patterns)
+			{
+				if (entry.path().extension() == pattern)
+				{
+					// only add the file name without path
+					vsFT2Filenames.push_back(entry.path().filename().string());
 					break;
 				}
 			}
 		}
 	}
-	if (vsConfigureFilenames.empty()) {
+	if (vsFT2Filenames.empty())
+	{
 		std::cerr << "no scan file in the working directory" << std::endl;
 		exit(1);
 	}
 	char separator = ProNovoConfig::getSeparator();
-	for (auto& filename : vsConfigureFilenames) {
+	for (auto &filename : vsFT2Filenames)
+	{
+		filename = sWorkingDirectory + separator + filename;
+	}
+}
+
+static void searchConfigureFiles(vector<string> &vsConfigureFilenames, const string &sConfigFileDirectory)
+{
+	const std::vector<std::string> patterns = {".CFG", ".cfg"};
+	for (const auto &entry : fs::directory_iterator(sConfigFileDirectory))
+	{
+		if (entry.is_regular_file())
+		{
+			for (const auto &pattern : patterns)
+			{
+				if (entry.path().extension() == pattern)
+				{
+					vsConfigureFilenames.push_back(entry.path().filename().string());
+					break;
+				}
+			}
+		}
+	}
+	if (vsConfigureFilenames.empty())
+	{
+		std::cerr << "no scan file in the working directory" << std::endl;
+		exit(1);
+	}
+	char separator = ProNovoConfig::getSeparator();
+	for (auto &filename : vsConfigureFilenames)
+	{
 		filename = sConfigFileDirectory + separator + filename;
 	}
 }
@@ -60,7 +74,7 @@ static void searchConfigureFiles(vector<string> &vsConfigureFilenames, const str
  */
 
 static void initializeArguments(int argc, char **argv, vector<string> &vsFT2Filenames, string &sWorkingDirectory, vector<string> &vsConfigureFilenames,
-						 string &sSingleWorkingFile, string &sFastaFile, string &sOutputDirectory, bool &bScreenOutput)
+								string &sSingleWorkingFile, string &sFastaFile, string &sOutputDirectory, bool &bScreenOutput)
 {
 	int i;
 	string sConfigFileDirectory, sConfigFilename;
@@ -150,8 +164,9 @@ static void handleScan(const string &sFT2filename, const string &sOutputDirector
 
 	if (bScreenOutput)
 	{
-		cout << "Reading MS2 scan file " << sFT2filename << endl;
-		cout << "Using Configuration file " << sConfigFilename << endl;
+		cout << "Reading MS2 scan file: " << sFT2filename << endl;
+		cout << "Using fasta file: " << ProNovoConfig::getFASTAfilename() << endl;
+		cout << "Using Configuration file: " << sConfigFilename << endl;
 	}
 
 	if (!pMainMS2ScanVector->loadMassData())
@@ -173,6 +188,15 @@ static void handleScan(const string &sFT2filename, const string &sOutputDirector
 
 int main(int argc, char **argv)
 {
+#pragma omp parallel
+	{
+		int tid = omp_get_thread_num();
+		if (tid == 0)
+		{
+			int nthreads = omp_get_num_threads();
+			cout << "Number of threads: " << nthreads << endl;
+		}
+	}
 	// record the start time point
 	double begin = omp_get_wtime();
 	// A list of FT2/MS2 files to be searched
@@ -204,7 +228,7 @@ int main(int argc, char **argv)
 	}
 	// record the end time point
 	double end = omp_get_wtime();
-	cout << "\nSipros finished in :" << double(end - begin) << " Seconds." << endl
+	cout << "Sipros finished in " << double(end - begin) << " Seconds." << endl
 		 << endl;
 	return 0;
 }

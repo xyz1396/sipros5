@@ -1,4 +1,4 @@
-#!/bin/bash 
+#!/bin/bash
 # conda create -n mpi -c conda-forge openmpi gxx_linux-64 gcc_linux-64 cmake gperftools
 # compiler name x86_64-conda_cos6-linux-gnu-g++
 # . ~/miniconda3/etc/profile.d/conda.sh
@@ -17,12 +17,21 @@ case $1 in
 "build")
     mkdir build
     cd build
-    # cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER="gcc-11" -DCMAKE_CXX_COMPILER="g++-11" ..
-    cmake ${CMAKE_ARGS} -DCMAKE_BUILD_TYPE=Release ..
-    ## cross compile in sysroot of conda
-    ## https://docs.conda.io/projects/conda-build/en/latest/resources/compiler-tools.html
-    # cmake ${CMAKE_ARGS} -DCMAKE_TOOLCHAIN_FILE="cross-linux.cmake" -DCMAKE_BUILD_TYPE=Release ..
-    # make -j8
+    cmake -DCMAKE_BUILD_TYPE=Release ..
+    cmake --build . --parallel 8
+    # add share lib for mpi version
+    cd ..
+    deplist=$(ldd bin/SiprosMPI | awk '{if (match($3,"/")){ print $3}}')
+    mkdir bin/libSiprosMPI
+    cp -L -n $deplist bin/libSiprosMPI
+    ;;
+"buildConda")
+    . ~/miniconda3/etc/profile.d/conda.sh
+    conda activate mpi
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_PREFIX}/lib
+    mkdir build
+    cd build
+    cmake ${CMAKE_ARGS} -DCMAKE_BUILD_TYPE=Release -DBUILD_CONDA=true ..
     cmake --build . --parallel 8
     # add share lib for mpi version
     cd ..
@@ -36,8 +45,10 @@ case $1 in
     make -j8
     ;;
 "debug")
+    source ~/miniconda3/etc/profile.d/conda.sh
+    conda activate mpi
     cd build
-    cmake -DCMAKE_BUILD_TYPE=Debug ..
+    cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS_DEBUG="-O0 -g3" -DBUILD_CONDA=true ..
     make -j8
     ;;
 "make")

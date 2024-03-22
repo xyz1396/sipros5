@@ -540,10 +540,10 @@ class PepScores:
         self.lfScores = []
         self.liRanks = []
         self.lfScoreDiff = []  # difference between the current one with the second best one
-        for e in asWords[4:-1]:
+        for e in asWords[4:-3]:
             self.lfScores.append(float(e))
         # remove the {}
-        self.sProteinNames = (asWords[-1])[1:-1]
+        self.sProteinNames = (asWords[-3])[1:-1]
         self.fRankProduct = 0.0
         self.iRank = 0
         self.sSearchName = _sSearchName

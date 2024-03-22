@@ -32,6 +32,8 @@ class MS2ScanVector {
 	// this is used for quickly inserting a peptide into corrent MS2 scans
 	// vpAllMS2Scans and vpPrecursorMasses are in the same order
 	vector<double> vpPrecursorMasses;
+	// for peptide assignment
+    vector<tuple<double, int, MS2Scan *>> vAllPrecursorMassChargeMS2ScanPtrTuples;
 	//vector <int> mass_w; // mass window
 	string sFT2Filename;    // the FT2 filename
 	string sOutputFile; // the output file name
@@ -40,7 +42,8 @@ class MS2ScanVector {
 	// this should be moved to the Peptide class or make it a static member in the Config class
 	map<char, double> mapResidueMass; // mass except N and C termini;
 
-	void saveScan(MS2Scan * pMS2Scan);
+	void saveMzmlScan(MS2Scan * pMS2Scan);
+	void saveFT2Scan(MS2Scan * pMS2Scan);
 	bool isMS1HighRes(const string & target);
 	bool ChargeDetermination(const vector<double> & vdAllmz, double pmz); //return true if parent_charge should be 1
 	bool bScreenOutput; // if true, allows standard output
@@ -88,6 +91,7 @@ public:
 	// Creat a +2 scan and a +3 scan for an unknown multipe charged scan.
 	// Return false if there is a problem with the file
 	bool loadMassData();
+	bool loadFT2File();
 	bool ReadFT2File();    //Read FT2 files
 	bool ReadMzmlFile();   //Read mzML files
 

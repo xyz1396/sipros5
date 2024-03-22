@@ -34,7 +34,7 @@
 # for cmake
 **/bin/*
 **/build/*
-!bin/*
+# !bin/*
 
 # for vs
 .vs/

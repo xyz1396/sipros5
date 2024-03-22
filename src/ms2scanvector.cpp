@@ -70,6 +70,10 @@ bool MS2ScanVector::ReadFT2File()
 	int tmp_charge;
 	double tmp_mz, tmp_intensity;
 
+	// for DIA precursor reading in isolation window
+	int parentCharge = 0;
+	double parentMZ = 0;
+
 	bReVal = ft2_stream.is_open();
 	if (bReVal)
 	{
@@ -131,7 +135,7 @@ bool MS2ScanVector::ReadFT2File()
 						pMS2Scan->isMS2HighRes = true;
 					else
 						pMS2Scan->isMS2HighRes = false;
-					saveScan(pMS2Scan);
+					saveFT2Scan(pMS2Scan);
 				}
 				pMS2Scan = new MS2Scan;
 				pMS2Scan->sFT2Filename = sFT2Filename;
@@ -158,6 +162,21 @@ bool MS2ScanVector::ReadFT2File()
 				// input.str(words[2]);
 				// input >> pMS2Scan->dParentNeutralMass;
 				// input.clear();
+
+				// for DIA precursor and wide window DDA reading in isolation window
+				parentCharge = 0;
+				parentMZ = 0;
+				for (size_t i = 3; i + 1 < words.size(); i += 2)
+				{
+					input.str(words[i]);
+					input >> parentCharge;
+					pMS2Scan->iParentChargeStates.push_back(parentCharge);
+					input.clear();
+					input.str(words[i + 1]);
+					input >> parentMZ;
+					pMS2Scan->dParentMZs.push_back(parentMZ);
+					input.clear();
+				}
 			}
 			else if (sline.at(0) == 'I')
 			{
@@ -181,7 +200,7 @@ bool MS2ScanVector::ReadFT2File()
 		else
 			pMS2Scan->isMS2HighRes = false;
 		if (!flag_1stScan) // To avoid empty file
-			saveScan(pMS2Scan);
+			saveFT2Scan(pMS2Scan);
 	}
 	return bReVal;
 }
@@ -241,12 +260,82 @@ bool MS2ScanVector::ReadMzmlFile()
 		}
 		else
 		{
-			saveScan(pMS2Scan);
+			saveMzmlScan(pMS2Scan);
 		}
 	}
 	_vSpectra->clear();
 	delete _vSpectra;
 	bReVal = true;
+	return bReVal;
+}
+
+// updated for new DIA and DDA FT2 with precursor charge
+bool MS2ScanVector::loadFT2File()
+{
+	bool bReVal; // false when the file fails to be opened.
+	double parentNeutralMass;
+	bReVal = ReadFT2File();
+	if (bReVal)
+	{
+		vAllPrecursorMassChargeMS2ScanPtrTuples.reserve(vpAllMS2Scans.size());
+		vpPrecursorMasses.reserve(vpAllMS2Scans.size());
+		for (size_t i = 0; i < vpAllMS2Scans.size(); i++)
+		{
+			if (vpAllMS2Scans[i]->iParentChargeState > 0)
+			{
+				parentNeutralMass = vpAllMS2Scans[i]->dParentMZ *
+										vpAllMS2Scans[i]->iParentChargeState -
+									vpAllMS2Scans[i]->iParentChargeState *
+										ProNovoConfig::getProtonMass();
+				vAllPrecursorMassChargeMS2ScanPtrTuples.push_back({parentNeutralMass,
+																   vpAllMS2Scans[i]->iParentChargeState,
+																   vpAllMS2Scans[i]});
+				// ignore peak at isolation window center
+				for (size_t j = 0; j < vpAllMS2Scans[i]->iParentChargeStates.size(); j++)
+				{
+					if (abs(vpAllMS2Scans[i]->dParentMZs[j] * vpAllMS2Scans[i]->iParentChargeStates[j] -
+							vpAllMS2Scans[i]->dParentMZ * vpAllMS2Scans[i]->iParentChargeState) >
+						ProNovoConfig::getMassAccuracyParentIon())
+					{
+						parentNeutralMass = vpAllMS2Scans[i]->dParentMZs[j] *
+												vpAllMS2Scans[i]->iParentChargeStates[j] -
+											vpAllMS2Scans[i]->iParentChargeStates[j] *
+												ProNovoConfig::getProtonMass();
+						vAllPrecursorMassChargeMS2ScanPtrTuples.push_back({parentNeutralMass,
+																		   vpAllMS2Scans[i]->iParentChargeStates[j],
+																		   vpAllMS2Scans[i]});
+					}
+				}
+			}
+			else
+			{
+				// add a charge threshold for scan preprocess and score function
+				vpAllMS2Scans[i]->iParentChargeState = 3;
+				for (size_t j = 0; j < vpAllMS2Scans[i]->iParentChargeStates.size(); j++)
+				{
+					parentNeutralMass = vpAllMS2Scans[i]->dParentMZs[j] *
+											vpAllMS2Scans[i]->iParentChargeStates[j] -
+										vpAllMS2Scans[i]->iParentChargeStates[j] *
+											ProNovoConfig::getProtonMass();
+					vAllPrecursorMassChargeMS2ScanPtrTuples.push_back({parentNeutralMass,
+																	   vpAllMS2Scans[i]->iParentChargeStates[j],
+																	   vpAllMS2Scans[i]});
+				}
+			}
+		}
+		std::sort(vAllPrecursorMassChargeMS2ScanPtrTuples.begin(), vAllPrecursorMassChargeMS2ScanPtrTuples.end(),
+				  [](const std::tuple<double, int, MS2Scan *> &a, const std::tuple<double, int, MS2Scan *> &b)
+				  {
+					  return get<0>(a) < get<0>(b);
+				  });
+		for (size_t i = 0; i < vAllPrecursorMassChargeMS2ScanPtrTuples.size(); i++)
+		{
+			vpPrecursorMasses.push_back(get<0>(vAllPrecursorMassChargeMS2ScanPtrTuples[i]));
+		}
+	}
+#ifdef Ticktock
+	TOCK1ST(loadFT2file);
+#endif
 	return bReVal;
 }
 
@@ -256,29 +345,59 @@ bool MS2ScanVector::loadMassData()
 	// sort all MS2 scans in vpAllProteins by ascending order of their precursor masses
 	// save their precursor masses in vpPrecursorMasses to quick look-up in assignPeptides2Scans()
 
-	bool bReVal; // false when the file fails to be opened.
+	bool bReVal = false; // false when the file fails to be opened.
 	vector<MS2Scan *>::iterator it;
 
 	// check the suffix of the MS2 data file
 	string filename_str = this->sFT2Filename;
 	transform(filename_str.begin(), filename_str.end(), filename_str.begin(), (int (*)(int))tolower);
-
-	if (filename_str.substr(filename_str.rfind('.') + 1) == "mzml")
+	string fileNameSuffix = filename_str.substr(filename_str.rfind('.') + 1);
+	if (fileNameSuffix == "mzml")
 	{
 		bReVal = ReadMzmlFile();
+		if (bReVal)
+		{
+			sort(vpAllMS2Scans.begin(), vpAllMS2Scans.end(), myless);
+			vAllPrecursorMassChargeMS2ScanPtrTuples.reserve(vpAllMS2Scans.size());
+			vpPrecursorMasses.reserve(vpAllMS2Scans.size());
+			for (it = vpAllMS2Scans.begin(); it < vpAllMS2Scans.end(); it++)
+			{
+				vpPrecursorMasses.push_back((*it)->dParentNeutralMass);
+				vAllPrecursorMassChargeMS2ScanPtrTuples.push_back({(*it)->dParentNeutralMass,
+																   (*it)->iParentChargeState,
+																   (*it)});
+			}
+		}
+	}
+	else if (fileNameSuffix == "ft2")
+	{
+		bReVal = loadFT2File();
 	}
 	else
 	{
-		bReVal = ReadFT2File();
+		cout << "MS2 format not support!" << endl;
 	}
 
-	if (bReVal)
+	double mass = 0;
+	int charge = 0;
+	MS2Scan *pMS2Scan;
+	for (const auto &tuple : vAllPrecursorMassChargeMS2ScanPtrTuples)
 	{
-		sort(vpAllMS2Scans.begin(), vpAllMS2Scans.end(), myless);
-		for (it = vpAllMS2Scans.begin(); it < vpAllMS2Scans.end(); it++)
-			vpPrecursorMasses.push_back((*it)->dParentNeutralMass);
+		tie(mass, charge, pMS2Scan) = tuple;
+		// set max Parent Neutral Mass in isolation window of each MS2Scan for MVH score function
+		if (pMS2Scan->dParentNeutralMass < mass)
+			pMS2Scan->dParentNeutralMass = mass;
+		// set max parent mass in isolation window of each MS2Scan for Xcorr score function
+		mass = mass + charge * ProNovoConfig::getProtonMass();
+		if (pMS2Scan->dParentMass < mass)
+			pMS2Scan->dParentMass = mass;
+		// set max precusor mass for Xcorr score function
+		if (ProNovoConfig::dMaxMS2ScanMass < mass)
+			ProNovoConfig::dMaxMS2ScanMass = mass;
+		// set max precusor charge for Xcorr score function
+		if (ProNovoConfig::iMaxPercusorCharge < charge)
+			ProNovoConfig::iMaxPercusorCharge = charge;
 	}
-
 	return bReVal;
 }
 
@@ -314,7 +433,24 @@ bool MS2ScanVector::myless(MS2Scan *pMS2Scan1, MS2Scan *pMS2Scan2)
 	return (pMS2Scan1->dParentNeutralMass < pMS2Scan2->dParentNeutralMass);
 }
 
-void MS2ScanVector::saveScan(MS2Scan *pMS2Scan)
+void MS2ScanVector::saveFT2Scan(MS2Scan *pMS2Scan)
+{
+	// for DIA with precursors' charge and mz in isolation windows
+	if (pMS2Scan->iParentChargeState == 0)
+	{
+		if (pMS2Scan->iParentChargeStates.size() > 0)
+			vpAllMS2Scans.push_back(pMS2Scan);
+	}
+	// for new DDA raw
+	else
+	{
+		pMS2Scan->dParentNeutralMass = pMS2Scan->dParentMZ * pMS2Scan->iParentChargeState -
+									   pMS2Scan->iParentChargeState * ProNovoConfig::getProtonMass();
+		vpAllMS2Scans.push_back(pMS2Scan);
+	}
+}
+
+void MS2ScanVector::saveMzmlScan(MS2Scan *pMS2Scan)
 { // parentChargeState > 0, save, otherwise, try 1, or 2 and 3
 	int j;
 	bool bchargeOne;
@@ -329,7 +465,6 @@ void MS2ScanVector::saveScan(MS2Scan *pMS2Scan)
 			*pMS2newScan = *pMS2Scan;
 			pMS2newScan->iParentChargeState = j;
 			pMS2newScan->dParentNeutralMass = (pMS2newScan->dParentMZ) * (pMS2newScan->iParentChargeState) - pMS2newScan->iParentChargeState * ProNovoConfig::getProtonMass();
-			pMS2newScan->dParentMass = (pMS2newScan->dParentMZ) * (pMS2newScan->iParentChargeState);
 			vpAllMS2Scans.push_back(pMS2newScan);
 		}
 		else
@@ -342,7 +477,6 @@ void MS2ScanVector::saveScan(MS2Scan *pMS2Scan)
 				*pMS2newScan = *pMS2Scan;
 				pMS2newScan->iParentChargeState = j;
 				pMS2newScan->dParentNeutralMass = (pMS2newScan->dParentMZ) * (pMS2newScan->iParentChargeState) - pMS2newScan->iParentChargeState * ProNovoConfig::getProtonMass();
-				pMS2newScan->dParentMass = (pMS2newScan->dParentMZ) * (pMS2newScan->iParentChargeState);
 				vpAllMS2Scans.push_back(pMS2newScan);
 			}
 		}
@@ -354,15 +488,6 @@ void MS2ScanVector::saveScan(MS2Scan *pMS2Scan)
 		pMS2newScan->dParentNeutralMass = (pMS2newScan->dParentMZ) * (pMS2newScan->iParentChargeState) - (pMS2newScan->iParentChargeState) * ProNovoConfig::getProtonMass();
 		pMS2newScan->dParentMass = (pMS2newScan->dParentMZ) * (pMS2newScan->iParentChargeState);
 		vpAllMS2Scans.push_back(pMS2newScan);
-	}
-
-	if (pMS2newScan->dParentMass > ProNovoConfig::dMaxMS2ScanMass)
-	{
-		ProNovoConfig::dMaxMS2ScanMass = pMS2newScan->dParentMass;
-	}
-	if (pMS2newScan->iParentChargeState > ProNovoConfig::iMaxPercusorCharge)
-	{
-		ProNovoConfig::iMaxPercusorCharge = pMS2newScan->iParentChargeState;
 	}
 	delete pMS2Scan;
 }
@@ -551,8 +676,15 @@ bool MS2ScanVector::assignPeptides2Scans(Peptide *currentPeptide)
 		if ((pairMS2Range.first > -1) && (pairMS2Range.second > -1))
 		{
 			for (i = pairMS2Range.first; i <= pairMS2Range.second; i++)
-			{
-				vpAllMS2Scans.at(i)->vpPeptides.push_back(currentPeptide);
+			{ // vpAllMS2ScanPtrs.at(i)->vpPeptides.push_back(currentPeptide);
+				// for DIA and DDA with large isolation window
+				tuple<double, int, Peptide *> currentMassChargePeptidePtrTuple =
+					{
+						get<0>(vAllPrecursorMassChargeMS2ScanPtrTuples[i]),
+						get<1>(vAllPrecursorMassChargeMS2ScanPtrTuples[i]),
+						currentPeptide};
+				get<2>(vAllPrecursorMassChargeMS2ScanPtrTuples[i])
+					->vMassChargePeptidePtrTuples.push_back(currentMassChargePeptidePtrTuple);
 			}
 			bAssigned = true;
 		}
@@ -642,6 +774,9 @@ void MS2ScanVector::processPeptideArrayMvhTask(vector<Peptide *> &vpPeptideArray
 
 	iPeptideArraySize = vpPeptideArray.size();
 
+	MS2Scan *scanPtr;
+	int precursorCharge;
+	double precusorMass;
 	for (i = 0; i < iPeptideArraySize; i++)
 	{
 		bAssigned = false;
@@ -662,26 +797,27 @@ void MS2ScanVector::processPeptideArrayMvhTask(vector<Peptide *> &vpPeptideArray
 				// calculate the score
 				for (k = pairMS2Range.first; k <= pairMS2Range.second; ++k)
 				{
-					if (vpAllMS2Scans.at(k)->bSkip)
+					tie(precusorMass, precursorCharge, scanPtr) = vAllPrecursorMassChargeMS2ScanPtrTuples[k];
+					if (scanPtr->bSkip)
 					{
 						continue;
 					}
 					omp_set_lock(&(pLck[k]));
-					bMerged = vpAllMS2Scans.at(k)->mergePeptide(vpAllMS2Scans.at(k)->vpWeightSumTopPeptides,
-																vpPeptideArray.at(i)->getPeptideForScoring(), vpPeptideArray.at(i)->getProteinName());
+					bMerged = scanPtr->mergePeptide(scanPtr->vpWeightSumTopPeptides,
+													vpPeptideArray.at(i)->getPeptideForScoring(), vpPeptideArray.at(i)->getProteinName());
 					omp_unset_lock(&(pLck[k]));
 					// not merged then score
 					if (!bMerged)
 					{
-						bScored = MVH::ScoreSequenceVsSpectrum(vpPeptideArray.at(i)->sNeutralLossPeptide,
-															   vpAllMS2Scans.at(k), psequenceIonMasses.at(iThreadId), _ppdAAforward.at(iThreadId),
+						bScored = MVH::ScoreSequenceVsSpectrum(vpPeptideArray.at(i)->sNeutralLossPeptide, precursorCharge,
+															   scanPtr, psequenceIonMasses.at(iThreadId), _ppdAAforward.at(iThreadId),
 															   _ppdAAreverse.at(iThreadId), dMvh, pSeqs.at(iThreadId));
 						if (bScored)
 						{
 							omp_set_lock(&(pLck[k]));
-							vpAllMS2Scans.at(k)->saveScore(dMvh, vpPeptideArray.at(i),
-														   vpAllMS2Scans.at(k)->vpWeightSumTopPeptides,
-														   "MVH");
+							scanPtr->saveScore(dMvh, {precusorMass, precursorCharge, vpPeptideArray.at(i)},
+											   scanPtr->vpWeightSumTopPeptides,
+											   "MVH");
 							omp_unset_lock(&(pLck[k]));
 						}
 					}
@@ -766,8 +902,8 @@ void MS2ScanVector::searchDatabaseMvh()
 	this->postMvh();
 	MVH::destroyLnTable();
 	PeptideUnit::iNumScores = 1;
-	cout << endl
-		 << "Search done." << endl;
+	cout << "MVH search done.\n"
+		 << endl;
 }
 
 void MS2ScanVector::searchDatabaseWdpSip()
@@ -898,8 +1034,8 @@ void MS2ScanVector::searchDatabaseMvhTask()
 	this->postMvh();
 	MVH::destroyLnTable();
 	PeptideUnit::iNumScores = 1;
-	cout << endl
-		 << "Search done." << endl;
+	cout << "MVH search done.\n"
+		 << endl;
 }
 
 void MS2ScanVector::startProcessingMvh()
@@ -951,19 +1087,23 @@ void MS2ScanVector::startProcessingWdpSip()
 
 void MS2ScanVector::postProcessAllMs2WdpXcorr()
 {
-
+	CLOCKSTART;
 	int i, iScanSize;
 	iScanSize = (int)vpAllMS2Scans.size();
 
 	postProcessAllMs2Xcorr();
+	cout << "\nXcorr search done." << endl;
 
 	postProcessAllMs2Wdp();
+	cout << "\nWDP search done.\n"
+		 << endl;
 
 #pragma omp parallel for schedule(guided)
 	for (i = 0; i < iScanSize; i++)
 	{
 		vpAllMS2Scans.at(i)->scoreFeatureCalculation();
 	}
+	CLOCKSTOP;
 }
 
 void MS2ScanVector::postProcessAllMs2MvhXcorr()
@@ -1021,6 +1161,7 @@ void MS2ScanVector::postProcessAllMs2Wdp()
 			{
 				dWeightSum = vpAllMS2Scans.at(i)->scoreWeightSumHighMS2(
 					&(vpAllMS2Scans.at(i)->vpWeightSumTopPeptides.at(j)->sPeptideForScoring),
+					vpAllMS2Scans[i]->vpWeightSumTopPeptides[j]->iMeasuredParentCharge,
 					vpvvdYionMass.at(iThreadId), vpvvdYionProb.at(iThreadId), vpvvdBionMass.at(iThreadId),
 					vpvvdBionProb.at(iThreadId));
 			}
@@ -1296,7 +1437,7 @@ void MS2ScanVector::postProcessAllMs2MvhSip()
 			{
 				double dMvh = 0;
 				PeptideUnit *pepUnit = vpAllMS2Scans.at(i)->vpWeightSumTopPeptides.at(j);
-				MVH::ScoreSequenceVsSpectrumSIP(pepUnit->sPeptideForScoring, vpAllMS2Scans.at(i),
+				MVH::ScoreSequenceVsSpectrumSIP(pepUnit->sPeptideForScoring, pepUnit->iMeasuredParentCharge, vpAllMS2Scans.at(i),
 												psequenceIonMasses.at(iThreadId), pepUnit->vvdYionMass, pepUnit->vvdYionProb,
 												pepUnit->vvdBionMass, pepUnit->vvdBionProb, dMvh, pSeqs.at(iThreadId));
 				vpAllMS2Scans.at(i)->vpWeightSumTopPeptides.at(j)->vdScores.push_back(dMvh);
@@ -1378,7 +1519,7 @@ void MS2ScanVector::writeOutputEnsemble()
 			   << "\tScanType\tSearchName\tRetentionTime" << endl;
 	// PSM level head
 	outputFile << "*\tIdentifiedPeptide\tOriginalPeptide\tCalculatedParentMass "
-			   << "\tMVH\tXcorr\tWDP\tProteinNames"
+			   << "\tMVH\tXcorr\tWDP\tProteinNames\tmeasuredCharge\tMeasuredMass"
 			   << endl;
 
 	for (i = 0; i < ((int)vpAllMS2Scans.size()); i++)
@@ -1389,8 +1530,8 @@ void MS2ScanVector::writeOutputEnsemble()
 			outputFile << "+";
 			outputFile << "\t" << sTailFT2FileName;
 			outputFile << "\t" << vpAllMS2Scans.at(i)->iScanId;
-			outputFile << "\t" << vpAllMS2Scans.at(i)->iParentChargeState;
-			outputFile << "\t" << setiosflags(ios::fixed) << setprecision(5) << vpAllMS2Scans.at(i)->dParentNeutralMass;
+			outputFile << "\t" << vpAllMS2Scans.at(i)->vpWeightSumTopPeptides[0]->iMeasuredParentCharge;
+			outputFile << "\t" << setiosflags(ios::fixed) << setprecision(5) << vpAllMS2Scans.at(i)->vpWeightSumTopPeptides[0]->dMeasuredParentMass;
 			outputFile << "\t" << vpAllMS2Scans.at(i)->getScanType();
 			outputFile << "\t" << ProNovoConfig::getSearchName();
 			// sInt sum of intensity
@@ -1441,7 +1582,13 @@ void MS2ScanVector::writeOutputEnsemble()
 							   << vpAllMS2Scans.at(i)->vpWeightSumTopPeptides.at(j)->vdScores.at(k) << "\t";
 				}
 				// ProteinNames
-				outputFile << "{" << vpAllMS2Scans.at(i)->vpWeightSumTopPeptides.at(j)->sProteinNames << "}" << endl;
+				outputFile << "{" << vpAllMS2Scans.at(i)->vpWeightSumTopPeptides.at(j)->sProteinNames << "}"
+						   << "\t";
+				// measured charge
+				outputFile << vpAllMS2Scans.at(i)->vpWeightSumTopPeptides.at(j)->iMeasuredParentCharge << "\t";
+				// measured mass
+				outputFile << setiosflags(ios::fixed) << setprecision(4)
+						   << vpAllMS2Scans.at(i)->vpWeightSumTopPeptides.at(j)->dMeasuredParentMass << endl;
 			}
 		}
 	}
