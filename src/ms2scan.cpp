@@ -1813,6 +1813,7 @@ double MS2Scan::scoreWeightSum(string *currentPeptide, vector<double> *pvdYionMa
 	return dScore;
 }
 
+// for post score top N peptide by WDP in regular search
 double MS2Scan::scoreWeightSumHighMS2(string *currentPeptide, const int measuredCharge, vector<vector<double>> *vvdYionMass, vector<vector<double>> *vvdYionProb,
 									  vector<vector<double>> *vvdBionMass, vector<vector<double>> *vvdBionProb)
 {
@@ -1840,11 +1841,23 @@ double MS2Scan::scoreWeightSumHighMS2(string *currentPeptide, const int measured
 		{
 			ProductIon currentIon;
 			currentIon.setProductIon('y', n + 1, z);
-			// use findProductIonSIP for both SIP and regular search
-			if (findProductIonSIP((*vvdYionMass)[n], (*vvdYionProb)[n], z, dScoreWeight, dMZError, dMostAbundantObservedMZ, iMostAbundantPeakIndex))
+			if (ProNovoConfig::getSearchType()=="SIP")
+			// use findProductIonSIP for both SIP and regular search for FT2 format with charge
+			// if (ProNovoConfig::getSetFileNameSuffix() == "ft2")
 			{
-				currentIon.setObservedInfo(dMZError, dScoreWeight, dMostAbundantObservedMZ, iMostAbundantPeakIndex);
-				vFoundIons.push_back(currentIon);
+				if (findProductIonSIP((*vvdYionMass)[n], (*vvdYionProb)[n], z, dScoreWeight, dMZError, dMostAbundantObservedMZ, iMostAbundantPeakIndex))
+				{
+					currentIon.setObservedInfo(dMZError, dScoreWeight, dMostAbundantObservedMZ, iMostAbundantPeakIndex);
+					vFoundIons.push_back(currentIon);
+				}
+			}
+			else
+			{
+				if (findProductIon((*vvdYionMass)[n], (*vvdYionProb)[n], z, dScoreWeight, dMZError, dMostAbundantObservedMZ, iMostAbundantPeakIndex))
+				{
+					currentIon.setObservedInfo(dMZError, dScoreWeight, dMostAbundantObservedMZ, iMostAbundantPeakIndex);
+					vFoundIons.push_back(currentIon);
+				}
 			}
 		}
 	}
@@ -1855,7 +1868,9 @@ double MS2Scan::scoreWeightSumHighMS2(string *currentPeptide, const int measured
 		{
 			ProductIon currentIon;
 			currentIon.setProductIon('b', n + 1, z);
-			if (ProNovoConfig::getSearchType() == "SIP")
+			if (ProNovoConfig::getSearchType()=="SIP")
+			// use findProductIonSIP for both SIP and regular search for FT2 format with charge
+			// if (ProNovoConfig::getSetFileNameSuffix() == "ft2")
 			{
 				if (findProductIonSIP((*vvdBionMass)[n], (*vvdBionProb)[n], z, dScoreWeight, dMZError, dMostAbundantObservedMZ, iMostAbundantPeakIndex))
 				{
@@ -1909,7 +1924,9 @@ double MS2Scan::scoreWeightSumHighMS2(string *currentPeptide, const int measured
 		{
 			dBonus4ComplementaryFragmentObserved = 1.0;
 		}
-		if (ProNovoConfig::getSearchType() == "SIP")
+		if (ProNovoConfig::getSearchType()=="SIP")
+		// use findProductIonSIP for both SIP and regular search for FT2 format
+		// if (ProNovoConfig::getSetFileNameSuffix() == "ft2")
 		{
 			dScore += ProNovoConfig::scoreError(fabs(vFoundIons[i].getMZError() - dAverageMZError)) * vFoundIons[i].getScoreWeight() * dBonus4ComplementaryFragmentObserved;
 		}

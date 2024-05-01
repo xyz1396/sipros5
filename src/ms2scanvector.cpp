@@ -352,6 +352,7 @@ bool MS2ScanVector::loadMassData()
 	string filename_str = this->sFT2Filename;
 	transform(filename_str.begin(), filename_str.end(), filename_str.begin(), (int (*)(int))tolower);
 	string fileNameSuffix = filename_str.substr(filename_str.rfind('.') + 1);
+	ProNovoConfig::getSetFileNameSuffix() = fileNameSuffix;
 	if (fileNameSuffix == "mzml")
 	{
 		bReVal = ReadMzmlFile();

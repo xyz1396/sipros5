@@ -6,74 +6,92 @@
 #include "proNovoConfig.h"
 #include "ms2scanvector.h"
 
-#define WORKTAG    1
-#define DIETAG     2
+#define WORKTAG 1
+#define DIETAG 2
 
 using namespace std;
 namespace fs = std::filesystem;
 
-struct unit_of_workload_t {
+struct unit_of_workload_t
+{
 	string sFT2Filename;
+	string sFastaFileName;
 	string sConfigureFilename;
 	string sOutputDirectory;
 };
 
-void searchFT2Files(vector<string> & vsFT2Filenames, const string & sWorkingDirectory) {
-	    const std::vector<std::string> patterns = {".ft2", ".FT2", ".mzml", ".mzML"};    
-    for (const auto &entry : fs::directory_iterator(sWorkingDirectory)) {
-        if (entry.is_regular_file()) {
-            for (const auto &pattern : patterns) {
-                if (entry.path().extension() == pattern) {
-                    vsFT2Filenames.push_back(entry.path().string());
-                    break;
-                }
-            }
-        }
-    }
-    if (vsFT2Filenames.empty()) {
-        std::cerr << "no scan file in the working directory" << std::endl;
-        exit(1);
-    }
-    char separator = ProNovoConfig::getSeparator();
-    for (auto &filename : vsFT2Filenames) {
-        filename = sWorkingDirectory + separator + filename;
-    }
-}
-
-void searchConfigureFiles(vector<string> & vsConfigureFilenames, const string & sConfigFileDirectory) {
-	const std::vector<std::string> patterns = { ".CFG", ".cfg"};
-	for (const auto& entry : fs::directory_iterator(sConfigFileDirectory)) {
-		if (entry.is_regular_file()) {
-			for (const auto& pattern : patterns) {
-				if (entry.path().extension() == pattern) {
-					vsConfigureFilenames.push_back(entry.path().string());
+void searchFT2Files(vector<string> &vsFT2Filenames, const string &sWorkingDirectory)
+{
+	const std::vector<std::string> patterns = {".ft2", ".FT2", ".mzml", ".mzML"};
+	for (const auto &entry : fs::directory_iterator(sWorkingDirectory))
+	{
+		if (entry.is_regular_file())
+		{
+			for (const auto &pattern : patterns)
+			{
+				if (entry.path().extension() == pattern)
+				{
+					// only add the file name without path
+					vsFT2Filenames.push_back(entry.path().filename().string());
 					break;
 				}
 			}
 		}
 	}
-	if (vsConfigureFilenames.empty()) {
+	if (vsFT2Filenames.empty())
+	{
 		std::cerr << "no scan file in the working directory" << std::endl;
 		exit(1);
 	}
 	char separator = ProNovoConfig::getSeparator();
-	for (auto& filename : vsConfigureFilenames) {
+	for (auto &filename : vsFT2Filenames)
+	{
+		filename = sWorkingDirectory + separator + filename;
+	}
+}
+
+void searchConfigureFiles(vector<string> &vsConfigureFilenames, const string &sConfigFileDirectory)
+{
+	const std::vector<std::string> patterns = {".CFG", ".cfg"};
+	for (const auto &entry : fs::directory_iterator(sConfigFileDirectory))
+	{
+		if (entry.is_regular_file())
+		{
+			for (const auto &pattern : patterns)
+			{
+				if (entry.path().extension() == pattern)
+				{
+					vsConfigureFilenames.push_back(entry.path().filename().string());
+					break;
+				}
+			}
+		}
+	}
+	if (vsConfigureFilenames.empty())
+	{
+		std::cerr << "no scan file in the working directory" << std::endl;
+		exit(1);
+	}
+	char separator = ProNovoConfig::getSeparator();
+	for (auto &filename : vsConfigureFilenames)
+	{
 		filename = sConfigFileDirectory + separator + filename;
 	}
 }
 
-/* 
+/*
  * Parse command line arguments
  * Populate vsFT2Filenames
  * Set up SiprosConfig
  */
 
-void initializeArguments(int argc, char **argv, vector<string> & vsFT2Filenames, string & sWorkingDirectory,
-		vector<string> & vsConfigureFilenames, string & sSingleWorkingFile, string & sOutputDirectory,
-		bool & bScreenOutput)
+void initializeArguments(int argc, char **argv, vector<string> &vsFT2Filenames,
+						 string &sWorkingDirectory, vector<string> &vsConfigureFilenames,
+						 string &sSingleWorkingFile, string &sFastaFile, string &sOutputDirectory,
+						 bool &bScreenOutput)
 // Under MPI mode, a user can specify configure file directory by specifying -g
-// If no configre file or directory is specified, configure file directory is working directory 
-		{
+// If no configre file or directory is specified, configure file directory is working directory
+{
 	int i;
 
 	string sConfigFileDirectory, sConfigFilename;
@@ -83,52 +101,75 @@ void initializeArguments(int argc, char **argv, vector<string> & vsFT2Filenames,
 	sWorkingDirectory = "";
 	sConfigFilename = "";
 	sSingleWorkingFile = "";
+	sFastaFile = "";
 	sOutputDirectory = "";
 	sConfigFileDirectory = "";
 	bScreenOutput = true;
 
 	while (argc--)
 		vsArguments.push_back(*argv++);
-	for (i = 1; i <= (int) vsArguments.size() - 1; i++)
+	for (i = 1; i <= (int)vsArguments.size() - 1; i++)
 		if (vsArguments[i] == "-w")
 			sWorkingDirectory = vsArguments[++i];
 		else if (vsArguments[i] == "-c")
 			sConfigFilename = vsArguments[++i];
 		else if (vsArguments[i] == "-f")
 			sSingleWorkingFile = vsArguments[++i];
+		else if (vsArguments[i] == "-fasta")
+			sFastaFile = vsArguments[++i];
 		else if (vsArguments[i] == "-o")
 			sOutputDirectory = vsArguments[++i];
 		else if (vsArguments[i] == "-g")
 			sConfigFileDirectory = vsArguments[++i];
 		else if (vsArguments[i] == "-s")
 			bScreenOutput = false;
-		else if ((vsArguments[i] == "-h") || (vsArguments[i] == "--help")) {
-			cout << "Usage: -w WorkingDirectory -c ConfigurationFile, -f: A single MS2 or FT2 file to be processed"
-					<< endl;
-			cout
-					<< "If configuration file is not specified, Sipros will look for SiprosConfig.cfg in the directory of FT2 files"
-					<< endl;
-			cout << "-o output directory. If not specified, it is the same as that of the input scan file," << endl;
-			cout << "-g configure file directory. -s silence all standard output." << endl;
+		else if ((vsArguments[i] == "-h") || (vsArguments[i] == "--help"))
+		{
+			cout << "Usage 1: " << endl;
+			cout << "-w WorkingDirectory -c ConfigurationFile -o OutputDirectory" << endl;
+			cout << "Usage 2: " << endl;
+			cout << "-w WorkingDirectory -g ConfigurationFileDirectory -o OutputDirectory" << endl;
+			cout << "Usage 3: " << endl;
+			cout << "-f single_FT2_or_MZML_file -c ConfigurationFile -o OutputDirectory" << endl;
+			cout << "Usage 4: " << endl;
+			// set FASTA file out of cfg file
+			cout << "-f single_FT2_or_MZML_file -fasta proteins.fasta -c ConfigurationFile -o OutputDirectory" << endl;
+			cout << "Parameters: " << endl;
+			cout << "-c configure file to be used" << endl;
+			cout << "-g configure file directory " << endl;
+			cout << "-f a single MS2 or FT2 file to be processed" << endl;
+			cout << "-w directory of MS2 or FT2 files to be processed" << endl;
+			cout << "-fasta to set fasta file out of the configuration file" << endl;
+			cout << "-o output directory" << endl;
+			cout << "If not specified, it is the same as that of the input scan file," << endl;
+			cout << "-s silence all standard output." << endl;
+			cout << "If configuration file is not specified, Sipros will look for "
+				 << "SiprosConfig.cfg in the directory of FT2 files" << endl;
 			exit(0);
-		} else if (vsArguments[i] == "-p") {
+		}
+		else if (vsArguments[i] == "-p")
+		{
 			MVH::ProbabilityCutOff = atof(vsArguments[++i].c_str());
 			CometSearchMod::ProbabilityCutOff = MVH::ProbabilityCutOff;
-		} else {
-			cerr << "Unknown option " << vsArguments[i] << endl << endl;
+		}
+		else
+		{
+			cerr << "Unknown option " << vsArguments[i] << endl
+				 << endl;
 			exit(1);
 		}
 	if ((sWorkingDirectory == "") && (sSingleWorkingFile == ""))
 		sWorkingDirectory = ".";
 
-	if ((sWorkingDirectory != "") && (sSingleWorkingFile != "")) {
+	if ((sWorkingDirectory != "") && (sSingleWorkingFile != ""))
+	{
 		cerr << "Either a input scan file or the directory of input scan files needs to be specified" << endl;
 		exit(1);
 	}
 	if ((sConfigFilename == "") && (sConfigFileDirectory == ""))
-		//sConfigFilename = sWorkingDirectory + ProNovoConfig::getSeparator() + "SiprosConfig.cfg";
-		// Without specifying configure file and configure file directory, the default configure file directory
-		// is working directory. In the openmp only version, the default configure file is SiprosConfig.cfg
+		// sConfigFilename = sWorkingDirectory + ProNovoConfig::getSeparator() + "SiprosConfig.cfg";
+		//  Without specifying configure file and configure file directory, the default configure file directory
+		//  is working directory. In the openmp only version, the default configure file is SiprosConfig.cfg
 		sConfigFileDirectory = sWorkingDirectory;
 
 	if (sConfigFileDirectory != "")
@@ -142,37 +183,44 @@ void initializeArguments(int argc, char **argv, vector<string> & vsFT2Filenames,
 		searchFT2Files(vsFT2Filenames, sWorkingDirectory);
 	if ((sOutputDirectory == "") && (sWorkingDirectory != ""))
 		sOutputDirectory = sWorkingDirectory;
-
 }
 
-void handleScan(const string & sFT2filename, const string & sOutputDirectory, const string & sConfigFilename,
-		bool bScreenOutput) {
+void handleScan(const string &sFT2filename, const string &sOutputDirectory, const string &sConfigFilename,
+				bool bScreenOutput)
+{
 
-	MS2ScanVector * pMainMS2ScanVector = new MS2ScanVector(sFT2filename, sOutputDirectory, sConfigFilename,
-			bScreenOutput);
+	MS2ScanVector *pMainMS2ScanVector = new MS2ScanVector(sFT2filename, sOutputDirectory, sConfigFilename,
+														  bScreenOutput);
 
-	if (bScreenOutput) {
+	if (bScreenOutput)
+	{
 		cout << "Reading MS2 scan file " << sFT2filename << endl;
 	}
-	if (!pMainMS2ScanVector->loadMassData()) {
+	if (!pMainMS2ScanVector->loadMassData())
+	{
 		cerr << "Error: Failed to load file: " << sFT2filename << endl;
-	} else {
-		if (ProNovoConfig::getSearchType() == "SIP") {
+	}
+	else
+	{
+		if (ProNovoConfig::getSearchType() == "SIP")
+		{
 			pMainMS2ScanVector->startProcessingWdpSip();
-		} else {
+		}
+		else
+		{
 			// search all MS2 scans and write output to a file
 			pMainMS2ScanVector->startProcessingMvh();
 		}
 	}
 
-	//free memory of vpAllMS2Scans
+	// free memory of vpAllMS2Scans
 	delete pMainMS2ScanVector;
-
 }
 
-void MasterProcess(const vector<unit_of_workload_t> & vWorkload, bool bScreenOutput) {
+void MasterProcess(const vector<unit_of_workload_t> &vWorkload, bool bScreenOutput)
+{
 	size_t i, workloadSize, iBounderOfProcess;
-	int currentWorkId; //unit id of vWorkLoad
+	int currentWorkId; // unit id of vWorkLoad
 	int iNumberOfProcessors, iNumberOfSlaves;
 	int result;
 	MPI_Status status;
@@ -180,79 +228,96 @@ void MasterProcess(const vector<unit_of_workload_t> & vWorkload, bool bScreenOut
 	workloadSize = vWorkload.size();
 
 	iNumberOfSlaves = iNumberOfProcessors - 1;
-	iBounderOfProcess = ((workloadSize <= (size_t) iNumberOfSlaves) ? workloadSize : (size_t) iNumberOfSlaves);
-	for (i = 1; i <= iBounderOfProcess; i++) {
+	iBounderOfProcess = ((workloadSize <= (size_t)iNumberOfSlaves) ? workloadSize : (size_t)iNumberOfSlaves);
+	for (i = 1; i <= iBounderOfProcess; i++)
+	{
 		currentWorkId = i - 1;
 		MPI_Send(&currentWorkId, 1, MPI_INT, i, WORKTAG, MPI_COMM_WORLD);
 	}
-	if ((int) workloadSize > iNumberOfSlaves) {
+	if ((int)workloadSize > iNumberOfSlaves)
+	{
 		currentWorkId = iNumberOfSlaves;
-		while (currentWorkId < (int) workloadSize) {
+		while (currentWorkId < (int)workloadSize)
+		{
 			MPI_Recv(&result, 1, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
 			MPI_Send(&currentWorkId, 1, MPI_INT, status.MPI_SOURCE, WORKTAG, MPI_COMM_WORLD);
 			currentWorkId++;
 		}
 	}
 	/* Tell all the slaves to exit by sending an empty message with the DIETAG. */
-	for (i = 1; i <= (size_t) iNumberOfSlaves; i++)
+	for (i = 1; i <= (size_t)iNumberOfSlaves; i++)
 		MPI_Send(0, 0, MPI_INT, i, DIETAG, MPI_COMM_WORLD);
 	if (bScreenOutput)
 		cout << "Master process is done." << endl;
 }
 
-void SlaveProcess(const vector<unit_of_workload_t> & vWorkload, bool bScreenOutput) {
+void SlaveProcess(const vector<unit_of_workload_t> &vWorkload, bool bScreenOutput)
+{
 	MPI_Status status;
 	int currentWorkId, myid;
 	unit_of_workload_t currentWork;
 	MPI_Comm_rank(MPI_COMM_WORLD, &myid);
-	while (true) {
+	while (true)
+	{
 		MPI_Recv(&currentWorkId, 1, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
 		if (status.MPI_TAG == DIETAG)
 			break;
 		currentWork = vWorkload.at(currentWorkId);
 		cout << "slave Rank:\t" << myid << "\tsFT2name:\t" << currentWork.sFT2Filename << "\tCfg:\t"
-				<< currentWork.sConfigureFilename << endl;
+			 << currentWork.sConfigureFilename << endl;
 		// Load config file
-		if (!ProNovoConfig::setFilename(currentWork.sConfigureFilename)) {
+		if (!ProNovoConfig::setFilename(currentWork.sConfigureFilename))
+		{
 			cerr << "Could not load config file " << currentWork.sConfigureFilename << endl;
 			exit(1);
 		}
+		// set FASTA file out of cfg file
+		if (currentWork.sFastaFileName != "")
+			ProNovoConfig::setFASTAfilename(currentWork.sFastaFileName);
 		ProNovoConfig::iRank = myid;
 		handleScan(currentWork.sFT2Filename, currentWork.sOutputDirectory, currentWork.sConfigureFilename,
-				bScreenOutput);
-		if (bScreenOutput) {
+				   bScreenOutput);
+		if (bScreenOutput)
+		{
 			cout << currentWork.sFT2Filename << " and " << currentWork.sConfigureFilename
-					<< " is done by Slave process " << myid << endl;
+				 << " is done by Slave process " << myid << endl;
 		}
 		MPI_Send(0, 0, MPI_INT, 0, 0, MPI_COMM_WORLD);
 	}
-	if (bScreenOutput) {
+	if (bScreenOutput)
+	{
 		cout << "Slave process " << myid << " is done." << endl;
 	}
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
 	// A list of FT2/MS2 files to be searched
 	vector<string> vsFT2Filenames;
 	// A list of configure files
 	vector<string> vsConfigureFilenames;
 	int i, j, myid;
-	string sWorkingDirectory, sConfigFilename, sSingleWorkingFile, sOutputDirectory, sConfigFileDirectory;
+	string sWorkingDirectory, sConfigFilename, sSingleWorkingFile, sFastaFile, sOutputDirectory, sConfigFileDirectory;
 	bool bScreenOutput;
 	unit_of_workload_t current_work;
 	vector<unit_of_workload_t> vWorkload;
 	MPI_Init(&argc, &argv); /* starts MPI */
-	initializeArguments(argc, argv, vsFT2Filenames, sWorkingDirectory, vsConfigureFilenames, sSingleWorkingFile,
-			sOutputDirectory, bScreenOutput);
+	initializeArguments(argc, argv, vsFT2Filenames, sWorkingDirectory, vsConfigureFilenames,
+						sSingleWorkingFile, sFastaFile,
+						sOutputDirectory, bScreenOutput);
 
-	for (j = 0; j < (int) vsConfigureFilenames.size(); j++) {
+	for (j = 0; j < (int)vsConfigureFilenames.size(); j++)
+	{
 		sConfigFilename = vsConfigureFilenames.at(j);
 
-		// Process one FT2 file and one configure file  at a time
-		for (i = 0; i < (int) vsFT2Filenames.size(); i++) {
+		// Process one FT2 file and one configure file at a time
+		for (i = 0; i < (int)vsFT2Filenames.size(); i++)
+		{
 			current_work.sFT2Filename = vsFT2Filenames.at(i);
 			current_work.sConfigureFilename = sConfigFilename;
 			current_work.sOutputDirectory = sOutputDirectory;
+			// set FASTA file out of cfg file
+			current_work.sFastaFileName = sFastaFile;
 			vWorkload.push_back(current_work);
 		}
 	}

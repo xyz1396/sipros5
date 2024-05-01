@@ -65,7 +65,8 @@
         "stdexcept": "cpp",
         "streambuf": "cpp",
         "cinttypes": "cpp",
-        "typeinfo": "cpp"
+        "typeinfo": "cpp",
+        "filesystem": "cpp"
     },
     "[python]": {
         "editor.defaultFormatter": "ms-python.autopep8"

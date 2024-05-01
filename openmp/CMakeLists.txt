@@ -14,7 +14,7 @@ ELSE()
   target_compile_options(Sipros PUBLIC -ffast-math -march=native)
 # target_compile_options(Sipros PUBLIC -ffast-math)
   IF(NOT BUILD_CONDA)
-    target_link_libraries(Sipros PUBLIC mstoolkit OpenMP::OpenMP_CXX -static)
+    target_link_libraries(Sipros PUBLIC mstoolkit OpenMP::OpenMP_CXX -static -march=native)
   ENDIF()
 ENDIF()
 

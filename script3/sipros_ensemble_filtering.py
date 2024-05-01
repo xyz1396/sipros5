@@ -135,8 +135,8 @@ class PSM:
     
     # number of scores
     iNumScores = 3
-    # Neutron mass
-    fNeutronMass = 1.00867108694132
+    # Neutron mass from 13C delta mass
+    fNeutronMass = 1.003355
     # pattern for getting original peptides
     pattern = re.compile('[^\w\[\]]')
 
@@ -232,48 +232,55 @@ class PSM:
             self.set_protein_names()
     
     # get the mass difference, considering mass windows 
+    # def set_mass_diff(self, measured_mass, calculated_mass):
+    #     fDiff = calculated_mass - measured_mass
+    #     fTemp = fDiff
+    #     fCeil = 0
+    #     fDown = 0
+    #     if fDiff >= 0:
+    #         fDiff = fTemp
+    #         fCeil = math.ceil(fTemp)*PSM.fNeutronMass
+    #         fFloor = math.floor(fTemp)*PSM.fNeutronMass
+    #         if fFloor > fTemp:
+    #             fFloor -= PSM.fNeutronMass
+    #         if fCeil - PSM.fNeutronMass > fTemp:
+    #             fCeil -= PSM.fNeutronMass
+    #         if fTemp > fCeil - fTemp:
+    #             fTemp = fCeil - fTemp
+    #         if fDiff > fDiff - fFloor:
+    #             fDiff = abs(fDiff - fFloor)
+    #         if abs(fTemp) < abs(fDiff):
+    #             fDiff = fTemp
+    #             self.dM = -fTemp
+    #         else:
+    #             self.dM = fDiff
+    #     else:
+    #         fCeil = math.ceil(fDiff)*PSM.fNeutronMass
+    #         if fCeil < fDiff:
+    #             fCeil += PSM.fNeutronMass
+    #         fFloor = math.floor(fDiff)*PSM.fNeutronMass
+    #         if fFloor + PSM.fNeutronMass < fDiff:
+    #             fFloor += PSM.fNeutronMass
+    #         fDiff = fTemp
+    #         if abs(fTemp) > fCeil - fTemp:
+    #             fTemp = fCeil - fTemp
+    #         if abs(fDiff) > fDiff - fFloor:
+    #             fDiff = fDiff - fFloor
+    #         fTemp = abs(fTemp)
+    #         fDiff = abs(fDiff)
+    #         if fTemp < fDiff:
+    #             fDiff = fTemp
+    #             self.dM = -fTemp
+    #         else:
+    #             self.dM = fDiff
+    #     self.fMassDiff = fDiff
+            
+    # get the mass difference, considering mass windows by simple way
     def set_mass_diff(self, measured_mass, calculated_mass):
-        fDiff = calculated_mass - measured_mass
-        fTemp = fDiff
-        fCeil = 0
-        fDown = 0
-        if fDiff >= 0:
-            fDiff = fTemp
-            fCeil = math.ceil(fTemp)*PSM.fNeutronMass
-            fFloor = math.floor(fTemp)*PSM.fNeutronMass
-            if fFloor > fTemp:
-                fFloor -= PSM.fNeutronMass
-            if fCeil - PSM.fNeutronMass > fTemp:
-                fCeil -= PSM.fNeutronMass
-            if fTemp > fCeil - fTemp:
-                fTemp = fCeil - fTemp
-            if fDiff > fDiff - fFloor:
-                fDiff = abs(fDiff - fFloor)
-            if abs(fTemp) < abs(fDiff):
-                fDiff = fTemp
-                self.dM = -fTemp
-            else:
-                self.dM = fDiff
-        else:
-            fCeil = math.ceil(fDiff)*PSM.fNeutronMass
-            if fCeil < fDiff:
-                fCeil += PSM.fNeutronMass
-            fFloor = math.floor(fDiff)*PSM.fNeutronMass
-            if fFloor + PSM.fNeutronMass < fDiff:
-                fFloor += PSM.fNeutronMass
-            fDiff = fTemp
-            if abs(fTemp) > fCeil - fTemp:
-                fTemp = fCeil - fTemp
-            if abs(fDiff) > fDiff - fFloor:
-                fDiff = fDiff - fFloor
-            fTemp = abs(fTemp)
-            fDiff = abs(fDiff)
-            if fTemp < fDiff:
-                fDiff = fTemp
-                self.dM = -fTemp
-            else:
-                self.dM = fDiff
-        self.fMassDiff = fDiff
+        fDiff:float = abs(calculated_mass - measured_mass)%self.fNeutronMass
+        if fDiff > self.fNeutronMass/2:
+            fDiff = self.fNeutronMass - fDiff
+        self.fMassDiff:float = fDiff
     
     # remove training proteins and reserved proteins
     def clean_protein_name(self):

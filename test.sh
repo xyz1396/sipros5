@@ -41,7 +41,13 @@ case $1 in
 
     # ${binPath}/SiprosEnsembleOMP -w ft -c SiprosEnsembleConfig.cfg -o regular
     # ../bin/Sipros -w mzml -c SiprosEnsembleConfig.cfg -o regular
-    ../bin/Sipros -w ft -c SiprosEnsembleConfig.cfg -o regular
+    # ../bin/Sipros -w ft -c SiprosEnsembleConfig.cfg -o regular
+
+    export OMP_NUM_THREADS=10
+    export ft=(/scratch/yixiong/benchmark/astral/ftPct1/*.FT2)
+    echo "${ft[@]}" | xargs -n 1 -P 10 \
+        bash -c '../bin/Sipros -f $0 -c SiprosEnsembleConfig.cfg -o regular'
+
     # /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/SiprosEnsembleOMP -w mzml -c SiprosEnsembleConfig.cfg -o regular
     # ft='/ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct1ensemble/ft'
     # ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct1/ft'
@@ -111,9 +117,11 @@ case $1 in
     export configs=(configs/*.cfg)
     # export ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct1/ft'
     # export ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct50/ft'
-    export ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct99/ft'
+    # export ft='/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/benchmark/pct99/ft'
+    # export ft='/scratch/yixiong/benchmark/astral/ftPct5'
+    export ft='ftPCT50'
     echo "${configs[@]}" | xargs -n 1 -P 10 \
-        bash -c '../bin/SiprosEnsembleOMP -w ${ft} -c $0 -o sip'
+        bash -c '../bin/Sipros -w ${ft} -c $0 -o sip'
 
     endtime=$(date +'%Y-%m-%d %H:%M:%S')
     start_seconds=$(date --date="$starttime" +%s)

@@ -7,4 +7,4 @@ ft='/scratch/yixiong/benchmark/astral/ftPct1/X3_ID110156_01_OA10034_10302_120823
 
 echo SiprosArgs="-f $ft -fasta fasta/Decoy.fasta -c SiprosEnsembleConfig.cfg -o regular" >.vscode/.env
 
-echo SiprosArgs="-w mzml -fasta fasta/Decoy.fasta -c SiprosEnsembleConfig.cfg -o regular" >.vscode/.env
+# echo SiprosArgs="-w mzml -fasta fasta/Decoy.fasta -c SiprosEnsembleConfig.cfg -o regular" >.vscode/.env

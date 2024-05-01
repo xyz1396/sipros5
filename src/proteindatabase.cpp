@@ -238,10 +238,6 @@ bool ProteinDatabase::getFirstProtein()
 	iclCheck = 0;
 	sline.clear();
 	getline(db_stream, sline);
-	if (bScreenOutput)
-	{
-		cout << "Processing protein #" << iProteinId << "\r";
-	}
 	if (sline.at(0) == '>')
 	{
 		//	cout<<sline<<endl;
@@ -293,7 +289,7 @@ bool ProteinDatabase::getNextProtein()
 		{
 			if (iProteinId % 1000 == 0)
 			{
-				cout << "Processing protein #" << iProteinId << "\r";
+				cout << "Processing protein #" << iProteinId << "\t" << scurrentProteinName << endl;
 			}
 		}
 		while (!db_stream.eof())

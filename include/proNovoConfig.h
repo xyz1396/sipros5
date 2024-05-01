@@ -327,7 +327,8 @@ public:
 		//  sigmoid function
 		//	return ( 1/(1+exp(dMassError*600-3)));
 	}
-
+	// for MS2 file format
+	static string &getSetFileNameSuffix() { return fileNameSuffix; }
 	static string &getSetSIPelement() { return SIPelement; }
 	static double &getSetMinValue() { return minValue; }
 	static double &getSetFold() { return fold; }
@@ -430,6 +431,7 @@ private:
 	static string sElementList;
 
 	static string SIPelement;
+	static string fileNameSuffix;
 	// for deductionCoefficient compute in SIP search
 	static double neutronMass, deductionCoefficient, minValue, fold;
 

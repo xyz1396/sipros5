@@ -5,11 +5,20 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
             "name": "debug openmp regular",
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/bin/Sipros",
-            "args": ["$SiprosArgs"],
+            "args": [
+                "$SiprosArgs"
+            ],
             "stopAtEntry": false,
             "envFile": "${workspaceFolder}/.vscode/.env",
             "cwd": "${workspaceFolder}/test",

@@ -7,9 +7,19 @@ import runpy
 os.chdir('test')
 
 # 2A. python test.py 4 5
-args = 'python ../script3/sipros_psm_tabulating.py \
-        -i sip \
-        -c SiprosEnsembleC13.cfg -o sip'
+# args = 'python ../script3/sipros_psm_tabulating.py \
+#         -i regular \
+#         -c SiprosEnsembleConfig.cfg -o regular'
+
+args = 'python ../script3/sipros_ensemble_filtering.py \
+        -i regular \
+        -c SiprosEnsembleConfig.cfg \
+        -o regular'
+
+# args = 'python ../script3/sipros_psm_tabulating.py \
+#         -i sip \
+#         -c SiprosEnsembleC13.cfg -o sip'
+
 # args = 'python ../script3/sipros_prepare_protein_database.py \
 #         -i fasta/EcoliWithCrapNodup.fasta \
 #         -o fasta/DecoySIP.fasta \

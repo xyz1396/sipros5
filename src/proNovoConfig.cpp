@@ -101,6 +101,7 @@ string ProNovoConfig::SIPelement = "C";
 double ProNovoConfig::minValue = 0;
 double ProNovoConfig::fold = 0;
 double ProNovoConfig::deductionCoefficient = 0;
+string ProNovoConfig::fileNameSuffix = "ft2";
 // carbon isotopic delta mass in default
 double ProNovoConfig::neutronMass = 1.003355;
 

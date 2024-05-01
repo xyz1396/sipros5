@@ -18,6 +18,41 @@
             "detail": "build release"
         },
         {
+            "type": "shell",
+            "label": "build conda release",
+            "command": "./make.sh",
+            "args": ["buildConda"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "detail": "build release"
+        },
+        {
+            "type": "shell",
+            "label": "run test",
+            "command": "./test.sh",
+            "args": ["run"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "dependsOn":["build conda release"],
+            "detail": "run test"
+        },
+        {
             "label": "cmake debug",
             "type": "shell",
             "command": "./make.sh debug",

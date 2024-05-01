@@ -17,10 +17,6 @@ import sys, os, re, math
 from datetime import datetime
 from collections import namedtuple
 from multiprocessing import Process
-try:
-    from sets import Set
-except ImportError:
-    pass
 
 SIP_WDP_score_idx = 0
 
@@ -529,9 +525,11 @@ def RankProductInvert(liRank):
 class PepScores:
 
     def __init__(self, _fMeasuredParentMass, _iCharge, _sSearchName, sPeptideLine, isSIP=False):
-        self.fMeasuredParentMass = _fMeasuredParentMass
-        self.iCharge = _iCharge
+        # self.fMeasuredParentMass = _fMeasuredParentMass
+        # self.iCharge = _iCharge
         asWords = sPeptideLine.split('\t')
+        self.fMeasuredParentMass = float(asWords[9])
+        self.iCharge = int(asWords[8])
         self.sIdentifiedPeptide = peptide_delete_residues(asWords[1])
         self.sOriginalPeptide = peptide_delete_residues(asWords[2])
         # self.sIdentifiedPeptide = peptide_delete_residues(asWords[2])
@@ -738,7 +736,7 @@ class PepSpectrumMatch:
             feature_list.append(self.sFileName)
             feature_list.append(str(self.iScanNumber))
             feature_list.append(str(pep.iCharge))
-            feature_list.append(str(self.fMeasuredParentMass))
+            feature_list.append(str(pep.fMeasuredParentMass))
             feature_list.append(self.sScanType)
             feature_list.append(pep.sSearchName)
             feature_list.append(pep.sIdentifiedPeptide)
@@ -761,7 +759,7 @@ class PepSpectrumMatch:
     
     def all_top_5_ranked_psm(self, top_n = 5):
         str_list = []
-        pep_set = Set()
+        pep_set = set()
         for l in self.pep_rank_list:
             n = len(l)
             if n > top_n:
@@ -773,8 +771,8 @@ class PepSpectrumMatch:
             feature_list = []
             feature_list.append(self.sFileName)
             feature_list.append(str(self.iScanNumber))
-            feature_list.append(str(self.iParentCharge))
-            feature_list.append(str(self.fMeasuredParentMass))
+            feature_list.append(str(pep.iParentCharge))
+            feature_list.append(str(pep.fMeasuredParentMass))
             feature_list.append(self.sScanType)
             feature_list.append(pep.sSearchName)
             feature_list.append(pep.sIdentifiedPeptide)

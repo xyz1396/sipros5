@@ -110,14 +110,25 @@ static void initializeArguments(int argc, char **argv, vector<string> &vsFT2File
 		else if ((vsArguments[i] == "-h") || (vsArguments[i] == "--help"))
 		{
 			cout << "Usage 1: " << endl;
-			cout << "-w WorkingDirectory -c ConfigurationFile -o output directory" << endl;
+			cout << "-w WorkingDirectory -c ConfigurationFile -o OutputDirectory" << endl;
 			cout << "Usage 2: " << endl;
-			cout << "-f single_ms2_file -c ConfigurationFile -o output directory" << endl;
+			cout << "-w WorkingDirectory -g ConfigurationFileDirectory -o OutputDirectory" << endl;
 			cout << "Usage 3: " << endl;
+			cout << "-f single_FT2_or_MZML_file -c ConfigurationFile -o OutputDirectory" << endl;
+			cout << "Usage 4: " << endl;
 			// set FASTA file out of cfg file
-			cout << "-f single_ms2_file -fasta proteins.fasta -c ConfigurationFile -o output directory" << endl;
-			cout << "Other options: " << endl;
+			cout << "-f single_FT2_or_MZML_file -fasta proteins.fasta -c ConfigurationFile -o OutputDirectory" << endl;
+			cout << "Parameters: " << endl;
+			cout << "-c configure file to be used" << endl;
+			cout << "-g configure file directory " << endl;
+			cout << "-f a single MS2 or FT2 file to be processed" << endl;
+			cout << "-w directory of MS2 or FT2 files to be processed" << endl;
+			cout << "-fasta to set fasta file out of the configuration file" << endl;
+			cout << "-o output directory" << endl; 
+			cout << "If not specified, it is the same as that of the input scan file," << endl;
 			cout << "-s silence all standard output." << endl;
+			cout << "If configuration file is not specified, Sipros will look for "
+				 << "SiprosConfig.cfg in the directory of FT2 files" << endl;
 			exit(0);
 		}
 		else if (vsArguments[i] == "-p")
