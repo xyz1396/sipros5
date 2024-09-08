@@ -230,6 +230,7 @@ public:
 	// Parent mass with charge
 	double dParentMass;
 	int iScanId;													   // Product ions in the scan
+	int iParentScanID; 												   // Parent scan ID for DIA
 	vector<int> iParentChargeStates;								   // Parent ion charge states for DIA
 	vector<double> dParentMZs;										   // Parent ion M/Z for DIA
 	vector<tuple<double, int, Peptide *>> vMassChargePeptidePtrTuples; // current set of peptides to be scored

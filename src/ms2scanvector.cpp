@@ -189,6 +189,12 @@ bool MS2ScanVector::ReadFT2File()
 					pMS2Scan->setRTime(words.at(2));
 				}
 			}
+			else if (sline.at(0) == 'D')
+			{
+				TokenVector words(sline, " \r\t\n");
+				if (words[1] == "ParentScanNumber")
+					pMS2Scan->iParentScanID = stoi(words[2]);
+			}
 		}
 		ft2_stream.clear();
 		ft2_stream.close();
@@ -1516,8 +1522,8 @@ void MS2ScanVector::writeOutputEnsemble()
 	}
 
 	// Spectrum level head
-	outputFile << "+\tFilename\tScanNumber\tParentCharge\tMeasuredParentMass"
-			   << "\tScanType\tSearchName\tRetentionTime" << endl;
+	outputFile << "+\tFilename\tScanNumber\tParentCharge\tIsolationWindowCenterMZ"
+			   << "\tScanType\tSearchName\tRetentionTime\tPrecursorScanNumber" << endl;
 	// PSM level head
 	outputFile << "*\tIdentifiedPeptide\tOriginalPeptide\tCalculatedParentMass "
 			   << "\tMVH\tXcorr\tWDP\tProteinNames\tmeasuredCharge\tMeasuredMass"
@@ -1531,8 +1537,8 @@ void MS2ScanVector::writeOutputEnsemble()
 			outputFile << "+";
 			outputFile << "\t" << sTailFT2FileName;
 			outputFile << "\t" << vpAllMS2Scans.at(i)->iScanId;
-			outputFile << "\t" << vpAllMS2Scans.at(i)->vpWeightSumTopPeptides[0]->iMeasuredParentCharge;
-			outputFile << "\t" << setiosflags(ios::fixed) << setprecision(5) << vpAllMS2Scans.at(i)->vpWeightSumTopPeptides[0]->dMeasuredParentMass;
+			outputFile << "\t" << vpAllMS2Scans.at(i)->iParentChargeState;
+			outputFile << "\t" << setiosflags(ios::fixed) << setprecision(5) << vpAllMS2Scans.at(i)->dParentMZ;
 			outputFile << "\t" << vpAllMS2Scans.at(i)->getScanType();
 			outputFile << "\t" << ProNovoConfig::getSearchName();
 			// sInt sum of intensity
@@ -1541,6 +1547,7 @@ void MS2ScanVector::writeOutputEnsemble()
 			//  outputFile << "\t" << vpAllMS2Scans.at(i)->dMaxIntensity;
 			//  Retention Time
 			outputFile << "\t" << vpAllMS2Scans.at(i)->getRTime();
+			outputFile << "\t" << vpAllMS2Scans.at(i)->iParentScanID;
 			outputFile << endl;
 			// PSM level head
 			for (j = 0; j < ((int)vpAllMS2Scans.at(i)->vpWeightSumTopPeptides.size()); j++)

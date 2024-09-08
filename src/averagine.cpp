@@ -72,7 +72,7 @@ void averagine::adjustEstimatePrecursorMassbyNP()
         SIPatomIX = 3;
         estimatePrecursorMassbyNP = [&](double baseMass, int atomCount, double neutronMass)
         { return (baseMass +
-                  std::round(atomCount * (*N15Abundance) + pepAtomCounts[0] * (*C13Abundance)) * neutronMass); };
+                  std::floor(atomCount * (*N15Abundance) + pepAtomCounts[0] * (*C13Abundance)) * neutronMass); };
     }
 }
 
