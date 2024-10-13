@@ -2,29 +2,38 @@ import os
 import sys
 import configparser
 import argparse
+import logging
+from logging import Logger
+import time
 from argparse import Namespace
-
+from search import search
 
 class SIPROSWorkflow:
     def __init__(self) -> None:
-        # Default paths for third-party tools
-        self.default_paths: dict[str, str] = {
-            'raxport': 'tools/raxport',
-            'sipros': 'tools/sipros',
-            'feature_extractor': 'tools/aerith',
-            'filter': 'tools/percolator',
-            'deepfilter': 'tools/deepfilter',
-            'assembly': 'tools/philosopher',
-            'metaLP': 'tools/metaLP',
-            'quantification': 'tools/ionquant'
+        script_path = os.path.abspath(__file__)
+        upper_path = os.path.dirname(os.path.dirname(script_path))
+        # Default paths for tools
+        self.defaultToolsPaths: dict[str, str] = {
+            'configTemplates': f'{upper_path}/configTemplates',
+            'configGenerator': f'{upper_path}/tools/configGenerator',
+            'raxport': f'{upper_path}/tools/raxport',
+            'sipros': f'{upper_path}/tools/sipros',
+            'feature_extractor': f'{upper_path}/tools/aerith',
+            'filter': f'{upper_path}/tools/percolator',
+            'deepfilter': f'{upper_path}/tools/deepfilter',
+            'assembly': f'{upper_path}/tools/philosopher',
+            'metaLP': f'{upper_path}/tools/metaLP',
+            'quantification': f'{upper_path}/tools/ionquant'
         }
 
         # Initialize paths from config file if available
         self.cfg_file = 'workflow.cfg'
-        self.paths: dict[str, str] = self.load_paths()
+        self.toolsPaths: dict[str, str] = self.load_paths()
+        self.args: Namespace = self.parse_arguments()
+        self.logger: Logger = self.initLogger(self.args.output)
 
     def load_paths(self) -> dict[str, str]:
-        paths: dict[str, str] = self.default_paths.copy()
+        paths: dict[str, str] = self.defaultToolsPaths.copy()
         if os.path.exists(path=self.cfg_file):
             config = configparser.ConfigParser()
             config.read(filenames=self.cfg_file)
@@ -47,51 +56,80 @@ citation:
             formatter_class=argparse.RawTextHelpFormatter)
         parser.add_argument('-i', '--input', required=True,
                             help="Input raw/ft/mzml file path or directory, e.g., 'data/raw', 'A.raw,B.raw'")
-        parser.add_argument('-e', '--element', required=True,
-                            help="SIP label element, e.g., C, H, N, O, S")
+        parser.add_argument('-e', '--element', required=False,
+                            help="SIP label element, e.g., C13, H2, N15, O18, S33, S34")
+        parser.add_argument('-r', '--range', required=False,
+                            help="SIP label range, e.g., 0-100")
+        parser.add_argument('-p', '--precision', required=False,
+                            help="SIP label precision in percentage, e.g., 1")
         parser.add_argument('-f', '--fasta', required=True,
                             help="fasta file path")
-        parser.add_argument('-r', '--range', required=True,
-                            help="SIP label range, e.g., 0-100")
+        parser.add_argument('-s', '--split_FT2_file', required=False,
+                            help="scans number in splitted FT2 file, no split in default")
+        parser.add_argument('-t', '--thread', required=False,
+                            help="thread number to be limited, all threads in default")
         parser.add_argument('-o', '--output', required=True,
                             help="Output directory path")
 
         args: Namespace = parser.parse_args()
         return args
+    
+    def initLogger(self, outputPath: str) -> Logger:
+        logger: Logger = logging.getLogger('sipros_workflow')
+        logger.setLevel(logging.INFO)
+        file_handler = logging.FileHandler(f'{outputPath}/sipros_workflow.log', mode='w')
+        stream_handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        logger.addHandler(stream_handler)
+        logger.info('sipros_workflow begin')
+        return logger
 
     def run(self) -> None:
-        args: Namespace = self.parse_arguments()
-
+        start_time: float = time.time()
+        if not os.path.exists(self.args.output):
+            os.makedirs(self.args.output)
+        else:
+            self.logger.warning(f'{self.args.output} exists and will be overwritten')
+        
+        
+        # run SIPROS search
+        sipros_search = search(element=self.args.element, 
+                               sipRange=self.args.range,
+                               step=self.args.precision,
+                               configTemplatePath=self.toolsPaths['configTemplates'],
+                               configGeneratorPath=self.toolsPaths['configGenerator'],
+                               raxportPath=self.toolsPaths['raxport'],
+                               scansPerFT2=self.args.split_FT2_file, 
+                               siprosPath=self.toolsPaths['sipros'],
+                               fastaPath=self.args.fasta, 
+                               inputPath=self.args.input, 
+                               outputPath=self.args.output,
+                               threadNumber=int(self.args.thread), 
+                               logger=self.logger)
+        sipros_search.run()
+        
         # Call the feature extraction tool
-        feature_cmd = f"{self.paths['feature_extractor']} {args.input} {args.label} {args.range} {args.output}"
-        os.system(feature_cmd)
+
 
         # Call the filter tools
-        filter_cmd = f"{self.paths['filter']} {args.input} {args.output}"
-        os.system(filter_cmd)
-
-        deepfilter_cmd = f"{self.paths['deepfilter']} {args.input} {args.output}"
-        os.system(deepfilter_cmd)
 
         # Call the assembly tools
-        assembly_cmd = f"{self.paths['assembly']} {args.output}"
-        os.system(assembly_cmd)
-
-        metaLP_cmd = f"{self.paths['metaLP']} {args.output}"
-        os.system(metaLP_cmd)
 
         # Call the quantification tool
-        quant_cmd = f"{self.paths['quantification']} {args.input} {args.output}"
-        os.system(quant_cmd)
 
         # Output paths
-        print(f"Results saved in {args.output}")
-
+        end_time = time.time()
+        running_time = end_time - start_time
+        self.logger.info(f'All job done. Results are in {self.args.output}.') 
+        self.info(f'Total running time: {running_time} seconds')
 
 if __name__ == "__main__":
-    workflow = SIPROSWorkflow()
     if len(sys.argv) == 1:
         print("SIPROS Workflow: A tool for integrating various parts of SIPROS into a complete workflow.")
         print("Use -h or --help to display help message.")
         sys.exit(0)
+    workflow = SIPROSWorkflow()
     workflow.run()

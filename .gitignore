@@ -49,3 +49,7 @@ test/
 *.FT1
 *.raw
 *.mzml
+
+# python
+*.pyc
+__pycache__/
