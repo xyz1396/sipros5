@@ -7,6 +7,7 @@ from logging import Logger
 import time
 from argparse import Namespace
 from search import search
+import warnings
 
 class SIPROSWorkflow:
     def __init__(self) -> None:
@@ -30,6 +31,10 @@ class SIPROSWorkflow:
         self.cfg_file = 'workflow.cfg'
         self.toolsPaths: dict[str, str] = self.load_paths()
         self.args: Namespace = self.parse_arguments()
+        if not os.path.exists(self.args.output):
+            os.makedirs(self.args.output)
+        else:
+            warnings.warn(f'{self.args.output} exists and will be overwritten')
         self.logger: Logger = self.initLogger(self.args.output)
 
     def load_paths(self) -> dict[str, str]:
@@ -55,7 +60,7 @@ citation:
             description="sipros Workflow", prog="siproswf", epilog=citation,
             formatter_class=argparse.RawTextHelpFormatter)
         parser.add_argument('-i', '--input', required=True,
-                            help="Input raw/ft/mzml file path or directory, e.g., 'data/raw', 'A.raw,B.raw'")
+                            help="Input raw/mzml file path or directory, e.g., 'data/raw', 'A.raw,B.raw'")
         parser.add_argument('-e', '--element', required=False,
                             help="SIP label element, e.g., C13, H2, N15, O18, S33, S34")
         parser.add_argument('-r', '--range', required=False,
@@ -65,6 +70,7 @@ citation:
         parser.add_argument('-f', '--fasta', required=True,
                             help="fasta file path")
         parser.add_argument('-s', '--split_FT2_file', required=False,
+                            type=int, nargs='?', const=20000,
                             help="scans number in splitted FT2 file, no split in default")
         parser.add_argument('-t', '--thread', required=False,
                             help="thread number to be limited, all threads in default")
@@ -89,11 +95,6 @@ citation:
 
     def run(self) -> None:
         start_time: float = time.time()
-        if not os.path.exists(self.args.output):
-            os.makedirs(self.args.output)
-        else:
-            self.logger.warning(f'{self.args.output} exists and will be overwritten')
-        
         
         # run SIPROS search
         sipros_search = search(element=self.args.element, 
@@ -124,7 +125,7 @@ citation:
         end_time = time.time()
         running_time = end_time - start_time
         self.logger.info(f'All job done. Results are in {self.args.output}.') 
-        self.info(f'Total running time: {running_time} seconds')
+        self.logger.info(f'Total running time: {running_time} seconds')
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:

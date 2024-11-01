@@ -90,7 +90,7 @@ bool ProNovoConfig::bWeightDotSumEnable = false;
 bool ProNovoConfig::bLessIsotopicDistribution = false;
 bool ProNovoConfig::bMultiScores = true;
 string ProNovoConfig::sDecoyPrefix = "";
-int ProNovoConfig::INTTOPKEEP = 5;
+int ProNovoConfig::INTTOPKEEP = 10;
 int ProNovoConfig::iRank = 0;
 //---------------Sipros Score--------------------
 

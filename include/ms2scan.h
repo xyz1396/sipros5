@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <string>
+#include <array>
 
 #include "peptide.h"
 #include "MVH.h"
@@ -12,7 +13,7 @@
 #define BIN_RES 1000
 #define LOW_BIN_RES 10
 #define TOP_N 50
-#define TOP_N_SIP 5
+#define TOP_N_SIP 10
 #define TOPPICKNUM 20
 #define ZERO 0.00000001
 #define SMALLINCREMENT 0.00000001 // to solve the incorrect cut off
@@ -111,10 +112,12 @@ public:
 
 	// Sipros Ensemble
 	string sPeptideForScoring;
-	vector<double> vdScores;
+	// WDPScore, XcorrScore, MVHScore
+	std::array<double, 3> vdScores;
+	// ranks of the 3 scores
+	std::array<double, 3> vdRank;
 	double dPepNeutralMass;
 	double iPepLength;
-	vector<double> vdRank;
 	static int iNumScores;
 
 	// SIP
@@ -124,8 +127,12 @@ public:
 	vector<vector<double>> vvdBionProb;
 
 	// void setPeptideUnitInfo(const Peptide *currentPeptide, const double &dScore, string sScoringFunction);
-	void setPeptideUnitInfo(const tuple<double, int, Peptide *> currentMassChargePeptidePtrTuple, const double &dScore, string sScoringFunction);
+	// scoreIX=0: WDP; scoreIX=1: Xcorr; scoreIX=2: MVH
+	void setPeptideUnitInfo(const tuple<double, int, Peptide *> currentMassChargePeptidePtrTuple, 
+	const double &dScore, string sScoringFunction, const int scoreIX);
 	void setIonMassProb(const Peptide *currentPeptide);
+	// get topN peaks in each isotopic envolope
+	void setIonMassProb(const Peptide *currentPeptide, int topN);
 };
 
 class PeakList
@@ -184,13 +191,15 @@ public:
 	static bool mygreater(double i, double j);
 	void binCalculation();
 	void binCalculation2D(); // replace binCalculation();
+	// scoreIX=0: WDP; scoreIX=1: Xcorr; scoreIX=2: MVH
 	void saveScore(const double &dScore,
 				   const tuple<double, int, Peptide *> currentMassChargePeptidePtrTuple,
-				   vector<PeptideUnit *> &vpTopPeptides, string sScoreFunction = "WeightSum");
+				   vector<PeptideUnit *> &vpTopPeptides, string sScoreFunction, const int scoreIX);
+	// scoreIX=0: WDP; scoreIX=1: Xcorr; scoreIX=2: MVH
 	void saveScoreSIP(const double &dScore,
 					  const tuple<double, int, Peptide *> currentMassChargePeptidePtrTuple,
 					  vector<PeptideUnit *> &vpTopPeptides,
-					  string sScoreFunction = "WeightSum");
+					  string sScoreFunction, const int scoreIX);
 	static bool GreaterScore(PeptideUnit *p1, PeptideUnit *p2);
 	void WeightCompare(const string &sPeptide, vector<bool> &vbFragmentZ2);
 	bool searchMZ(const double &dTarget, int &iIndex4Found);   // corresponds to binCalculation()
@@ -240,9 +249,9 @@ public:
 	// the scores of all scored peptides
 	vector<double> vdWeightSumAllScores;
 
-	int inumberofWeightSumScore;
-	double dsumofWeightScore;
-	double dsumofSquareWeightSumScore;
+	// int inumberofWeightSumScore;
+	// double dsumofWeightScore;
+	// double dsumofSquareWeightSumScore;
 
 	vector<double> vdMZ;
 	vector<double> vdIntensity;

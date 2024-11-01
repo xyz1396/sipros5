@@ -10,7 +10,7 @@
 bool MVH::bUseSmartPlusThreeModel = true;
 lnFactorialTable * MVH::lnTable = NULL;
 bitset<FragmentTypes_Size> MVH::fragmentTypes(string("0010010"));
-double MVH::ProbabilityCutOff = 0.25;
+double MVH::ProbabilityCutOff = 0.01;
 
 MVH::MVH() {
 	// TODO Auto-generated constructor stub

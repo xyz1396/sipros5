@@ -12,7 +12,7 @@ int CometSearchMod::iArraySizeScore = 0;
 int CometSearchMod::iMaxPercusorCharge = 0;
 int CometSearchMod::iDimesion2 = 0;
 int CometSearchMod::iMAX_PEPTIDE_LEN = 0;
-double CometSearchMod::ProbabilityCutOff = 0.25;
+double CometSearchMod::ProbabilityCutOff = 0.01;
 
 CometSearchMod::CometSearchMod() {
 

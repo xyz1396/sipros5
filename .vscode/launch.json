@@ -12,7 +12,7 @@
             "console": "integratedTerminal"
         },
         {
-            "name": "debug openmp regular",
+            "name": "debug openmp",
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/bin/Sipros",

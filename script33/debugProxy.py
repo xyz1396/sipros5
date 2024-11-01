@@ -11,11 +11,36 @@ os.chdir('test')
 #         -i regular \
 #         -c SiprosEnsembleConfig.cfg -o regular'
 
+# args = 'python ../script33/main.py \
+#         -i /scratch/yixiong/dignose/13C/raw3 \
+#         -f fasta/EcoliWithCrapNodup.fasta \
+#         -t 160 \
+#         -o wf_output'
+        
 args = 'python ../script33/main.py \
-        -i /scratch/yixiong/dignose/13C/raw3 \
+        -i /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct50/raw \
         -f fasta/EcoliWithCrapNodup.fasta \
-        -t 20 \
+        -e C13 \
+        -t 160 \
         -o wf_output'
+
+# args = 'python ../script33/main.py \
+#         -i /scratch/yixiong/dignose/13C/raw3 \
+#         -f fasta/EcoliWithCrapNodup.fasta \
+#         -s 10000 \
+#         -e C13 \
+#         -r 0-10\
+#         -t 160 \
+#         -o wf_output'    
+        
+# args = 'python ../script33/main.py \
+#         -i /scratch/yixiong/Astral/raw2/K14_ID116311_01_SPD30_OA10034_10537_071524.raw \
+#         -f fasta/EcoliWithCrapNodup.fasta \
+#         -s 20000 \
+#         -e C13 \
+#         -r 45-55\
+#         -t 160 \
+#         -o wf_output'     
 
 # 2B. python -m mymodule.test 4 5
 # args = 'python -m mymodule.test 4 5'
