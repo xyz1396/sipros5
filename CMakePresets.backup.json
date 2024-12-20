@@ -1,0 +1,52 @@
+{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "omp",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/omp",
+            "environment": {
+                "PATH": "/home/yixiong/micromamba/envs/sipros5/bin:$penv{PATH}",
+                "CONDA_DEFAULT_ENV": "sipros5",
+                "CONDA_PREFIX": "/home/yixiong/micromamba/envs/sipros5"
+            },
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "/home/yixiong/micromamba/envs/sipros5/bin/x86_64-conda-linux-gnu-gcc",
+                "CMAKE_CXX_COMPILER": "/home/yixiong/micromamba/envs/sipros5/bin/x86_64-conda-linux-gnu-g++",
+                "CMAKE_BUILD_TYPE": "Release",
+                "BUILD_SHARED_LIBS": "OFF"
+            }
+        },
+        {
+            "name": "mpi",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/mpi",
+            "environment": {
+                "PATH": "/home/yixiong/micromamba/envs/sipros5/bin:$penv{PATH}",
+                "CONDA_DEFAULT_ENV": "sipros5",
+                "CONDA_PREFIX": "/home/yixiong/micromamba/envs/sipros5"
+            },
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "/home/yixiong/micromamba/envs/sipros5/bin/mpicc",
+                "CMAKE_CXX_COMPILER": "/home/yixiong/micromamba/envs/sipros5/bin/mpicxx",
+                "BUILD_SHARED_LIBS": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "omp",
+            "configurePreset": "omp",
+            "targets": [
+                "Sipros"
+            ]
+        },
+        {
+            "name": "mpi",
+            "configurePreset": "mpi",
+            "targets": [
+                "SiprosMPI"
+            ]
+        }
+    ]
+}

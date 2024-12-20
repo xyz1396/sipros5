@@ -1,28 +1,34 @@
-# set(CMAKE_C_COMPILER "gcc-11")
-# set(CMAKE_CXX_COMPILER "g++-11")
 
 add_executable(Sipros ${SRC_LIST} ${PROJECT_SOURCE_DIR}/openmp/main.cpp)
 
-target_link_libraries(Sipros PUBLIC mstoolkit OpenMP::OpenMP_CXX)
-
 IF(MSVC)
+  target_link_libraries(Sipros PUBLIC mstoolkit OpenMP::OpenMP_CXX)
   target_compile_options(Sipros PUBLIC "/fp:fast" "/openmp:experimental" "/openmp:llvm" "/arch:AVX2")
   # make sure to use the static runtime library for release build
   set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MT")
   set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MT")
 ELSE()
-  target_compile_options(Sipros PUBLIC -ffast-math -march=native)
-# target_compile_options(Sipros PUBLIC -ffast-math)
-  IF(NOT BUILD_CONDA)
-    target_link_libraries(Sipros PUBLIC mstoolkit OpenMP::OpenMP_CXX -static -march=native)
+  IF(BUILD_CONDA)
+    target_link_libraries(Sipros PUBLIC mstoolkit OpenMP::OpenMP_CXX)
+    target_compile_options(Sipros PUBLIC -ffast-math -march=native)
+    # target_compile_options(Sipros PUBLIC -ffast-math)
+  ELSE()
+    # this flag is not working for static link uper than gcc 11
+    # target_link_libraries(Sipros PUBLIC mstoolkit OpenMP::OpenMP_CXX -static -march=native)
+    # target_compile_options(Sipros PUBLIC -ffast-math -march=native)
+    target_compile_options(Sipros PUBLIC -ffast-math)
+    target_link_libraries(Sipros PUBLIC mstoolkit)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+    message(CMAKE_CXX_FLAGS: "${CMAKE_CXX_FLAGS}")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+    message(CMAKE_EXE_LINKER_FLAGS: "${CMAKE_EXE_LINKER_FLAGS}")
   ENDIF()
 ENDIF()
 
-# for conda only have libgomp.so
-# target_link_libraries(Sipros PUBLIC OpenMP::OpenMP_CXX MStoolkit gomp dl)
-
 IF(WIN32)
-  target_compile_definitions(Sipros PUBLIC _NO_THERMORAW)
+  target_compile_definitions(Sipros PUBLIC _NO_THERMORAW _NOSQLITE)
 ElSE()
-  target_compile_definitions(Sipros PUBLIC GCC _FILE_OFFSET_BITS=64)
+  target_compile_definitions(Sipros PUBLIC GCC _FILE_OFFSET_BITS=64 _NOSQLITE)
 ENDIF()

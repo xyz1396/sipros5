@@ -1,10 +1,9 @@
 #!/bin/bash
-# conda create -n mpi -c conda-forge openmpi gxx_linux-64 gcc_linux-64 cmake gperftools
+# micromamba create -n sirpos5 -c conda-forge openmpi gxx_linux-64 gcc_linux-64 cmake gperftools
 # compiler name x86_64-conda_cos6-linux-gnu-g++
-# . ~/miniconda3/etc/profile.d/conda.sh
-# conda activate mpi
+# micromamba activate sirpos5
 # run follows to load dynamic libs when running bin/SiprosV3omp bin/SiprosV3mpi bin/SiprosV3test
-# conda activate mpi
+# micromamba activatesirpos5
 # export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_PREFIX}/lib
 case $1 in
 "load") ;;
@@ -26,13 +25,14 @@ case $1 in
     cp -L -n $deplist bin/libSiprosMPI
     ;;
 "buildConda")
-    . ~/miniconda3/etc/profile.d/conda.sh
-    conda activate mpi
+    export MAMBA_ROOT_PREFIX=~/micromamba
+    eval "$(~/.local/bin/micromamba shell hook --shell=bash)"
+    micromamba activate sipros5
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_PREFIX}/lib
     mkdir build
     cd build
-    cmake ${CMAKE_ARGS} -DCMAKE_BUILD_TYPE=Release -DBUILD_CONDA=true ..
-    cmake --build . --parallel 8
+    cmake -G Ninja ${CMAKE_ARGS} -DCMAKE_BUILD_TYPE=Release -DBUILD_CONDA=true ..
+    ninja
     # add share lib for mpi version
     cd ..
     deplist=$(ldd bin/SiprosMPI | awk '{if (match($3,"/")){ print $3}}')
@@ -45,11 +45,13 @@ case $1 in
     make -j8
     ;;
 "debug")
-    source ~/miniconda3/etc/profile.d/conda.sh
-    conda activate mpi
+    export MAMBA_ROOT_PREFIX=~/micromamba
+    eval "$(~/.local/bin/micromamba shell hook --shell=bash)"
+    micromamba activate sipros5
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_PREFIX}/lib
     cd build
-    cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS_DEBUG="-O0 -g3" -DBUILD_CONDA=true ..
-    make -j8
+    cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS_DEBUG="-O0 -g3" -DBUILD_CONDA=true ..
+    ninja
     ;;
 "make")
     cd build

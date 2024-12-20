@@ -4,8 +4,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 message("${CMAKE_BUILD_TYPE}")
 
-# set(CMAKE_C_COMPILER "gcc-11")
-# set(CMAKE_CXX_COMPILER "g++-11")
 message("${CMAKE_CXX_COMPILER}")
 set(CMAKE_CXX_STANDARD 17)
 find_package(OpenMP REQUIRED)

@@ -1,0 +1,17 @@
+[
+    {
+        "name": "conda cmake",
+        "isTrusted": true,
+        "preferredGenerator": {
+            "name": "Ninja"
+        },
+        "compilers": {
+            "C": "/home/yixiong/micromamba/envs/sipros5/bin/x86_64-conda-linux-gnu-gcc",
+            "CXX": "/home/yixiong/micromamba/envs/sipros5/bin/x86_64-conda-linux-gnu-g++"
+        },
+        "toolchainFile": "${workspaceFolder}/.vscode/toolchain.cmake",
+        "environmentVariables": {
+            "PATH": "/home/yixiong/micromamba/envs/sipros5/bin;${env:PATH}"
+        }
+    }
+]

@@ -6,12 +6,12 @@
             "name": "Ninja"
         },
         "compilers": {
-            "C": "/home/yixiong/miniconda3/envs/mpi/bin/x86_64-conda_cos6-linux-gnu-gcc",
-            "CXX": "/home/yixiong/miniconda3/envs/mpi/bin/x86_64-conda_cos6-linux-gnu-g++"
+            "C": "/home/yixiong/micromamba/envs/sipros5/bin/x86_64-conda-linux-gnu-gcc",
+            "CXX": "/home/yixiong/micromamba/envs/sipros5/bin/x86_64-conda-linux-gnu-g++"
         },
         "toolchainFile": "${workspaceFolder}/.vscode/toolchain.cmake",
         "environmentVariables": {
-            "PATH": "/home/yixiong/miniconda3/envs/mpi/bin;${env:PATH}"
+            "PATH": "/home/yixiong/micromamba/envs/sipros5/bin;${env:PATH}"
         }
     }
 ]

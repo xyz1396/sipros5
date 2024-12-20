@@ -32,32 +32,21 @@ MS2ScanVector::~MS2ScanVector()
 
 void MS2ScanVector::setOutputFile(const string &sFT2FilenameInput, const string &sOutputDirectory)
 {
-	string sLeftFileName, sMiddleFileName, sRightFileName = ".sip";
-	size_t pos;
-	// cout<<ProNovoConfig::getSearchName()<<endl;
+	std::filesystem::path inPath = sFT2FilenameInput;
+	std::filesystem::path outPath = sOutputDirectory;
+	// get file name without extension and path
+	std::string baseName = inPath.stem().string();
+	string searchName;
 	if ((ProNovoConfig::getSearchName() == "") || (ProNovoConfig::getSearchName() == "Null") || (ProNovoConfig::getSearchName() == "NULL") || (ProNovoConfig::getSearchName() == "null"))
-		sRightFileName = ".sip";
-	else
-		sRightFileName = "." + ProNovoConfig::getSearchName() + ".sip";
-
-	// only for .FT2
-	// sLeftFileName = sFT2FilenameInput.substr(0, sFT2FilenameInput.length() - 4);
-	std::filesystem::path p = sFT2FilenameInput;
-	// easy way to remove suffix
-	p.replace_extension();
-	sLeftFileName = p.string();
-	if (sOutputDirectory == "")
-		// if output directory is not specified, it is working directory by default
-		sOutputFile = sLeftFileName + sRightFileName;
+		searchName = "Null";
 	else
 	{
-		pos = sLeftFileName.rfind(ProNovoConfig::getSeparator());
-		if (pos == string::npos)
-			sMiddleFileName = sLeftFileName;
-		else
-			sMiddleFileName = sLeftFileName.substr(pos + 1);
-		sOutputFile = sOutputDirectory + ProNovoConfig::getSeparator() + sMiddleFileName + sRightFileName;
+		searchName = ProNovoConfig::getSearchName();
+		std::replace(searchName.begin(), searchName.end(), '.', '_');
 	}
+	std::filesystem::path outFileName = baseName + "." + searchName + ".Spe2Pep.txt";
+	outPath = outPath / outFileName;
+	sOutputFile = outPath.string();
 }
 
 bool MS2ScanVector::ReadFT2File()
@@ -406,7 +395,7 @@ bool MS2ScanVector::loadMassData()
 		if (ProNovoConfig::iMaxPercusorCharge < charge)
 			ProNovoConfig::iMaxPercusorCharge = charge;
 	}
-	cout << "\n load mass data done.\n"
+	cout << "\nload mass data done.\n"
 		 << endl;
 	CLOCKSTOP;
 	return bReVal;
@@ -1127,12 +1116,10 @@ void MS2ScanVector::postProcessAllMs2MvhXcorr()
 	iScanSize = (int)vpAllMS2Scans.size();
 
 	postProcessAllMs2XcorrSip();
-	cout << "Xcorr search done. \n"
-		 << endl;
+	cout << "\nXcorr search done.\n" << endl;
 
 	postProcessAllMs2MvhSip();
-	cout << "MVH search done. \n"
-		 << endl;
+	cout << "MVH search done.\n" << endl;
 
 #pragma omp parallel for schedule(guided)
 	for (i = 0; i < iScanSize; i++)
@@ -1522,9 +1509,7 @@ void MS2ScanVector::writeOutputEnsemble()
 
 	sTailFT2FileName = ParsePath(sFT2Filename);
 	sort(vpAllMS2Scans.begin(), vpAllMS2Scans.end(), mylessScanId);
-	string sOutputFileTxt = sOutputFile.substr(0, sOutputFile.length() - 4);
-	sOutputFileTxt += ".Spe2Pep.txt";
-	outputFile.open(sOutputFileTxt.c_str());
+	outputFile.open(sOutputFile.c_str());
 
 	configStream.open(sConfigFile.c_str());
 	while (!configStream.eof())

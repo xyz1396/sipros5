@@ -71,7 +71,13 @@
         "complex": "cpp",
         "list": "cpp",
         "cfenv": "cpp",
-        "typeindex": "cpp"
+        "typeindex": "cpp",
+        "gzguts.h": "c",
+        "charconv": "cpp",
+        "format": "cpp",
+        "span": "cpp",
+        "text_encoding": "cpp",
+        "variant": "cpp"
     },
     "[python]": {
         "editor.defaultFormatter": "ms-python.autopep8"

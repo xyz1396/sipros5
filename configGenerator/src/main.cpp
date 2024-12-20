@@ -151,7 +151,7 @@ bool generateCFGs(string cfgPath, string outPath, string element)
     parser.setElement_PercentIX(element);
     for (size_t i = 0; i < pcts.size(); i++)
     {
-        parser.changeSearchName(doubleToStringWithWidth(pcts[i], 6, 3) + "Pct", element);
+        parser.changeSearchName(doubleToStringWithWidth(pcts[i], 7, 3) + "Pct", element);
         parser.changeMassWindowsCenter(centers[i], widths[i]);
         parser.changeSIPabundance(pcts[i], element);
         parser.writeFile(outPath);
