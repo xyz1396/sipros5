@@ -16,4 +16,6 @@ SET(EXECUTABLE_OUTPUT_PATH "${PROJECT_SOURCE_DIR}/bin")
 add_subdirectory(MSToolkit)
 add_subdirectory(openmp)
 add_subdirectory(mpi)
+add_subdirectory(AerithFeatureExtractor)
+add_subdirectory(configGenerator)
 

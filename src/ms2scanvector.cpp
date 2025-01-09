@@ -388,10 +388,10 @@ bool MS2ScanVector::loadMassData()
 		mass = mass + charge * ProNovoConfig::getProtonMass();
 		if (pMS2Scan->dParentMass < mass)
 			pMS2Scan->dParentMass = mass;
-		// set max precusor mass for Xcorr score function
+		// set max precursor mass for Xcorr score function
 		if (ProNovoConfig::dMaxMS2ScanMass < mass)
 			ProNovoConfig::dMaxMS2ScanMass = mass;
-		// set max precusor charge for Xcorr score function
+		// set max precursor charge for Xcorr score function
 		if (ProNovoConfig::iMaxPercusorCharge < charge)
 			ProNovoConfig::iMaxPercusorCharge = charge;
 	}
@@ -776,7 +776,7 @@ void MS2ScanVector::processPeptideArrayMvhTask(vector<Peptide *> &vpPeptideArray
 
 	MS2Scan *scanPtr;
 	int precursorCharge;
-	double precusorMass;
+	double precursorMass;
 	for (i = 0; i < iPeptideArraySize; i++)
 	{
 		bAssigned = false;
@@ -797,7 +797,7 @@ void MS2ScanVector::processPeptideArrayMvhTask(vector<Peptide *> &vpPeptideArray
 				// calculate the score
 				for (k = pairMS2Range.first; k <= pairMS2Range.second; ++k)
 				{
-					tie(precusorMass, precursorCharge, scanPtr) = vAllPrecursorMassChargeMS2ScanPtrTuples[k];
+					tie(precursorMass, precursorCharge, scanPtr) = vAllPrecursorMassChargeMS2ScanPtrTuples[k];
 					if (scanPtr->bSkip)
 					{
 						continue;
@@ -815,7 +815,7 @@ void MS2ScanVector::processPeptideArrayMvhTask(vector<Peptide *> &vpPeptideArray
 						if (bScored)
 						{
 							omp_set_lock(&(pLck[k]));
-							scanPtr->saveScore(dMvh, {precusorMass, precursorCharge, vpPeptideArray.at(i)},
+							scanPtr->saveScore(dMvh, {precursorMass, precursorCharge, vpPeptideArray.at(i)},
 											   scanPtr->vpWeightSumTopPeptides,
 											   "MVH", 2);
 							omp_unset_lock(&(pLck[k]));

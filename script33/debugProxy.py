@@ -18,11 +18,11 @@ os.chdir('test')
 #         -o wf_output'
         
 args = 'python ../script33/main.py \
-        -i /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct50/raw \
+        -i /prebiotics/ubuntuShare/EcoliSIP/goodResults/pct50/raw \
         -f fasta/EcoliWithCrapNodup.fasta \
         -e C13 \
         -t 160 \
-        -o wf_output'
+        -o wf_output --dryrun'
 
 # args = 'python ../script33/main.py \
 #         -i /scratch/yixiong/dignose/13C/raw3 \

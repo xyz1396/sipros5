@@ -32,3 +32,18 @@ test/tools/Raxport -f /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntu
 ```bash
 python script3/makeReverseDecoyDB.py test/fasta/EcoliWithCrapNodup.fasta test/fasta/FullDecoy.fasta
 ```
+
+# test AerithFeatureExtractor 
+```bash
+nohup python script33/debugProxy.py > test/test.log 2>&1 &
+
+bin/AerithFeatureExtractor \
+-t /nullspace/sipros5/test/wf_output/Pan_052322_X13/target \
+-d /nullspace/sipros5/test/wf_output/Pan_052322_X13/decoy \
+-n 8 \
+-f /nullspace/sipros5/test/wf_output/Pan_052322_X13/ft \
+-j 8 \
+-c /nullspace/sipros5/configTemplates/SIP.cfg \
+-p 0 \
+-o /nullspace/sipros5/test/wf_output/Pan_052322_X13/X13.pin
+```

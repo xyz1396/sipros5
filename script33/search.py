@@ -5,13 +5,14 @@ import subprocess
 import concurrent.futures
 import shutil
 
+
 class search:
-    def __init__(self, element: str, sipRange:str, step: str, 
+    def __init__(self, element: str, sipRange: str, step: str,
                  configGeneratorPath: str,
-                 configTemplatePath: str, raxportPath: str,  
-                 siprosPath : str, scansPerFT2: str, fastaPath: str, 
-                 inputPath : str, outputPath: str,
-                 threadNumber: int, logger: Logger) -> None:
+                 configTemplatePath: str, raxportPath: str,
+                 siprosPath: str, scansPerFT2: str, fastaPath: str,
+                 inputPath: str, outputPath: str,
+                 threadNumber: int, logger: Logger, dryrun=False) -> None:
         self.core_count: int = multiprocessing.cpu_count()
         self.element = element
         self.sipRange = sipRange
@@ -29,27 +30,29 @@ class search:
         self.threadNumber = threadNumber
         self.OMP_NUM_THREADS = 10
         self.logger = logger
-        self.raw_files:list[str] = []
-        self.mzml_files:list[str] = []
-        self.base_names:list[str] = []
-        self.base_names_of_raw:list[str] = []
-        self.base_names_of_mzml:list[str] = []
+        self.raw_files: list[str] = []
+        self.mzml_files: list[str] = []
+        self.base_names: list[str] = []
+        self.base_names_of_raw: list[str] = []
+        self.base_names_of_mzml: list[str] = []
+        self.dryrun = dryrun
 
     def run_command(self, cmd):
         self.logger.info(f"Running command: {cmd}")
         try:
             env = os.environ.copy()
             env["OMP_NUM_THREADS"] = str(self.OMP_NUM_THREADS)
-            output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, env=env)
+            output = subprocess.check_output(
+                cmd, shell=True, stderr=subprocess.STDOUT, env=env)
             self.logger.info(output.decode())
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Command execution failed: {e.output.decode()}")
             exit(1)
-    
+
     def reverse_fasta_sequences(self):
         self.logger.info(f'Reversing fasta sequences to {self.decoyPath}')
         with open(self.fastaPath, 'r') as fasta, \
-            open(self.decoyPath, 'w') as output:
+                open(self.decoyPath, 'w') as output:
             sequence = ''
             header = ''
             for line in fasta:
@@ -62,7 +65,7 @@ class search:
                     sequence += line.strip()
             if header:  # write the last sequence
                 output.write(header + '\n' + sequence[::-1] + '\n')
-    
+
     def generateConfigs(self):
         self.logger.info(f'Generating config files to {self.configsPath}')
         if not os.path.exists(self.configsPath):
@@ -74,10 +77,11 @@ class search:
             sip_lower_bound = int(self.sipRange.split('-')[0])
             sip_higher_bound = int(self.sipRange.split('-')[1])
         if self.step != None:
-            sip_step = int(self.step)        
+            sip_step = int(self.step)
         if self.element == None:
             self.logger.info("It is regular search")
-            shutil.copy(f'{self.configTemplatePath}/Regular.cfg', f'{self.outPutPath}/configs/Regular.cfg')
+            shutil.copy(f'{self.configTemplatePath}/Regular.cfg',
+                        f'{self.outPutPath}/configs/Regular.cfg')
         # if element is provided, generate config files for SIP search
         else:
             self.logger.info("It is SIP search")
@@ -86,7 +90,7 @@ class search:
             -o {self.outPutPath}/configs/ \
             -e {self.element} -l {sip_lower_bound} -u {sip_higher_bound} -s {sip_step}'
             self.run_command(configGenerator_cmd)
-            
+
     def getInputFiles(self):
         files = []
         if os.path.isdir(self.inputPath):
@@ -113,7 +117,8 @@ class search:
                 self.base_names.append(mzml_base)
                 self.base_names_of_mzml.append(mzml_base)
         if len(self.raw_files) == 0 and len(self.mzml_files) == 0:
-            self.logger.error(f'No raw or mzml files found in {self.inputPath}')
+            self.logger.error(
+                f'No raw or mzml files found in {self.inputPath}')
             exit(1)
         self.logger.info(f'raw files: {self.raw_files}')
         self.logger.info(f'mzml files: {self.mzml_files}')
@@ -127,12 +132,12 @@ class search:
                 raxport_cmd = f'{self.raxportPath} -f {self.raw_files[i]} \
                             -o {self.outPutPath}/{self.base_names_of_raw[i]}/ft -s {scansPerFT2} \
                             -j {min(10, self.core_count)}'
-                self.run_command(raxport_cmd)            
+                self.run_command(raxport_cmd)
         else:
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, self.core_count)) as executor:
                 commands = [f'{self.raxportPath} -f {self.raw_files[i]} \
-                            -o {self.outPutPath}/{self.base_names_of_raw[i]}/ft' \
-                                for i in range(len(self.raw_files))]
+                            -o {self.outPutPath}/{self.base_names_of_raw[i]}/ft'
+                            for i in range(len(self.raw_files))]
                 executor.map(self.run_command, commands)
 
     def sipros_search(self, raw_file_parallel: int):
@@ -141,7 +146,7 @@ class search:
             if file.endswith(".cfg"):
                 config_files.append(os.path.join(self.configsPath, file))
         commands = []
-        # Search target database        
+        # Search target database
         for config in config_files:
             for base_name in self.base_names_of_raw:
                 for ft2_file in os.listdir(f'{self.outPutPath}/{base_name}/ft'):
@@ -181,17 +186,13 @@ class search:
             threadNumber = self.threadNumber
         self.logger.info(f'Setted max thread numbers: {threadNumber}')
         raw_file_parallel = int(threadNumber // self.OMP_NUM_THREADS)
-        self.getInputFiles()    
-        
+        self.getInputFiles()
+
         for base_name in self.base_names:
             os.makedirs(f'{self.outPutPath}/{base_name}', exist_ok=True)
             os.makedirs(f'{self.outPutPath}/{base_name}/ft', exist_ok=True)
             os.makedirs(f'{self.outPutPath}/{base_name}/target', exist_ok=True)
             os.makedirs(f'{self.outPutPath}/{base_name}/decoy', exist_ok=True)
-
-        self.convert_raw_to_ft2() 
-
-        self.sipros_search(raw_file_parallel)           
-
-        
-
+        if not self.dryrun:
+            self.convert_raw_to_ft2()
+            self.sipros_search(raw_file_parallel)

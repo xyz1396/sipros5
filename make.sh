@@ -1,9 +1,9 @@
 #!/bin/bash
-# micromamba create -n sirpos5 -c conda-forge openmpi gxx_linux-64 gcc_linux-64 cmake gperftools
+# micromamba create -n sipros5 -c conda-forge openmpi gxx_linux-64 gcc_linux-64 cmake gperftools
 # compiler name x86_64-conda_cos6-linux-gnu-g++
-# micromamba activate sirpos5
+# micromamba activate sipros5
 # run follows to load dynamic libs when running bin/SiprosV3omp bin/SiprosV3mpi bin/SiprosV3test
-# micromamba activatesirpos5
+# micromamba activate sipros5
 # export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_PREFIX}/lib
 case $1 in
 "load") ;;
@@ -16,13 +16,14 @@ case $1 in
 "build")
     mkdir build
     cd build
-    cmake -DCMAKE_BUILD_TYPE=Release ..
-    cmake --build . --parallel 8
+    cmake -G Ninja -DCMAKE_BUILD_TYPE=Release ..
+    ninja
     # add share lib for mpi version
     cd ..
-    deplist=$(ldd bin/SiprosMPI | awk '{if (match($3,"/")){ print $3}}')
-    mkdir bin/libSiprosMPI
-    cp -L -n $deplist bin/libSiprosMPI
+    # deplist=$(ldd bin/siprosMPI | awk '{if (match($3,"/")){ print $3}}')
+    # mkdir bin/libSiprosMPI
+    # cp -L -n $deplist bin/libSiprosMPI
+    cp bin/* tools
     ;;
 "buildConda")
     export MAMBA_ROOT_PREFIX=~/micromamba
@@ -35,9 +36,10 @@ case $1 in
     ninja
     # add share lib for mpi version
     cd ..
-    deplist=$(ldd bin/SiprosMPI | awk '{if (match($3,"/")){ print $3}}')
-    mkdir bin/libSiprosMPI
-    cp -L -n $deplist bin/libSiprosMPI
+    # deplist=$(ldd bin/siprosMPI | awk '{if (match($3,"/")){ print $3}}')
+    # mkdir bin/libSiprosMPI
+    # cp -L -n $deplist bin/libSiprosMPI
+    cp bin/* tools
     ;;
 "buildTick")
     cd build

@@ -7,7 +7,10 @@ from logging import Logger
 import time
 from argparse import Namespace
 from search import search
+from feature import feature
+from filter import filter
 import warnings
+
 
 class SIPROSWorkflow:
     def __init__(self) -> None:
@@ -19,7 +22,7 @@ class SIPROSWorkflow:
             'configGenerator': f'{upper_path}/tools/configGenerator',
             'raxport': f'{upper_path}/tools/raxport',
             'sipros': f'{upper_path}/tools/sipros',
-            'feature_extractor': f'{upper_path}/tools/aerith',
+            'feature_extractor': f'{upper_path}/tools/aerithFeatureExtractor',
             'filter': f'{upper_path}/tools/percolator',
             'deepfilter': f'{upper_path}/tools/deepfilter',
             'assembly': f'{upper_path}/tools/philosopher',
@@ -76,16 +79,19 @@ citation:
                             help="thread number to be limited, all threads in default")
         parser.add_argument('-o', '--output', required=True,
                             help="Output directory path")
+        parser.add_argument('--dryrun', action='store_true', help='Run in dry run mode for test')
 
         args: Namespace = parser.parse_args()
         return args
-    
+
     def initLogger(self, outputPath: str) -> Logger:
         logger: Logger = logging.getLogger('sipros_workflow')
         logger.setLevel(logging.INFO)
-        file_handler = logging.FileHandler(f'{outputPath}/sipros_workflow.log', mode='w')
+        file_handler = logging.FileHandler(
+            f'{outputPath}/sipros_workflow.log', mode='w')
         stream_handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(formatter)
         stream_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
@@ -95,27 +101,41 @@ citation:
 
     def run(self) -> None:
         start_time: float = time.time()
-        
+
         # run SIPROS search
-        sipros_search = search(element=self.args.element, 
+        sipros_search = search(element=self.args.element,
                                sipRange=self.args.range,
                                step=self.args.precision,
                                configTemplatePath=self.toolsPaths['configTemplates'],
                                configGeneratorPath=self.toolsPaths['configGenerator'],
                                raxportPath=self.toolsPaths['raxport'],
-                               scansPerFT2=self.args.split_FT2_file, 
+                               scansPerFT2=self.args.split_FT2_file,
                                siprosPath=self.toolsPaths['sipros'],
-                               fastaPath=self.args.fasta, 
-                               inputPath=self.args.input, 
+                               fastaPath=self.args.fasta,
+                               inputPath=self.args.input,
                                outputPath=self.args.output,
-                               threadNumber=int(self.args.thread), 
-                               logger=self.logger)
+                               threadNumber=int(self.args.thread),
+                               logger=self.logger,
+                               dryrun=self.args.dryrun)
         sipros_search.run()
-        
-        # Call the feature extraction tool
 
+        # run Aerith feature extraction
+        sipros_feature = feature(baseNames=sipros_search.base_names,
+                                 outputPath=self.args.output,
+                                 scansPerFT=sipros_search.scansPerFT2,
+                                 aerithFeatureExtractorPath=self.toolsPaths['feature_extractor'],
+                                 configTemplatePath=f'{self.toolsPaths['configTemplates']}/SIP.cfg',
+                                 threadNumber=sipros_search.threadNumber,
+                                 logger=self.logger)
+        sipros_feature.run()
 
         # Call the filter tools
+        sipros_filter = filter(baseNames=sipros_search.base_names,
+                               outputPath=self.args.output,
+                               percolatorPath=self.toolsPaths['filter'],
+                               threadNumber=sipros_search.threadNumber,
+                               logger=self.logger)
+        sipros_filter.run()
 
         # Call the assembly tools
 
@@ -124,8 +144,9 @@ citation:
         # Output paths
         end_time = time.time()
         running_time = end_time - start_time
-        self.logger.info(f'All job done. Results are in {self.args.output}.') 
+        self.logger.info(f'All job done. Results are in {self.args.output}.')
         self.logger.info(f'Total running time: {running_time} seconds')
+
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
