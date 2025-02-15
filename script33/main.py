@@ -9,6 +9,7 @@ from argparse import Namespace
 from search import search
 from feature import feature
 from filter import filter
+from assembly import assembly
 import warnings
 
 
@@ -25,7 +26,7 @@ class SIPROSWorkflow:
             'feature_extractor': f'{upper_path}/tools/aerithFeatureExtractor',
             'filter': f'{upper_path}/tools/percolator',
             'deepfilter': f'{upper_path}/tools/deepfilter',
-            'assembly': f'{upper_path}/tools/philosopher',
+            'assembly': f'{upper_path}/tools/philosopher-v5.1.1',
             'metaLP': f'{upper_path}/tools/metaLP',
             'quantification': f'{upper_path}/tools/ionquant'
         }
@@ -37,7 +38,7 @@ class SIPROSWorkflow:
         if not os.path.exists(self.args.output):
             os.makedirs(self.args.output)
         else:
-            warnings.warn(f'{self.args.output} exists and will be overwritten')
+            warnings.warn(message=f'{self.args.output} exists and will be overwritten')
         self.logger: Logger = self.initLogger(self.args.output)
 
     def load_paths(self) -> dict[str, str]:
@@ -51,7 +52,12 @@ class SIPROSWorkflow:
         return paths
 
     def parse_arguments(self) -> Namespace:
-        citation = """
+        epilog = """
+Label search command demo : 
+siproswf -i raw  -f Ecoli.fasta -e C13 -t 128 -o wf_output
+Regular search command demo : 
+siproswf -i raw  -f Ecoli.fasta -t 128 -o wf_output
+
 citation:
 1. Xiong, Y., Mueller, R.S., Feng, S., Guo, X. and Pan, C., 2024. Proteomic stable isotope probing with an upgraded Sipros algorithm for improved identification and quantification of isotopically labeled proteins. Microbiome, 12.
 2. Li, J., Xiong, Y., Feng, S., Pan, C., & Guo, X. (2024). CloudProteoAnalyzer: scalable processing of big data from proteomics using cloud computing. Bioinformatics Advances, vbae024
@@ -60,21 +66,24 @@ citation:
 5. Pan, C., Kora, G., McDonald, W.H., Tabb, D.L., VerBerkmoes, N.C., Hurst, G.B., Pelletier, D.A., Samatova, N.F. and Hettich, R.L., 2006. ProRata: a quantitative proteomics program for accurate protein abundance ratio estimation with confidence interval evaluation. Analytical chemistry, 78(20), pp.7121-7131
         """
         parser = argparse.ArgumentParser(
-            description="sipros Workflow", prog="siproswf", epilog=citation,
+            description="sipros Workflow", prog="siproswf", epilog=epilog,
             formatter_class=argparse.RawTextHelpFormatter)
         parser.add_argument('-i', '--input', required=True,
                             help="Input raw/mzml file path or directory, e.g., 'data/raw', 'A.raw,B.raw'")
         parser.add_argument('-e', '--element', required=False,
-                            help="SIP label element, e.g., C13, H2, N15, O18, S33, S34")
+                            help="SIP label element, e.g., C13, H2, N15, O18, S33, S34. Don't provide this flag for regular search")
         parser.add_argument('-r', '--range', required=False,
-                            help="SIP label range, e.g., 0-100")
+                            help="SIP label range, e.g., 0-100. Don't provide this flag for regular search")
         parser.add_argument('-p', '--precision', required=False,
-                            help="SIP label precision in percentage, e.g., 1")
+                            help="SIP label precision in percentage, e.g., 1. Don't provide this flag for regular search")
         parser.add_argument('-f', '--fasta', required=True,
                             help="fasta file path")
         parser.add_argument('-s', '--split_FT2_file', required=False,
                             type=int, nargs='?', const=20000,
                             help="scans number in splitted FT2 file, no split in default")
+        parser.add_argument('-n', '--nPrecursor', required=False,
+                            type=int, nargs='?', const=6,
+                            help="max precursor number in isolation window when converting raw file, recommend 6 in DDA (default) 15 in DIA")
         parser.add_argument('-t', '--thread', required=False,
                             help="thread number to be limited, all threads in default")
         parser.add_argument('-o', '--output', required=True,
@@ -116,6 +125,7 @@ citation:
                                outputPath=self.args.output,
                                threadNumber=int(self.args.thread),
                                logger=self.logger,
+                               nPrecurosr=self.args.nPrecursor,
                                dryrun=self.args.dryrun)
         sipros_search.run()
 
@@ -124,9 +134,10 @@ citation:
                                  outputPath=self.args.output,
                                  scansPerFT=sipros_search.scansPerFT2,
                                  aerithFeatureExtractorPath=self.toolsPaths['feature_extractor'],
-                                 configTemplatePath=f'{self.toolsPaths['configTemplates']}/SIP.cfg',
+                                 configTemplatePath=f"{self.toolsPaths['configTemplates']}/SIP.cfg",
                                  threadNumber=sipros_search.threadNumber,
-                                 logger=self.logger)
+                                 logger=self.logger,
+                                 dryrun=self.args.dryrun)
         sipros_feature.run()
 
         # Call the filter tools
@@ -134,10 +145,20 @@ citation:
                                outputPath=self.args.output,
                                percolatorPath=self.toolsPaths['filter'],
                                threadNumber=sipros_search.threadNumber,
-                               logger=self.logger)
+                               logger=self.logger,
+                               dryrun=self.args.dryrun)
         sipros_filter.run()
 
         # Call the assembly tools
+        
+        sipros_assembly = assembly(baseNames=sipros_search.base_names,
+                                   philosopherPath=self.toolsPaths['assembly'],
+                                   fastaPath=self.args.fasta,
+                                   decoyPath=sipros_search.decoyPath,
+                                   outputPath=self.args.output,
+                                   threadNumber=sipros_search.threadNumber,
+                                   logger=self.logger)
+        sipros_assembly.run()
 
         # Call the quantification tool
 

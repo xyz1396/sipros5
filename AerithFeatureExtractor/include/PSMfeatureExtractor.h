@@ -12,7 +12,7 @@ class PSMfeatureExtractor
 public:
     PSMfeatureExtractor();
     Spe2PepFileReader mSpe2PepFileReader;
-    averagine mAveragine = averagine();
+    averagine mAveragine;
     std::vector<Scan> FT1Scans;
     std::vector<Scan> FT2Scans;
     sipPSM *mSipPSM;

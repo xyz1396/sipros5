@@ -47,3 +47,63 @@ bin/AerithFeatureExtractor \
 -p 0 \
 -o /nullspace/sipros5/test/wf_output/Pan_052322_X13/X13.pin
 ```
+
+# test sipros_wf
+
+```bash
+rm -r test/wf_output
+mkdir test/wf_output
+nohup ./siproswf \
+        -i /prebiotics/ubuntuShare/EcoliSIP/goodResults/pct99/raw \
+        -f test/fasta/EcoliWithCrapNodup.fasta \
+        -e C13 \
+        -t 160 \
+        -o test/wf_output \
+> test/test.log 2>&1 &
+
+nohup ./siproswf \
+        -i /prebiotics/ubuntuShare/EcoliSIP/goodResults/pct1/raw \
+        -f test/fasta/EcoliWithCrapNodup.fasta \
+        -t 160 \
+        -o test/wf_outputR \
+> testR.log 2>&1 &
+
+
+cd /ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/sipros5
+nohup ./siproswf \
+        -i /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct5/raw \
+        -f test/fasta/EcoliWithCrapNodup.fasta \
+        -e C13 \
+        -t 160 \
+        -o test/wf_output5 \
+> test/test5.log 2>&1 &
+
+nohup ./siproswf \
+        -i /ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/AstralC13/pct1 \
+        -f test/fasta/EcoliWithCrapNodup.fasta \
+        -t 40 \
+        -n 15 \
+        -s \
+        -o test/wf_AstralR1 \
+> test/testAstralR1.log 2>&1 &
+
+nohup ./siproswf \
+        -i /ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/AstralC13/pct50 \
+        -f test/fasta/EcoliWithCrapNodup.fasta \
+        -e C13 \
+        -t 160 \
+        -s \
+        -n 15 \
+        -o test/wf_outputAstral50 \
+> test/testAstral50.log 2>&1 &
+
+./siproswf \
+        -i /ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/AstralC13/pct99 \
+        -f test/fasta/EcoliWithCrapNodup.fasta \
+        -e C13 \
+        -t 40 \
+        -s \
+        -n 15 \
+        -o test/wf_outputAstral99 \
+        --dryrun
+```

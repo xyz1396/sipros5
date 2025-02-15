@@ -39,6 +39,35 @@
             ],
             "preLaunchTask": "cmake debug",
             "miDebuggerPath": "/home/yixiong/micromamba/envs/sipros5/bin/gdb"
+        },
+        {
+            "name": "debug aerithFeatureExtractor",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/bin/aerithFeatureExtractor",
+            "args": [
+                "$AerithArgs"
+            ],
+            "stopAtEntry": false,
+            "envFile": "${workspaceFolder}/.vscode/.env",
+            "cwd": "${workspaceFolder}/test",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable g3 level debug for gdb",
+                    "text": "python import sys; sys.path.insert(0, '/home/yixiong/micromamba/envs/sipros5/share/gcc-14.2.0/python'); from libstdcxx.v6.printers import register_libstdcxx_printers; register_libstdcxx_printers(None)",
+                    "ignoreFailures": false
+                },
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "cmake debug",
+            "miDebuggerPath": "/home/yixiong/micromamba/envs/sipros5/bin/gdb"
         }
     ]
 }

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+export MAMBA_ROOT_PREFIX=~/micromamba
+eval "$(~/.local/bin/micromamba shell hook --shell=bash)"
+micromamba activate sipros5
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_PREFIX}/lib
+export DOTNET_GCHeapHardLimit=200000000
+SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+python $SCRIPT_DIR/script33/main.py "$@"

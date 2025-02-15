@@ -12,7 +12,7 @@ class search:
                  configTemplatePath: str, raxportPath: str,
                  siprosPath: str, scansPerFT2: str, fastaPath: str,
                  inputPath: str, outputPath: str,
-                 threadNumber: int, logger: Logger, dryrun=False) -> None:
+                 threadNumber: int, logger: Logger, nPrecurosr = 6, dryrun=False) -> None:
         self.core_count: int = multiprocessing.cpu_count()
         self.element = element
         self.sipRange = sipRange
@@ -35,6 +35,7 @@ class search:
         self.base_names: list[str] = []
         self.base_names_of_raw: list[str] = []
         self.base_names_of_mzml: list[str] = []
+        self.nPrecursor = nPrecurosr
         self.dryrun = dryrun
 
     def run_command(self, cmd):
@@ -131,14 +132,14 @@ class search:
             for i in range(len(self.raw_files)):
                 raxport_cmd = f'{self.raxportPath} -f {self.raw_files[i]} \
                             -o {self.outPutPath}/{self.base_names_of_raw[i]}/ft -s {scansPerFT2} \
-                            -j {min(10, self.core_count)}'
+                            -j {min(10, self.core_count)} -n {self.nPrecursor}'
                 self.run_command(raxport_cmd)
         else:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, self.core_count)) as executor:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=min(10, self.core_count)) as executor:
                 commands = [f'{self.raxportPath} -f {self.raw_files[i]} \
-                            -o {self.outPutPath}/{self.base_names_of_raw[i]}/ft'
+                            -o {self.outPutPath}/{self.base_names_of_raw[i]}/ft -n {self.nPrecursor}'
                             for i in range(len(self.raw_files))]
-                executor.map(self.run_command, commands)
+                list(executor.map(self.run_command, commands))
 
     def sipros_search(self, raw_file_parallel: int):
         config_files = []
@@ -174,8 +175,8 @@ class search:
                                 -fasta {self.decoyPath} \
                                 -f {self.mzml_files[i]} \
                                 -o {self.outPutPath}/{self.base_names_of_mzml[i]}/target')
-        with concurrent.futures.ThreadPoolExecutor(max_workers=raw_file_parallel) as executor:
-            executor.map(self.run_command, commands)
+        with concurrent.futures.ProcessPoolExecutor(max_workers=raw_file_parallel) as executor:
+            list(executor.map(self.run_command, commands))
 
     def run(self) -> None:
         self.reverse_fasta_sequences()

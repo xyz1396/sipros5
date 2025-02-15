@@ -1,8 +1,7 @@
 #include "PSMfeatureExtractor.h"
 
-PSMfeatureExtractor::PSMfeatureExtractor()
-{
-}
+PSMfeatureExtractor::PSMfeatureExtractor() : mAveragine(averagine())
+{}
 
 size_t PSMfeatureExtractor::binarySearchPeak(const Scan *mScan, double Mz, int charge)
 {
@@ -419,7 +418,7 @@ void PSMfeatureExtractor::extractPSMfeatureParallel(
     num_threads = std::min(num_threads, threadNumber);
     omp_set_num_threads(num_threads);
     // Enable nested parallelism
-    omp_set_nested(1);
+    // omp_set_nested(1);
 #pragma omp parallel for
     for (size_t i = 0; i < mSpe2PepFileReader.FT2s.size(); i++)
     {
