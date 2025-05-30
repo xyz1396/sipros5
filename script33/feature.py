@@ -44,7 +44,6 @@ class feature:
             raw_file_parallel = int(threadNumber // self.OMP_NUM_THREADS)
         raw_file_parallel = min(raw_file_parallel, 10)
         self.logger.info(f'Running Aerith Feature Extractor with {raw_file_parallel} processes')
-        # if not self.dryrun:
         with concurrent.futures.ProcessPoolExecutor(max_workers=raw_file_parallel) as executor:
             commands = [f'{self.aerithFeatureExtractorPath} -t {self.outPutPath}/{baseName}/target \
                         -d {self.outPutPath}/{baseName}/decoy \
@@ -52,4 +51,5 @@ class feature:
                         -j {raw_file_parallel} -c {self.configTemplatePath} \
                         -p 0 -o {self.outPutPath}/{baseName}/{baseName}.pin'
                         for baseName in self.baseNames]
-            list(executor.map(self.run_command, commands))
+            if not self.dryrun:
+                list(executor.map(self.run_command, commands))

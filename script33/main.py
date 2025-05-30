@@ -69,7 +69,7 @@ citation:
             description="sipros Workflow", prog="siproswf", epilog=epilog,
             formatter_class=argparse.RawTextHelpFormatter)
         parser.add_argument('-i', '--input', required=True,
-                            help="Input raw/mzml file path or directory, e.g., 'data/raw', 'A.raw,B.raw'")
+                            help="Input raw/mzml file path or directory, e.g., 'data/raw', 'A.raw,B.raw,C.raw'")
         parser.add_argument('-e', '--element', required=False,
                             help="SIP label element, e.g., C13, H2, N15, O18, S33, S34. Don't provide this flag for regular search")
         parser.add_argument('-r', '--range', required=False,
@@ -77,17 +77,23 @@ citation:
         parser.add_argument('-p', '--precision', required=False,
                             help="SIP label precision in percentage, e.g., 1. Don't provide this flag for regular search")
         parser.add_argument('-f', '--fasta', required=True,
-                            help="fasta file path")
+                            help="Fasta file path")
         parser.add_argument('-s', '--split_FT2_file', required=False,
                             type=int, nargs='?', const=20000,
-                            help="scans number in splitted FT2 file, no split in default")
+                            help="Scans number in splitted FT2 file, no split in default")
         parser.add_argument('-n', '--nPrecursor', required=False,
                             type=int, nargs='?', const=6,
-                            help="max precursor number in isolation window when converting raw file, recommend 6 in DDA (default) 15 in DIA")
+                            help="Max precursor number in isolation window when converting raw file, recommend 6 in DDA (default) 15 in DIA")
         parser.add_argument('-t', '--thread', required=False,
-                            help="thread number to be limited, all threads in default")
-        parser.add_argument('-o', '--output', required=True,
-                            help="Output directory path")
+                            help="Thread number to be limited, all threads in default")
+        parser.add_argument('-o', '--output', required=True, help="Output directory path")
+        parser.add_argument('--ignorePCT', action='store_true', 
+                            help='Ignore isotopic percentage of MS1 and MS2 when filtering few SIP labeled PSMs')
+        parser.add_argument('--negative_control', required=False, type=str,
+                            help="Negative control file name without extension, e.g., 'A' for 'A.raw', 'A,B' for 'A.raw,B.raw'.\n"
+                                 "These files will be used to filter out false positive SIP-labeled PSMs")
+        parser.add_argument('--label_threshold', required=False, type=float, default=2.0,
+                            help="SIP label threshold in '%%' for filtering out false positive SIP-labeled PSMs")
         parser.add_argument('--dryrun', action='store_true', help='Run in dry run mode for test')
 
         args: Namespace = parser.parse_args()
@@ -146,6 +152,7 @@ citation:
                                percolatorPath=self.toolsPaths['filter'],
                                threadNumber=sipros_search.threadNumber,
                                logger=self.logger,
+                               ignorePCT=self.args.ignorePCT,
                                dryrun=self.args.dryrun)
         sipros_filter.run()
 
@@ -153,10 +160,13 @@ citation:
         
         sipros_assembly = assembly(baseNames=sipros_search.base_names,
                                    philosopherPath=self.toolsPaths['assembly'],
+                                   percolatorPath=self.toolsPaths['filter'],
                                    fastaPath=self.args.fasta,
                                    decoyPath=sipros_search.decoyPath,
                                    outputPath=self.args.output,
                                    threadNumber=sipros_search.threadNumber,
+                                   negative_control=self.args.negative_control,
+                                   label_threshold=self.args.label_threshold,
                                    logger=self.logger)
         sipros_assembly.run()
 

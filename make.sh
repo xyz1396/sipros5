@@ -1,5 +1,5 @@
 #!/bin/bash
-# micromamba create -n sipros5 -c conda-forge openmpi gxx_linux-64 gcc_linux-64 cmake ninja gdb gperftools python=3.12 lxml 
+# micromamba create -n sipros5 -c conda-forge openmpi gxx_linux-64 gcc_linux-64 cmake ninja gdb gperftools python=3.12 lxml pandas
 # compiler name x86_64-conda_cos6-linux-gnu-g++
 # micromamba activate sipros5
 # run follows to load dynamic libs when running bin/SiprosV3omp bin/SiprosV3mpi bin/SiprosV3test

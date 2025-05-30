@@ -62,6 +62,14 @@ nohup ./siproswf \
 > test/test.log 2>&1 &
 
 nohup ./siproswf \
+        -i /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct50/raw \
+        -f test/fasta/EcoliWithCrapNodup.fasta \
+        -e C13 \
+        -t 50 \
+        -o test/wf_output50 \
+> test/test50.log 2>&1 &
+
+nohup ./siproswf \
         -i /prebiotics/ubuntuShare/EcoliSIP/goodResults/pct1/raw \
         -f test/fasta/EcoliWithCrapNodup.fasta \
         -t 160 \
