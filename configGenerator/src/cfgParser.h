@@ -43,5 +43,6 @@ public:
     void changeSearchName(const string &nameSuffix, const string &element);
     void changeMassWindowsCenter(const int center, const int windowsSize);
     void changeSIPabundance(const double sipAbundance, const string &element);
+    void changeMStolerance(const float toleranceMS1, const float toleranceMS2);
     void writeFile(const string &folderPath);
 };

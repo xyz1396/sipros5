@@ -70,6 +70,21 @@ citation:
             formatter_class=argparse.RawTextHelpFormatter)
         parser.add_argument('-i', '--input', required=True,
                             help="Input raw/mzml file path or directory, e.g., 'data/raw', 'A.raw,B.raw,C.raw'")
+        parser.add_argument('--sPTM', required=False, type=str, help=(
+            "Static PTM for regular search. Example: 'C|5,8,2,2,0,1'\n"
+            "This means a static modification (e.g., alkylation) on residue C, "
+            "with new element composition: C,H,O,N,P,S = 5,8,2,2,0,1."
+        ))
+        parser.add_argument('--vPTM', required=False, type=str, help=(
+            "Variable PTM for regular search, e.g., '~|M|0,0,1,0,0,0;!|NQ|0,-1,1,-1,0,0'.\n"
+            "This means a variable modification on residue M (Oxidation or Hydroxylation, element composition change: 0,0,1,0,0,0 for C,H,O,N,P,S),\n"
+            "and on N/Q (Deamidation or Citrullination, element composition change: 0,-1,1,-1,0,0 for C,H,O,N,P,S)."
+        ))
+        parser.add_argument('--toleranceMS1', required=False, type=float, default=0.01,
+            help="MS1 mass tolerance in Da (default: 0.01).")
+        parser.add_argument('--toleranceMS2', required=False, type=float, default=0.01,
+            help="MS2 mass tolerance in Da (default: 0.01). For ion trap MS2 data, 0.1 is recommended."
+        )
         parser.add_argument('-e', '--element', required=False,
                             help="SIP label element, e.g., C13, H2, N15, O18, S33, S34. Don't provide this flag for regular search")
         parser.add_argument('-r', '--range', required=False,
@@ -82,7 +97,7 @@ citation:
                             type=int, nargs='?', const=20000,
                             help="Scans number in splitted FT2 file, no split in default")
         parser.add_argument('-n', '--nPrecursor', required=False,
-                            type=int, nargs='?', const=6,
+                            type=int, default=6,
                             help="Max precursor number in isolation window when converting raw file, recommend 6 in DDA (default) 15 in DIA")
         parser.add_argument('-t', '--thread', required=False,
                             help="Thread number to be limited, all threads in default")
@@ -129,6 +144,7 @@ citation:
                                fastaPath=self.args.fasta,
                                inputPath=self.args.input,
                                outputPath=self.args.output,
+                               negative_control=self.args.negative_control,
                                threadNumber=int(self.args.thread),
                                logger=self.logger,
                                nPrecurosr=self.args.nPrecursor,
@@ -166,6 +182,7 @@ citation:
                                    outputPath=self.args.output,
                                    threadNumber=sipros_search.threadNumber,
                                    negative_control=self.args.negative_control,
+                                   element=self.args.element,
                                    label_threshold=self.args.label_threshold,
                                    logger=self.logger)
         sipros_assembly.run()

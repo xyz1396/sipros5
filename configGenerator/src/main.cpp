@@ -6,16 +6,20 @@
 string configPath = "";
 string outPath = "";
 string element = "";
-set<string> supportedElements = {"C13", "H2", "N15", "O18", "S33", "S34"};
+float toleranceMS1 = 0.01;
+float toleranceMS2 = 0.01;
+set<string> supportedElements = {"C13", "H2", "N15", "O18", "S33", "S34", "R"};
 double sipLowerBound = 0, sipUpperBound = 100, sipStep = 1;
-string help = "Usage: \n \
-    -i config file input path\n \
-    -o config files output path\n \
-    -e SIP label element, e.g., C13, H2, N15, O18, S33, S34\n \
-    -l lower bound of SIP abundance\n \
-    -u upper bound of SIP abundance\n \
-    -s step of SIP abundance \n \
-    -h or --help for help";
+string help = "Usage:\n"
+              "  -i <input_config_path>    Path to input config file (required)\n"
+              "  -o <output_path>          Path to output config files (required)\n"
+              "  -e <element>              SIP label element: C13, H2, N15, O18, S33, S34, R (R = regular search) (required)\n"
+              "  -l <lower_bound>          Lower bound of SIP abundance (default: 0)\n"
+              "  -u <upper_bound>          Upper bound of SIP abundance (default: 100)\n"
+              "  -s <step>                 Step size for SIP abundance (default: 1)\n"
+              "  -t1 <ms1_tolerance>       MS1 tolerance in Da (default: 0.01)\n"
+              "  -t2 <ms2_tolerance>       MS2 tolerance in Da (default: 0.01)\n"
+              "  -h, --help                Show this help message\n";
 
 bool parseArgs(int argc, char const *argv[])
 {
@@ -108,6 +112,32 @@ bool parseArgs(int argc, char const *argv[])
                 return false;
             }
         }
+        else if (vsArguments[i] == "-t1")
+        {
+            i = i + 1;
+            if (i < (int)vsArguments.size())
+            {
+                toleranceMS1 = stof(vsArguments[i]);
+            }
+            else
+            {
+                cout << help << endl;
+                return false;
+            }
+        }
+        else if (vsArguments[i] == "-t2")
+        {
+            i = i + 1;
+            if (i < (int)vsArguments.size())
+            {
+                toleranceMS2 = stof(vsArguments[i]);
+            }
+            else
+            {
+                cout << help << endl;
+                return false;
+            }
+        }
         else if (vsArguments[i] == "-h" || vsArguments[i] == "--help")
         {
             cout << help << endl;
@@ -129,10 +159,20 @@ std::string doubleToStringWithWidth(double value, int width, int precision)
     return out.str();
 }
 
+bool generateRegularCFG(string cfgPath, string outPath)
+{
+    cfgParser parser(cfgPath);
+    parser.newFileName = "Regular";
+    parser.changeMStolerance(toleranceMS1, toleranceMS2);
+    parser.writeFile(outPath);
+    return true;
+}
+
 bool generateCFGs(string cfgPath, string outPath, string element)
 {
     cfgParser parser(cfgPath);
     parser.setSearch_NameIX();
+    parser.changeMStolerance(toleranceMS1, toleranceMS2);
     parser.setParent_Mass_WindowsIX();
     vector<int> centers, widths;
     vector<double> pcts;
@@ -163,7 +203,12 @@ int main(int argc, char const *argv[])
 {
     if (parseArgs(argc, argv))
     {
-        generateCFGs(configPath, outPath, element);
+        if (element == "R")
+        {
+            generateRegularCFG(configPath, outPath);
+        }
+        else
+            generateCFGs(configPath, outPath, element);
     }
     return 0;
 }

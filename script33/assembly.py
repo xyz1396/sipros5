@@ -12,7 +12,7 @@ import shutil
 
 class assembly:
     def __init__(self, baseNames: list[str], philosopherPath:str, percolatorPath:str, fastaPath:str, decoyPath:str, outputPath: str,
-                threadNumber: int, logger: Logger, negative_control = "", label_threshold = 2.0) -> None:
+                threadNumber: int, logger: Logger, element:str, negative_control = "", label_threshold = 2.0) -> None:
         self.philosopherPath = philosopherPath
         self.percolatorPath = percolatorPath
         self.fastaPath = fastaPath
@@ -26,6 +26,7 @@ class assembly:
         self.label_threshold = label_threshold
         self.threadNumber = threadNumber
         self.core_count: int = multiprocessing.cpu_count()
+        self.element = element
         
     def combine_fasta_files(self, fastaPath: str, decoyPath: str) -> None:
         self.logger.info(f'Combining target and decoy fasta files to {self.targetDecoyPath}')
@@ -119,7 +120,7 @@ class assembly:
         self.dataframe_to_pepxml(psm_phi, baseName)
         return baseName, psm
         
-    def filterSIPlabeledPSMs(self, filteredPSMsDict: dict[str, pd.DataFrame]) -> None:
+    def filterSIPlabeledPSMs(self, filteredPSMsDict: dict[str, pd.DataFrame]) -> pd.DataFrame:
         """
         Merge all filtered PSMs with SIP labeling information.
         PSMs with MS2abundance > label_threshold are kept.
@@ -187,7 +188,96 @@ class assembly:
         psm.drop(columns=['SpecId'], inplace=True)
         psm['ScanNr'] = psm['ScanNr'].astype(int)
         psm.sort_values(by=['SampleName', 'ScanNr'], inplace=True)
-        psm.to_csv(f'{self.outputPath}/SIP_filtered_psms.tsv', sep='\t', index=False)        
+        psm.to_csv(f'{self.outputPath}/SIP_filtered_psms.tsv', sep='\t', index=False)
+        return psm  
+        
+
+
+    def match_PSMs_to_proteins(self, filteredPSMsDict: dict[str, pd.DataFrame]) -> None:
+        """
+        Add peptide information from individual sample with PSMs passed decoy filtering to protein.tsv.
+        For each sample and each protein, add columns for peptideSequence, MS1IsotopicAbundances, 
+        MS2IsotopicAbundances, and log10_precursorIntensities from matched PSMs.
+        Multiple values are separated by commas.
+        """
+        self.logger.info('Matching individual sample with PSMs to proteins')
+        protein_df = pd.read_csv(f'{self.outputPath}/protein.tsv', sep='\t')
+        for baseName in self.baseNames:
+            if baseName in filteredPSMsDict:
+                psm_df = filteredPSMsDict[baseName].copy()
+                psm_df = psm_df[psm_df['Label'] == 1]
+                psm_df['PeptideSequence'] = psm_df['Peptide'].str.extract(r'\[([^\]]+)\]')
+                # Explode proteins
+                psm_df['Proteins'] = psm_df['Proteins'].str.strip('{}')
+                psm_df = psm_df.assign(Protein=psm_df['Proteins'].str.split(',')).explode('Protein')
+                psm_df['Protein'] = psm_df['Protein'].str.strip()
+                # Group by protein
+                agg_df = psm_df.groupby('Protein').agg({
+                    'PeptideSequence': lambda x: ','.join(x.astype(str)),
+                    'MS1IsotopicAbundances': lambda x: ','.join(x.astype(str)),
+                    'MS2IsotopicAbundances': lambda x: ','.join(x.astype(str)),
+                    'log10_precursorIntensities': lambda x: ','.join(x.astype(str)),
+                }).reset_index()
+                col_prefix = f'{baseName}_'
+                # Merge with protein_df
+                protein_df = protein_df.merge(
+                    agg_df.rename(columns={
+                        'PeptideSequence': f'{col_prefix}PeptideSequences',
+                        'MS1IsotopicAbundances': f'{col_prefix}MS1IsotopicAbundances',
+                        'MS2IsotopicAbundances': f'{col_prefix}MS2IsotopicAbundances',
+                        'log10_precursorIntensities': f'{col_prefix}log10_precursorIntensities',
+                    }),
+                    on='Protein', how='left'
+                )
+            else:
+                self.logger.warning(f'No filtered PSMs found for {baseName}, skipping protein matching')
+        output_path = f'{self.outputPath}/protein_with_PSM.tsv'
+        protein_df.to_csv(output_path, sep='\t', index=False)
+        self.logger.info(f'Updated protein information with PSMs passed decoy filtering saved to {output_path}')
+
+    def match_SIP_filtered_PSMs_to_proteins(self, SIPfilteredPSM: pd.DataFrame) -> None:
+        """
+        Add peptide information with SIP filtered PSMs to protein.tsv.
+        For each SIP sample and each protein, add columns for peptideSequence, MS1IsotopicAbundances, 
+        MS2IsotopicAbundances, and log10_precursorIntensities from matched SIP PSMs.
+        Multiple values are separated by commas.
+        """
+        self.logger.info('Matching individual sample with SIP filtered PSMs to proteins')
+        protein_df = pd.read_csv(f'{self.outputPath}/protein.tsv', sep='\t')  
+        if SIPfilteredPSM is not None and not SIPfilteredPSM.empty:
+            SIPfilteredPSM = SIPfilteredPSM[SIPfilteredPSM['Label'] == 1].copy()
+            SIPfilteredPSM['PeptideSequence'] = SIPfilteredPSM['Peptide'].str.extract(r'\[([^\]]+)\]')
+            SIPfilteredPSM['Proteins'] = SIPfilteredPSM['Proteins'].str.strip('{}')
+            SIPfilteredPSM = SIPfilteredPSM.assign(Protein=SIPfilteredPSM['Proteins'].str.split(',')).explode('Protein')
+            SIPfilteredPSM['Protein'] = SIPfilteredPSM['Protein'].str.strip()
+            sip_samples = SIPfilteredPSM['SampleName'].unique()
+            # Check if SIP samples are in baseNames
+            if not all(sample in self.baseNames for sample in sip_samples):
+                missing_samples = [sample for sample in sip_samples if sample not in self.baseNames]
+                self.logger.warning(f'SIP samples {missing_samples} not found in baseNames {self.baseNames}')            
+            for sample in sip_samples:
+                sample_psms: pd.DataFrame = SIPfilteredPSM[SIPfilteredPSM['SampleName'] == sample]
+                agg_df = sample_psms.groupby('Protein').agg({
+                    'PeptideSequence': lambda x: ','.join(x.astype(str)),
+                    'MS1IsotopicAbundances': lambda x: ','.join(x.astype(str)),
+                    'MS2IsotopicAbundances': lambda x: ','.join(x.astype(str)),
+                    'log10_precursorIntensities': lambda x: ','.join(x.astype(str)),
+                }).reset_index()
+                sip_col_prefix = f'SIP_{sample}_'
+                agg_df = agg_df.rename(columns={
+                    'PeptideSequence': f'{sip_col_prefix}PeptideSequences',
+                    'MS1IsotopicAbundances': f'{sip_col_prefix}MS1IsotopicAbundances',
+                    'MS2IsotopicAbundances': f'{sip_col_prefix}MS2IsotopicAbundances',
+                    'log10_precursorIntensities': f'{sip_col_prefix}log10_precursorIntensities',
+                })
+                protein_df = protein_df.merge(agg_df, on='Protein', how='left')
+        else:
+            self.logger.warning('No SIP filtered PSMs found, skipping SIP protein matching')
+            return
+        # Save the updated protein dataframe
+        output_path = f'{self.outputPath}/protein_with_SIP_filtered_PSM.tsv'
+        protein_df.to_csv(output_path, sep='\t', index=False)
+        self.logger.info(f'Updated protein information with SIP filtered PSM saved to {output_path}')    
 
     def run_command(self, cmd:str, path:str = None) -> None:
         self.logger.info(f"Running command: {cmd}")
@@ -221,7 +311,9 @@ class assembly:
             for future in concurrent.futures.as_completed(future_to_baseName):
                 baseName, psm_df = future.result()
                 filteredPSMsDict[baseName] = psm_df
-        self.filterSIPlabeledPSMs(filteredPSMsDict)
+        # filter SIP labeled PSMs for SIP search
+        if (self.element != None and self.element != ""):
+            SIPfilteredPSMs = self.filterSIPlabeledPSMs(filteredPSMsDict)
         
         pepxmls_dir = os.path.join(self.outputPath, 'pepxmls')
         if not os.path.exists(pepxmls_dir):
@@ -242,6 +334,12 @@ class assembly:
             f'{self.philosopherPath} report'
         )
         self.run_command(cmd, self.outputPath)
+        
+        # match decoy filtered PSMs to proteins
+        self.match_PSMs_to_proteins(filteredPSMsDict)
+        # match SIP filtered PSMs to proteins for SIP search
+        if (self.element != None and self.element != "" and self.negative_control != ""):
+            self.match_SIP_filtered_PSMs_to_proteins(SIPfilteredPSMs)
         
         # filter and report for each raw file
         commands = []

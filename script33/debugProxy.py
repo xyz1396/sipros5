@@ -4,7 +4,8 @@ import sys
 import runpy
 
 # 1. cd WORKDIR
-os.chdir('test')
+# os.chdir('test')
+os.chdir("/scratch/recovered/benchmark/cecum_13C_glucose/")
 
 # 2A. python test.py 4 5
 # args = 'python ../script3/sipros_psm_tabulating.py \
@@ -16,13 +17,23 @@ os.chdir('test')
 #         -f fasta/EcoliWithCrapNodup.fasta \
 #         -t 160 \
 #         -o wf_output'
-        
-args = 'python ../script33/main.py \
-        -i /prebiotics/ubuntuShare/EcoliSIP/goodResults/pct50/raw \
-        -f fasta/EcoliWithCrapNodup.fasta \
+
+args = 'python /nullspace/sipros5/script33/main.py \
+        -i raw \
+        -f db.faa \
         -e C13 \
-        -t 160 \
-        -o wf_output --dryrun'
+        -t 40 \
+        -n 6 \
+        -o cecum_wf_SIP \
+        --dryrun \
+        --negative_control M1_PanC_20250327_01_DDA_01,M2_PanC_20250327_01_DDA_02,M3_PanC_20250327_01_DDA_03'
+        
+# args = 'python ../script33/main.py \
+#         -i /prebiotics/ubuntuShare/EcoliSIP/goodResults/pct50/raw \
+#         -f fasta/EcoliWithCrapNodup.fasta \
+#         -e C13 \
+#         -t 160 \
+#         -o wf_output --dryrun'
 
 # args = 'python ../script33/main.py \
 #         -i /scratch/yixiong/dignose/13C/raw3 \

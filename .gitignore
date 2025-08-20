@@ -42,7 +42,6 @@ out/
 
 # for test files
 test/
-!test/configs/
 *.faa
 *.fasta
 *.FT2

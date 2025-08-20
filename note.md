@@ -11,9 +11,9 @@ conda activate sklearn
 # run test
 
 ```bash
-nohup ./test.sh runSIP > test/test.log 2>&1 &
-nohup ./test.sh runSIPone > test/test.log 2>&1 &
-nohup ./test.sh run > test/test.log 2>&1 &
+setsid ./test.sh runSIP > test/test.log 2>&1 &
+setsid ./test.sh runSIPone > test/test.log 2>&1 &
+setsid ./test.sh run > test/test.log 2>&1 &
 ```
 
 # convert mzml
@@ -35,7 +35,7 @@ python script3/makeReverseDecoyDB.py test/fasta/EcoliWithCrapNodup.fasta test/fa
 
 # test AerithFeatureExtractor 
 ```bash
-nohup python script33/debugProxy.py > test/test.log 2>&1 &
+setsid python script33/debugProxy.py > test/test.log 2>&1 &
 
 bin/AerithFeatureExtractor \
 -t /nullspace/sipros5/test/wf_output/Pan_052322_X13/target \
@@ -51,25 +51,22 @@ bin/AerithFeatureExtractor \
 # test sipros_wf
 
 ```bash
+cd /scratch/yixiong/recovered/benchmark/cecum_13C_glucose
+/ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/sipros5/siproswf \
+        -i raw \
+        -f db.faa \
+        -e C13 \
+        -t 40 \
+        -n 6 \
+        -o cecum_wf_SIP \
+        --dryrun \
+        --negative_control "M1_PanC_20250327_01_DDA_01,M2_PanC_20250327_01_DDA_02,M3_PanC_20250327_01_DDA_03" \
+        > cecum.log 2>&1 
+
 rm -r test/wf_output
 mkdir test/wf_output
-nohup ./siproswf \
-        -i /prebiotics/ubuntuShare/EcoliSIP/goodResults/pct99/raw \
-        -f test/fasta/EcoliWithCrapNodup.fasta \
-        -e C13 \
-        -t 160 \
-        -o test/wf_output \
-> test/test.log 2>&1 &
 
-nohup ./siproswf \
-        -i /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct50/raw \
-        -f test/fasta/EcoliWithCrapNodup.fasta \
-        -e C13 \
-        -t 50 \
-        -o test/wf_output50 \
-> test/test50.log 2>&1 &
-
-nohup ./siproswf \
+setsid ./siproswf \
         -i /prebiotics/ubuntuShare/EcoliSIP/goodResults/pct1/raw \
         -f test/fasta/EcoliWithCrapNodup.fasta \
         -t 160 \
@@ -78,15 +75,61 @@ nohup ./siproswf \
 
 
 cd /ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/sipros5
-nohup ./siproswf \
+
+setsid ./siproswf \
+        -i /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct1/raw \
+        -f test/fasta/EcoliWithCrapNodup.fasta \
+        -e C13 \
+        -t 40 \
+        --dryrun \
+        -o test/wf_output1 \
+> test/test1.log 2>&1 &
+
+setsid ./siproswf \
+        -i /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct2/raw \
+        -f test/fasta/EcoliWithCrapNodup.fasta \
+        -e C13 \
+        -t 40 \
+        --dryrun \
+        -o test/wf_output2 \
+> test/test2.log 2>&1 &
+
+setsid ./siproswf \
         -i /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct5/raw \
         -f test/fasta/EcoliWithCrapNodup.fasta \
         -e C13 \
-        -t 160 \
+        -t 40 \
+        --dryrun \
         -o test/wf_output5 \
 > test/test5.log 2>&1 &
 
-nohup ./siproswf \
+setsid ./siproswf \
+        -i /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct25/raw \
+        -f test/fasta/EcoliWithCrapNodup.fasta \
+        -e C13 \
+        -t 40 \
+        -o test/wf_output25 \
+> test/test25.log 2>&1 &
+
+setsid ./siproswf \
+        -i /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct50/raw \
+        -f test/fasta/EcoliWithCrapNodup.fasta \
+        -e C13 \
+        -t 40 \
+        --dryrun \
+        -o test/wf_output50 \
+> test/test50.log 2>&1 &
+
+setsid ./siproswf \
+        -i /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct99/raw \
+        -f test/fasta/EcoliWithCrapNodup.fasta \
+        -e C13 \
+        -t 40 \
+        --dryrun \
+        -o test/wf_output99 \
+> test/test99.log 2>&1 &
+
+setsid ./siproswf \
         -i /ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/AstralC13/pct1 \
         -f test/fasta/EcoliWithCrapNodup.fasta \
         -t 40 \
@@ -95,7 +138,7 @@ nohup ./siproswf \
         -o test/wf_AstralR1 \
 > test/testAstralR1.log 2>&1 &
 
-nohup ./siproswf \
+setsid ./siproswf \
         -i /ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/AstralC13/pct50 \
         -f test/fasta/EcoliWithCrapNodup.fasta \
         -e C13 \

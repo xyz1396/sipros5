@@ -57,7 +57,7 @@
             "setupCommands": [
                 {
                     "description": "Enable g3 level debug for gdb",
-                    "text": "python import sys; sys.path.insert(0, '/home/yixiong/micromamba/envs/sipros5/share/gcc-14.2.0/python'); from libstdcxx.v6.printers import register_libstdcxx_printers; register_libstdcxx_printers(None)",
+                    "text": "python import sys; sys.path.insert(0, '/home/yixiong/micromamba/envs/sipros5/share/gcc-15.1.0/python'); from libstdcxx.v6.printers import register_libstdcxx_printers; register_libstdcxx_printers(None)",
                     "ignoreFailures": false
                 },
                 {

@@ -96,6 +96,47 @@ void PSMfeatureExtractor::filterIsotopicPeaks(std::vector<isotopicPeak> &isotopi
     }
 }
 
+void PSMfeatureExtractor::filterIsotopicPeaksTopN(
+    std::vector<isotopicPeak> &isotopicPeaks, const double observedPrecursorMZ,
+    const size_t topN) {
+    // if (isotopicPeaks.empty()) return;
+    // Find the highest intensity peak within calculatedPrecursorMZ ± mzWindow
+    // the best DDA isolation window is 5 m/z, so we use a ±5 m/z window.
+    double mzWindow = 5;
+    double maxIntensity = 0.0;
+    size_t maxIdx = 0;
+    for (size_t i = 0; i < isotopicPeaks.size(); ++i) {
+        if (std::abs(isotopicPeaks[i].mz - observedPrecursorMZ) <= mzWindow) {
+            if (isotopicPeaks[i].intensity > maxIntensity) {
+                maxIntensity = isotopicPeaks[i].intensity;
+                maxIdx = i;
+            }
+        }
+    }
+    // Collect peaks within highest peak mz ± mzWindow
+    double centerMz = isotopicPeaks[maxIdx].mz;
+    std::vector<isotopicPeak> peaksInWindow;
+    peaksInWindow.reserve(isotopicPeaks.size());
+    for (const auto &peak : isotopicPeaks) {
+        if (std::abs(peak.mz - centerMz) <= mzWindow) {
+            peaksInWindow.push_back(peak);
+        }
+    }
+    if (peaksInWindow.size() > topN) {
+        // Sort by intensity descending and keep topN
+        std::sort(peaksInWindow.begin(), peaksInWindow.end(),
+                  [](const isotopicPeak &a, const isotopicPeak &b) {
+                      return a.intensity > b.intensity;
+                  });
+        peaksInWindow.resize(topN);
+        std::sort(peaksInWindow.begin(), peaksInWindow.end(),
+                  [](const isotopicPeak &a, const isotopicPeak &b) {
+                      return a.mz < b.mz;
+                  });
+    }
+    isotopicPeaks = std::move(peaksInWindow);
+}
+
 std::vector<isotopicPeak> PSMfeatureExtractor::
     findIsotopicPeaks(int &MS1ScanNumber,
                       const int precursorCharge,
@@ -174,8 +215,11 @@ std::vector<isotopicPeak> PSMfeatureExtractor::
                   { return a.mz < b.mz; });
     }
     if (isotopicPeaks.size() > 2)
+    // if (isotopicPeaks.size() > NisotopicPeak / 4) 
     {
         filterIsotopicPeaks(isotopicPeaks, calculatedPrecursorMZ);
+        // filterIsotopicPeaksTopN(isotopicPeaks, observedPrecursorMZ,
+        //                         NisotopicPeak);
     }
     return isotopicPeaks;
 }
@@ -215,8 +259,17 @@ double PSMfeatureExtractor::getSIPelementAbundanceFromMS1(const std::string &nak
     {
         pct += usefulIsotopicPeakIntensity[i] * (i + firstDeltaNeutron);
     }
-    double atomCnumber = mAveragine.pepAtomCounts[mAveragine.SIPatomIX];
-    pct /= atomCnumber;
+    double atomNumber = mAveragine.pepAtomCounts[mAveragine.SIPatomIX];
+    double deltaNeutron = 1.0;
+    const std::string &sipElement = ProNovoConfig::getSetSIPelement();
+    // Decrease the atom number for C element to fit the real data
+    if (sipElement == "C") {
+        atomNumber --;
+    }
+    if (sipElement == "O" || sipElement == "S") {
+        deltaNeutron = 2.0;
+    }
+    pct /= (atomNumber * deltaNeutron);
     pct *= 100.;
     return pct;
 }
@@ -567,7 +620,7 @@ void PSMfeatureExtractor::writePecorlatorPin(const std::string &fileName, bool d
        << "\t"
        << "PTMnumbers"
        << "\t"
-       << "istopicPeakNumbers"
+       << "isotopicPeakNumbers"
        << "\t"
        << "MS1IsotopicAbundances"
        << "\t"

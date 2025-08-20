@@ -11,7 +11,7 @@ class search:
                  configGeneratorPath: str,
                  configTemplatePath: str, raxportPath: str,
                  siprosPath: str, scansPerFT2: str, fastaPath: str,
-                 inputPath: str, outputPath: str,
+                 inputPath: str, outputPath: str, negative_control: str,
                  threadNumber: int, logger: Logger, nPrecurosr = 6, dryrun=False) -> None:
         self.core_count: int = multiprocessing.cpu_count()
         self.element = element
@@ -27,6 +27,7 @@ class search:
         self.decoyPath = f'{outputPath}/decoy.faa'
         self.inputPath = inputPath
         self.outPutPath = outputPath
+        self.negative_control = negative_control
         self.threadNumber = threadNumber
         self.OMP_NUM_THREADS = 10
         self.logger = logger
@@ -52,6 +53,9 @@ class search:
 
     def reverse_fasta_sequences(self):
         self.logger.info(f'Reversing fasta sequences to {self.decoyPath}')
+        if not os.path.exists(self.fastaPath):
+            self.logger.error(f'Fasta file {self.fastaPath} does not exist')
+            exit(1)
         with open(self.fastaPath, 'r') as fasta, \
                 open(self.decoyPath, 'w') as output:
             sequence = ''
@@ -187,7 +191,17 @@ class search:
             threadNumber = self.threadNumber
         self.logger.info(f'Setted max thread numbers: {threadNumber}')
         raw_file_parallel = int(threadNumber // self.OMP_NUM_THREADS)
-        self.getInputFiles()
+        self.getInputFiles()     
+        # Verify negative control files are in base_names
+        if (self.negative_control != None) and (self.negative_control != ''):
+            negative_control_files = self.negative_control.split(',')
+            for nc_file in negative_control_files:
+                nc_file = nc_file.strip()
+                if nc_file.strip() not in self.base_names:
+                    self.logger.error(f'Negative control file {nc_file} not found in input files')
+                    self.logger.error('Please check your input files and negative control files!')
+                    exit(1)
+            self.logger.info(f'negative control files: {self.negative_control} verified in input files')
 
         for base_name in self.base_names:
             os.makedirs(f'{self.outPutPath}/{base_name}', exist_ok=True)

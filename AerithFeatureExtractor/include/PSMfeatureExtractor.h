@@ -28,6 +28,8 @@ public:
     size_t binarySearchPeak(const Scan *mScan, double Mz, int charge);
     // filter isotopic peaks by isotopic envolope shape
     void filterIsotopicPeaks(std::vector<isotopicPeak> &isotopicPeaks, const double calculatedPrecursorMZ);
+    void filterIsotopicPeaksTopN(std::vector<isotopicPeak> &isotopicPeaks, const double observedPrecursorMZ,
+                                 const size_t topN);
     // return precursor scan number and isotopic peaks
     std::vector<isotopicPeak> findIsotopicPeaks(int &MS1ScanNumber,
                                                 const int precursorCharge,

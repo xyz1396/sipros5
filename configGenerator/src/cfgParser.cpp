@@ -164,6 +164,14 @@ void cfgParser::changeSIPabundance(const double sipAbundance, const string &elem
     lines[Element_PercentIX] = Element_PercentName + " \t=\t" + pct;
 }
 
+void cfgParser::changeMStolerance(const float toleranceMS1, const float toleranceMS2)
+{
+    size_t parentIonIX = findParameter("Search_Mass_Tolerance_Parent_Ion");
+    size_t fragmentIonIX = findParameter("Mass_Tolerance_Fragment_Ions");
+    lines[parentIonIX] = "Search_Mass_Tolerance_Parent_Ion = " + to_string_with_precision(toleranceMS1, 5);
+    lines[fragmentIonIX] = "Mass_Tolerance_Fragment_Ions = " + to_string_with_precision(toleranceMS2, 5);
+}
+
 void cfgParser::writeFile(const string &folderPath)
 {
     fs::path path{folderPath};
