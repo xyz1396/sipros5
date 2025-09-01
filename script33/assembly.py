@@ -9,6 +9,7 @@ import pandas as pd
 from lxml import etree
 import re
 import shutil
+import tempfile
 
 class assembly:
     def __init__(self, baseNames: list[str], philosopherPath:str, percolatorPath:str, fastaPath:str, decoyPath:str, outputPath: str,
@@ -68,7 +69,9 @@ class assembly:
         msms_run_summary = etree.SubElement(root, "msms_run_summary")
         search_summary = etree.SubElement(msms_run_summary, "search_summary", precursor_mass_type="monoisotopic",
                                           fragment_mass_type="monoisotopic", search_engine="X! Tandem", search_engine_version="Sipros")
-        search_database = etree.SubElement(search_summary, "search_database", local_path='targetDecoy.faa')
+        outputPath = os.path.abspath(self.outputPath)
+        search_database = etree.SubElement(search_summary, "search_database", local_path=f'{outputPath}/targetDecoy.faa', type="AA")
+        parameter = etree.SubElement(search_summary, "parameter", name="database_name", value=f'{outputPath}/targetDecoy.faa')
         for i, row in psm.iterrows():
             spectrum_query = etree.SubElement(msms_run_summary, "spectrum_query", 
                                             start_scan=str(row['ScanNr']), 
@@ -81,9 +84,12 @@ class assembly:
             search_result = etree.SubElement(spectrum_query, "search_result")
             # split peptide sequence by "[" and "]" to get previous, current and next amino acids
             seqs = re.split(r'[\[\]]', row['Peptide']) 
+            seq = seqs[1]
+            # remove PTM in the pep seq
+            seq = re.sub(r'[^a-zA-Z]', '', seq)
             pros = row['Proteins'][1:-1].split(",")
             search_hit = etree.SubElement(search_result, "search_hit", 
-                                        peptide=seqs[1], 
+                                        peptide=seq, 
                                         massdiff=str(row['massErrors']), 
                                         calc_neutral_pep_mass=str(row['ExpMass']), 
                                         num_missed_cleavages=str(row['missCleavageSiteNumbers']), 
@@ -104,7 +110,6 @@ class assembly:
                                                     num_tol_term="2")
             prob = str(1 - row['posterior_error_prob'])
             analysis_result = etree.SubElement(search_hit, "analysis_result", analysis="peptideprophet")
-            # for 
             hyperscore = etree.SubElement(search_hit, "hyperscore", value=str(row['score']))
             nextscore = etree.SubElement(search_hit, "nextscore", value="0")
             expect = etree.SubElement(search_hit, "expect", value="0")
@@ -133,11 +138,11 @@ class assembly:
             if not all(control in self.baseNames for control in negative_controls):
                 missing_controls = [control for control in negative_controls if control not in self.baseNames]
                 self.logger.error(f'Negative control samples {missing_controls} not found in baseNames {self.baseNames}')
-                return
+                return pd.DataFrame()
         else:
             self.logger.info('No negative control samples provided')
-            return
-        
+            return pd.DataFrame()
+
         self.logger.info(f'Merging filtered SIP labeled PSMs with threshold {self.label_threshold}')
         all_psms = []
         
@@ -167,7 +172,7 @@ class assembly:
             self.logger.info(f'Merged {len(merged_psms)} SIP labeled PSMs saved to {output_path}')
         else:
             self.logger.warning('No SIP labeled PSMs found that meet the filtering criteria')
-            return
+            return pd.DataFrame()
         cmd = f'{self.percolatorPath} --only-psms --no-terminate -Y --num-threads {min(10, self.core_count)} \
                     --results-psms {self.outputPath}/SIP_target_psms.tsv \
                     --decoy-results-psms {self.outputPath}/SIP_decoy_psms.tsv \
@@ -188,10 +193,10 @@ class assembly:
         psm.drop(columns=['SpecId'], inplace=True)
         psm['ScanNr'] = psm['ScanNr'].astype(int)
         psm.sort_values(by=['SampleName', 'ScanNr'], inplace=True)
+        # In case Non-carbon elements SIP exceed 100. Clamp to [0, 100]
+        psm['MS1IsotopicAbundances'] = psm['MS1IsotopicAbundances'].clip(lower=0, upper=100)
         psm.to_csv(f'{self.outputPath}/SIP_filtered_psms.tsv', sep='\t', index=False)
-        return psm  
-        
-
+        return psm
 
     def match_PSMs_to_proteins(self, filteredPSMsDict: dict[str, pd.DataFrame]) -> None:
         """
@@ -279,11 +284,11 @@ class assembly:
         protein_df.to_csv(output_path, sep='\t', index=False)
         self.logger.info(f'Updated protein information with SIP filtered PSM saved to {output_path}')    
 
-    def run_command(self, cmd:str, path:str = None) -> None:
+    def run_command(self, cmd:str, path:str = "") -> None:
         self.logger.info(f"Running command: {cmd}")
         original_cwd = os.getcwd()
         try:
-            if path != None:
+            if path != "":
                 os.chdir(path)
             output = subprocess.check_output(
                 cmd, shell=True, stderr=subprocess.STDOUT)
@@ -312,6 +317,7 @@ class assembly:
                 baseName, psm_df = future.result()
                 filteredPSMsDict[baseName] = psm_df
         # filter SIP labeled PSMs for SIP search
+        SIPfilteredPSMs = pd.DataFrame()
         if (self.element != None and self.element != ""):
             SIPfilteredPSMs = self.filterSIPlabeledPSMs(filteredPSMsDict)
         
@@ -326,8 +332,15 @@ class assembly:
             shutil.copy(src, dst)
         # infer proteins by all pepxml files
         pepxml_files = ' '.join([f'{baseName}/{baseName}.pep.xml' for baseName in self.baseNames])
+        # TEMP and TMP are for windows
+        tmpdir = os.environ.get('TMPDIR') or os.environ.get('TEMP') or os.environ.get('TMP') or tempfile.gettempdir()
+        tmpdir = os.path.join(tmpdir, 'philosopher_tmp')
+        self.logger.info(f'Inferring proteins by all pepxml files in {pepxmls_dir} with tmpdir {tmpdir}')
+        if not os.path.exists(tmpdir):
+            os.makedirs(tmpdir)
         cmd = (
-            f'{self.philosopherPath} workspace --init && '
+            f'{self.philosopherPath} workspace --clean --nocheck && '
+            f'{self.philosopherPath} workspace --init --nocheck --temp {tmpdir} && '
             f'{self.philosopherPath} proteinprophet --maxppmdiff 2000000 --output combined {pepxml_files} && '
             f'{self.philosopherPath} database --annotate targetDecoy.faa --prefix Decoy_ && '
             f'{self.philosopherPath} filter --sequential --prot 0.01 --picked --tag Decoy_ --pepxml pepxmls --protxml combined.prot.xml --razor && '
@@ -338,15 +351,21 @@ class assembly:
         # match decoy filtered PSMs to proteins
         self.match_PSMs_to_proteins(filteredPSMsDict)
         # match SIP filtered PSMs to proteins for SIP search
-        if (self.element != None and self.element != "" and self.negative_control != ""):
+        if (self.element != None and self.element != "" and self.negative_control != "" and not SIPfilteredPSMs.empty):
             self.match_SIP_filtered_PSMs_to_proteins(SIPfilteredPSMs)
         
         # filter and report for each raw file
         commands = []
         paths = []
+        # in case tmpdir was deleted
+        if not os.path.exists(tmpdir):
+            os.makedirs(tmpdir)
+            self.logger.info(f'Re-created tmpdir {tmpdir}')
         for baseName in self.baseNames:
+            tmp_subdir = tempfile.mkdtemp(prefix=f"{baseName}_", dir=tmpdir)
             cmd = (
-                f'{self.philosopherPath} workspace --init && '
+                f'{self.philosopherPath} workspace --clean --nocheck && '
+                f'{self.philosopherPath} workspace --init --nocheck --temp {tmp_subdir} && '
                 f'{self.philosopherPath} filter --sequential --prot 0.01 --picked --tag Decoy_ --dbbin .. --pepxml {baseName}.pep.xml --protxml ../combined.prot.xml --razor && '
                 f'{self.philosopherPath} report'
             )
@@ -355,3 +374,5 @@ class assembly:
             paths.append(path)
         with concurrent.futures.ProcessPoolExecutor(max_workers=raw_file_parallel) as executor:
             list(executor.map(self.run_command, commands, paths))
+        # remove tmpdir
+        shutil.rmtree(tmpdir, ignore_errors=True)

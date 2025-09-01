@@ -7,14 +7,18 @@ import shutil
 
 
 class search:
-    def __init__(self, element: str, sipRange: str, step: str,
+    def __init__(self, toleranceMS1: float, toleranceMS2: float,
+                 sipRange: str, step: str,
                  configGeneratorPath: str,
                  configTemplatePath: str, raxportPath: str,
                  siprosPath: str, scansPerFT2: str, fastaPath: str,
                  inputPath: str, outputPath: str, negative_control: str,
-                 threadNumber: int, logger: Logger, nPrecurosr = 6, dryrun=False) -> None:
+                 threadNumber: int, logger: Logger, element = "R",
+                 nPrecursor = 6, dryrun=False) -> None:
         self.core_count: int = multiprocessing.cpu_count()
         self.element = element
+        self.toleranceMS1 = toleranceMS1
+        self.toleranceMS2 = toleranceMS2
         self.sipRange = sipRange
         self.step = step
         self.configTemplatePath = configTemplatePath
@@ -36,9 +40,9 @@ class search:
         self.base_names: list[str] = []
         self.base_names_of_raw: list[str] = []
         self.base_names_of_mzml: list[str] = []
-        self.nPrecursor = nPrecurosr
+        self.nPrecursor = nPrecursor
         self.dryrun = dryrun
-
+        
     def run_command(self, cmd):
         self.logger.info(f"Running command: {cmd}")
         try:
@@ -50,6 +54,51 @@ class search:
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Command execution failed: {e.output.decode()}")
             exit(1)
+            
+    def run_command_raxport(self, cmd):
+        # Check if FT2 file exists before running raxport
+        parts = cmd.split()
+        try:
+            f_idx = parts.index('-f')
+            raw_file = parts[f_idx + 1]
+            o_idx = parts.index('-o')
+            ft2_dir = parts[o_idx + 1]
+            if os.path.exists(ft2_dir) and any(f.endswith('.FT2') for f in os.listdir(ft2_dir)):
+                self.logger.info(f"FT2 files already exist in {ft2_dir}, skipping conversion for {raw_file}")
+                return
+        except Exception as e:
+            self.logger.error(f"Exception occurred while checking FT2 files: {e}")
+            pass
+        self.run_command(cmd)
+
+    def run_command_sipros(self, cmd):
+        # Try to extract output file name from command
+        output_file = None
+        # Look for "-o <dir>" and try to reconstruct output file name
+        parts = cmd.split()
+        try:
+            o_idx = parts.index('-o')
+            out_dir = parts[o_idx + 1]
+            # Find base name and search name from command
+            f_idx = parts.index('-f')
+            input_file = parts[f_idx + 1]
+            base_name = os.path.splitext(os.path.basename(input_file))[0]
+            c_idx = parts.index('-c')
+            config_file = parts[c_idx + 1]
+            if (self.element == "R"):
+                search_name:str = "SE"
+            else:
+                search_name = os.path.splitext(os.path.basename(config_file))[0]
+                search_name = search_name.replace('.', '_')
+            output_file = f"{out_dir}/{base_name}.{search_name}.Spe2Pep.txt"
+        except Exception as e:
+            self.logger.error(f"Exception occurred while checking .Spe2Pep.txt files: {e}")
+            output_file = None
+            pass
+        if output_file and os.path.exists(output_file) and os.path.getsize(output_file) > 500 * 1024:
+            self.logger.info(f"the output file {output_file} existed, skip this search")
+            return
+        self.run_command(cmd)
 
     def reverse_fasta_sequences(self):
         self.logger.info(f'Reversing fasta sequences to {self.decoyPath}')
@@ -75,26 +124,32 @@ class search:
         self.logger.info(f'Generating config files to {self.configsPath}')
         if not os.path.exists(self.configsPath):
             os.makedirs(self.configsPath)
+        cfgTempName = "SIP.cfg"
+        toleranceMS1 = 0.01
+        toleranceMS2 = 0.01
         sip_lower_bound = 0
         sip_higher_bound = 100
         sip_step = 1
+        if self.toleranceMS1 != None:
+            toleranceMS1 = self.toleranceMS1
+        if self.toleranceMS2 != None:
+            toleranceMS2 = self.toleranceMS2
         if self.sipRange != None:
             sip_lower_bound = int(self.sipRange.split('-')[0])
             sip_higher_bound = int(self.sipRange.split('-')[1])
         if self.step != None:
             sip_step = int(self.step)
-        if self.element == None:
+        if self.element == "R":
             self.logger.info("It is regular search")
-            shutil.copy(f'{self.configTemplatePath}/Regular.cfg',
-                        f'{self.outPutPath}/configs/Regular.cfg')
-        # if element is provided, generate config files for SIP search
+            cfgTempName = "Regular.cfg"
         else:
             self.logger.info("It is SIP search")
-            configGenerator_cmd = f'{self.configGeneratorPath} \
-            -i {self.configTemplatePath}/SIP.cfg \
-            -o {self.outPutPath}/configs/ \
-            -e {self.element} -l {sip_lower_bound} -u {sip_higher_bound} -s {sip_step}'
-            self.run_command(configGenerator_cmd)
+        configGenerator_cmd = f'{self.configGeneratorPath} \
+        -i {self.configTemplatePath}/{cfgTempName} \
+        -o {self.outPutPath}/configs/ \
+        -t1 {toleranceMS1} -t2 {toleranceMS2} \
+        -e {self.element} -l {sip_lower_bound} -u {sip_higher_bound} -s {sip_step}'
+        self.run_command(configGenerator_cmd)
 
     def getInputFiles(self):
         files = []
@@ -137,13 +192,13 @@ class search:
                 raxport_cmd = f'{self.raxportPath} -f {self.raw_files[i]} \
                             -o {self.outPutPath}/{self.base_names_of_raw[i]}/ft -s {scansPerFT2} \
                             -j {min(10, self.core_count)} -n {self.nPrecursor}'
-                self.run_command(raxport_cmd)
+                self.run_command_raxport(raxport_cmd)
         else:
             with concurrent.futures.ProcessPoolExecutor(max_workers=min(10, self.core_count)) as executor:
                 commands = [f'{self.raxportPath} -f {self.raw_files[i]} \
                             -o {self.outPutPath}/{self.base_names_of_raw[i]}/ft -n {self.nPrecursor}'
                             for i in range(len(self.raw_files))]
-                list(executor.map(self.run_command, commands))
+                list(executor.map(self.run_command_raxport, commands))
 
     def sipros_search(self, raw_file_parallel: int):
         config_files = []
@@ -178,9 +233,9 @@ class search:
                 commands.append(f'{self.siprosPath} -c {config} \
                                 -fasta {self.decoyPath} \
                                 -f {self.mzml_files[i]} \
-                                -o {self.outPutPath}/{self.base_names_of_mzml[i]}/target')
+                                -o {self.outPutPath}/{self.base_names_of_mzml[i]}/decoy')
         with concurrent.futures.ProcessPoolExecutor(max_workers=raw_file_parallel) as executor:
-            list(executor.map(self.run_command, commands))
+            list(executor.map(self.run_command_sipros, commands))
 
     def run(self) -> None:
         self.reverse_fasta_sequences()

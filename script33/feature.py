@@ -46,7 +46,7 @@ class feature:
         smallest_file = None
         # for regular search
         if len(cfg_files) == 1:
-            smallest_file = cfg_files[0].name
+            smallest_file = str(cfg_files[0])
             return smallest_file
         # for SIP search
         for cfg_file in cfg_files:
@@ -85,5 +85,5 @@ class feature:
                         -j {raw_file_parallel} -c {smallest_cfg_path} \
                         -p 0 -o {self.outPutPath}/{baseName}/{baseName}.pin'
                         for baseName in self.baseNames]
-            # if not self.dryrun:
-            list(executor.map(self.run_command, commands))
+            if not self.dryrun:
+                list(executor.map(self.run_command, commands))

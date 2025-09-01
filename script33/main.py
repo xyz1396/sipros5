@@ -112,6 +112,9 @@ citation:
         parser.add_argument('--dryrun', action='store_true', help='Run in dry run mode for test')
 
         args: Namespace = parser.parse_args()
+        # if -e is not provided, set it to "R" for regular search
+        if not args.element:
+            args.element = "R"
         return args
 
     def initLogger(self, outputPath: str) -> Logger:
@@ -134,6 +137,8 @@ citation:
 
         # run SIPROS search
         sipros_search = search(element=self.args.element,
+                               toleranceMS1=self.args.toleranceMS1,
+                               toleranceMS2=self.args.toleranceMS2,
                                sipRange=self.args.range,
                                step=self.args.precision,
                                configTemplatePath=self.toolsPaths['configTemplates'],
@@ -147,7 +152,7 @@ citation:
                                negative_control=self.args.negative_control,
                                threadNumber=int(self.args.thread),
                                logger=self.logger,
-                               nPrecurosr=self.args.nPrecursor,
+                               nPrecursor=self.args.nPrecursor,
                                dryrun=self.args.dryrun)
         sipros_search.run()
 

@@ -1,7 +1,7 @@
 {
     "files.associations": {
-        "*.Rmd": "rmd",
         "*.rmd": "markdown",
+        "*.Rmd": "rmd",
         "numeric": "cpp",
         "vector": "cpp",
         "random.h": "c",
@@ -77,10 +77,11 @@
         "format": "cpp",
         "span": "cpp",
         "text_encoding": "cpp",
-        "variant": "cpp"
+        "variant": "cpp",
+        "unordered_set": "cpp"
     },
     "[python]": {
-        "editor.defaultFormatter": "ms-python.autopep8"
+        "editor.defaultFormatter": "ms-python.black-formatter"
     },
     "python.formatting.provider": "none",
     "python.defaultInterpreterPath": "/home/yixiong/micromamba/envs/sipros5/bin/python",

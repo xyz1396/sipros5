@@ -47,14 +47,14 @@ class filter:
             threadNumber = self.threadNumber
         raw_file_parallel = int(threadNumber // self.OMP_NUM_THREADS)
         self.logger.info(f'Running percolator with {raw_file_parallel} processes')
-        # if not self.dryrun:
-        with concurrent.futures.ProcessPoolExecutor(max_workers=raw_file_parallel) as executor:
-            postfix = ''
-            if self.ignorePCT:
-                list(executor.map(self.ignore_pct_in_pin, self.baseNames))
-                postfix = '_NoPCT'
-            commands = [f'{self.percolatorPath} --only-psms --no-terminate --num-threads {self.OMP_NUM_THREADS} \
-                    --results-psms {self.outPutPath}/{baseName}/{baseName}_target_psms.tsv \
-                    --decoy-results-psms {self.outPutPath}/{baseName}/{baseName}_decoy_psms.tsv \
-                    {self.outPutPath}/{baseName}/{baseName}{postfix}.pin' for baseName in self.baseNames]
-            list(executor.map(self.run_command, commands))
+        if not self.dryrun:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=raw_file_parallel) as executor:
+                postfix = ''
+                if self.ignorePCT:
+                    list(executor.map(self.ignore_pct_in_pin, self.baseNames))
+                    postfix = '_NoPCT'
+                commands = [f'{self.percolatorPath} --only-psms --no-terminate --num-threads {self.OMP_NUM_THREADS} \
+                        --results-psms {self.outPutPath}/{baseName}/{baseName}_target_psms.tsv \
+                        --decoy-results-psms {self.outPutPath}/{baseName}/{baseName}_decoy_psms.tsv \
+                        {self.outPutPath}/{baseName}/{baseName}{postfix}.pin' for baseName in self.baseNames]
+                list(executor.map(self.run_command, commands))

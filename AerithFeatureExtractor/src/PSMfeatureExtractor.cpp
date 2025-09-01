@@ -262,15 +262,20 @@ double PSMfeatureExtractor::getSIPelementAbundanceFromMS1(const std::string &nak
     double atomNumber = mAveragine.pepAtomCounts[mAveragine.SIPatomIX];
     double deltaNeutron = 1.0;
     const std::string &sipElement = ProNovoConfig::getSetSIPelement();
-    // Decrease the atom number for C element to fit the real data
-    if (sipElement == "C") {
-        atomNumber --;
-    }
+    // // Decrease the atom number for C element to fit the real data
+    // // for the isotopic peaks filtered by filterIsotopicPeaksTopN
+    // if (sipElement == "C") {
+    //     atomNumber --;
+    // }
     if (sipElement == "O" || sipElement == "S") {
         deltaNeutron = 2.0;
     }
-    pct /= (atomNumber * deltaNeutron);
-    pct *= 100.;
+    // if (sipElement != "C") {
+    //     pct -= mAveragine.pepAtomCounts[0] * 0.0107; // Adjust for non-carbon elements
+    // }
+    pct = pct / (atomNumber * deltaNeutron) * 100.;
+    // In case Non-carbon elements SIP exceed 100
+    // pct = std::clamp(pct, 0.0, 100.0); // Clamp to [0, 100]
     return pct;
 }
 

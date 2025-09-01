@@ -23,7 +23,12 @@ case $1 in
     # deplist=$(ldd bin/siprosMPI | awk '{if (match($3,"/")){ print $3}}')
     # mkdir bin/libSiprosMPI
     # cp -L -n $deplist bin/libSiprosMPI
-    cp bin/* tools
+    
+    # copy file atomic when running
+    tmpdir=$(mktemp -d tools/.tmp.XXXXXX)
+    cp bin/* "$tmpdir"
+    mv "$tmpdir"/* tools/
+    rmdir "$tmpdir"
     ;;
 "buildConda")
     export MAMBA_ROOT_PREFIX=~/micromamba
@@ -39,7 +44,12 @@ case $1 in
     # deplist=$(ldd bin/siprosMPI | awk '{if (match($3,"/")){ print $3}}')
     # mkdir bin/libSiprosMPI
     # cp -L -n $deplist bin/libSiprosMPI
-    cp bin/* tools
+
+    # copy file atomic when running
+    tmpdir=$(mktemp -d tools/.tmp.XXXXXX)
+    cp bin/* "$tmpdir"
+    mv "$tmpdir"/* tools/
+    rmdir "$tmpdir"
     ;;
 "buildTick")
     cd build
