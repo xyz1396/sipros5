@@ -54,9 +54,9 @@ class SIPROSWorkflow:
     def parse_arguments(self) -> Namespace:
         epilog = """
 Label search command demo : 
-siproswf -i raw  -f Ecoli.fasta -e C13 -t 128 -o wf_output
+siproswf -i raw -f Ecoli.fasta -e C13 -t 40 -o wf_output
 Regular search command demo : 
-siproswf -i raw  -f Ecoli.fasta -t 128 -o wf_output
+siproswf -i raw -f Ecoli.fasta -t 40 -o wf_output
 
 citation:
 1. Xiong, Y., Mueller, R.S., Feng, S., Guo, X. and Pan, C., 2024. Proteomic stable isotope probing with an upgraded Sipros algorithm for improved identification and quantification of isotopically labeled proteins. Microbiome, 12.

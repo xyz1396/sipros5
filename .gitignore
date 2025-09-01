@@ -42,6 +42,7 @@ out/
 
 # for test files
 test/
+tools/
 *.faa
 *.fasta
 *.FT2
