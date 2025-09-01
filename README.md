@@ -11,8 +11,7 @@ conda activate sipros5
 
 ```bash
 wget https://github.com/xyz1396/sipros5/releases/download/5.0/siprosRelease.zip
-mkdir sipros
-unzip siprosRelease.zip -d sipros
+unzip siprosRelease.zip
 chmod +x sipros/tools/* sipros/siproswf
 ```
 
