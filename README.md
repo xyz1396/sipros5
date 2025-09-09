@@ -10,7 +10,7 @@ conda activate sipros5
 ## 2. Download Sipros5 Release
 
 ```bash
-wget https://github.com/xyz1396/sipros5/releases/download/5.0/siprosRelease.zip
+wget https://github.com/thepanlab/sipros5/releases/download/5.0/siprosRelease.zip
 unzip siprosRelease.zip
 chmod +x sipros/tools/* sipros/siproswf
 ```
@@ -37,19 +37,19 @@ gunzip UP000000625_83333.fasta.gz -c > Ecoli.fasta
 ### Regular Search
 
 ```bash
-python sipros/script33/main.py -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -t 40 -o regular_output
+python sipros/script33/main.py -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o regular_output
 ```
 
 ### Label Search
 
 ```bash
-python sipros/script33/main.py -i raw -f Ecoli.fasta -e C13 -t 40 -o sip_output
+python sipros/script33/main.py -i raw -f Ecoli.fasta -e C13 -o sip_output
 ```
 
 ### Label Search with negative control using unlabeled sample
 
 ```bash
-python sipros/script33/main.py -i raw -f Ecoli.fasta -e C13 -t 40 --negative_control Pan_062822_X1iso5 -o sip2_output
+python sipros/script33/main.py -i raw -f Ecoli.fasta -e C13 --negative_control Pan_062822_X1iso5 -o sip2_output
 ```
 
 ## 6. Citation

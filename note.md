@@ -107,7 +107,6 @@ setsid ./siproswf \
         -i /ourdisk/hpc/prebiotics/yixiong/auto_archive_notyet/ubuntuShare/EcoliSIP/goodResults/pct25/raw \
         -f test/fasta/EcoliWithCrapNodup.fasta \
         -e C13 \
-        -t 40 \
         -o test/wf_output25 \
 > test/test25.log 2>&1 &
 
@@ -148,13 +147,13 @@ setsid ./siproswf \
         -o test/wf_outputAstral50 \
 > test/testAstral50.log 2>&1 &
 
-./siproswf \
-        -i /ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/AstralC13/pct99 \
+setsid ./siproswf \
+        -i /ourdisk/hpc/nullspace/yixiong/auto_archive_notyet/tape_2copies/UbuntuShare/AstralC13/pct25 \
         -f test/fasta/EcoliWithCrapNodup.fasta \
         -e C13 \
-        -t 40 \
+        -t 80 \
         -s \
         -n 15 \
-        -o test/wf_outputAstral99 \
-        --dryrun
+        -o test/wf_outputAstral25 \
+> test/testAstral25.log 2>&1 &
 ```

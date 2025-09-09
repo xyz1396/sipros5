@@ -305,7 +305,7 @@ class assembly:
         self.combine_fasta_files(self.fastaPath, self.decoyPath)
         
         threadNumber = self.core_count
-        if self.threadNumber != None:
+        if self.threadNumber > 0:
             threadNumber = self.threadNumber
         raw_file_parallel = min(10, threadNumber)
         

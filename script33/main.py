@@ -99,7 +99,7 @@ citation:
         parser.add_argument('-n', '--nPrecursor', required=False,
                             type=int, default=6,
                             help="Max precursor number in isolation window when converting raw file, recommend 6 in DDA (default) 15 in DIA")
-        parser.add_argument('-t', '--thread', required=False,
+        parser.add_argument('-t', '--thread', required=False, type=int, default=0,
                             help="Thread number to be limited, all threads in default")
         parser.add_argument('-o', '--output', required=True, help="Output directory path")
         parser.add_argument('--ignorePCT', action='store_true', 

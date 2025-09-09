@@ -33,7 +33,7 @@ class search:
         self.outPutPath = outputPath
         self.negative_control = negative_control
         self.threadNumber = threadNumber
-        self.OMP_NUM_THREADS = 10
+        self.OMP_NUM_THREADS = min(10, self.core_count)
         self.logger = logger
         self.raw_files: list[str] = []
         self.mzml_files: list[str] = []
@@ -43,11 +43,11 @@ class search:
         self.nPrecursor = nPrecursor
         self.dryrun = dryrun
         
-    def run_command(self, cmd):
+    def run_command(self, cmd: str, env: dict[str, str] = os.environ.copy()):
         self.logger.info(f"Running command: {cmd}")
         try:
-            env = os.environ.copy()
             env["OMP_NUM_THREADS"] = str(self.OMP_NUM_THREADS)
+            self.logger.info(f"Set OMP_NUM_THREADS to {env['OMP_NUM_THREADS']}")
             output = subprocess.check_output(
                 cmd, shell=True, stderr=subprocess.STDOUT, env=env)
             self.logger.info(output.decode())
@@ -69,9 +69,13 @@ class search:
         except Exception as e:
             self.logger.error(f"Exception occurred while checking FT2 files: {e}")
             pass
-        self.run_command(cmd)
+        env = os.environ.copy()
+        # avoid raxport crash due to memory limit
+        env["DOTNET_GCHeapHardLimit"] = "20000000"
+        self.logger.info(f"Set DOTNET_GCHeapHardLimit to {env['DOTNET_GCHeapHardLimit']}")
+        self.run_command(cmd, env)
 
-    def run_command_sipros(self, cmd):
+    def run_command_sipros(self, cmd: str):
         # Try to extract output file name from command
         output_file = None
         # Look for "-o <dir>" and try to reconstruct output file name
@@ -242,10 +246,10 @@ class search:
         self.generateConfigs()
         self.logger.info(f'Number of CPU cores: {self.core_count}')
         threadNumber = self.core_count
-        if self.threadNumber != None:
+        if self.threadNumber > 0:
             threadNumber = self.threadNumber
         self.logger.info(f'Setted max thread numbers: {threadNumber}')
-        raw_file_parallel = int(threadNumber // self.OMP_NUM_THREADS)
+        raw_file_parallel = max(1, int(threadNumber // self.OMP_NUM_THREADS))
         self.getInputFiles()     
         # Verify negative control files are in base_names
         if (self.negative_control != None) and (self.negative_control != ''):

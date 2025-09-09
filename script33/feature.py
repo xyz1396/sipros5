@@ -14,10 +14,10 @@ class feature:
         self.baseNames = baseNames
         self.outPutPath = outputPath
         self.logger = logger
-        self.OMP_NUM_THREADS = 10
         self.scansPerFT = scansPerFT
         self.threadNumber = threadNumber
         self.core_count: int = multiprocessing.cpu_count()
+        self.OMP_NUM_THREADS = min(10, self.core_count)
         self.dryrun = dryrun
 
     def run_command(self, cmd):
@@ -25,8 +25,10 @@ class feature:
         try:
             env = os.environ.copy()
             env["OMP_NUM_THREADS"] = str(self.OMP_NUM_THREADS)
+            self.logger.info(f"Set OMP_NUM_THREADS to {env['OMP_NUM_THREADS']}")
             # to void segmentation fault of stack overflow
             env["OMP_STACKSIZE"] = "16M"
+            self.logger.info(f"Set OMP_STACKSIZE to {env['OMP_STACKSIZE']}")
             output = subprocess.check_output(
                 cmd, shell=True, stderr=subprocess.STDOUT, env=env)
             self.logger.info(output.decode())
@@ -66,11 +68,11 @@ class feature:
         # Call the feature extraction tool
         self.logger.info(f'Runing Aerith Feature Extractor: {self.aerithFeatureExtractorPath}')
         threadNumber = self.core_count
-        if self.threadNumber != None:
+        if self.threadNumber > 0:
             threadNumber = self.threadNumber
         raw_file_parallel = threadNumber
         if self.scansPerFT != None:
-            raw_file_parallel = int(threadNumber // self.OMP_NUM_THREADS)
+            raw_file_parallel = max(1, int(threadNumber // self.OMP_NUM_THREADS))
         raw_file_parallel = min(raw_file_parallel, 10)
         
         # Get the smallest percentage .cfg file

@@ -12,9 +12,9 @@ class filter:
         self.baseNames = baseNames
         self.outPutPath = outputPath
         self.logger = logger
-        self.OMP_NUM_THREADS = 10
         self.threadNumber = threadNumber
         self.core_count: int = multiprocessing.cpu_count()
+        self.OMP_NUM_THREADS = min(10, self.core_count)
         self.ignorePCT = ignorePCT
         self.dryrun = dryrun
         
@@ -26,6 +26,7 @@ class filter:
         try:
             env = os.environ.copy()
             env["OMP_NUM_THREADS"] = str(self.OMP_NUM_THREADS)
+            self.logger.info(f"Set OMP_NUM_THREADS to {env['OMP_NUM_THREADS']}")
             output = subprocess.check_output(
                 cmd, shell=True, stderr=subprocess.STDOUT, env=env)
             self.logger.info(output.decode())
@@ -43,9 +44,9 @@ class filter:
         # Call the feature extraction tool
         self.logger.info(f'Runing percolator: {self.percolatorPath}')
         threadNumber = self.core_count
-        if self.threadNumber != None:
+        if self.threadNumber > 0:
             threadNumber = self.threadNumber
-        raw_file_parallel = int(threadNumber // self.OMP_NUM_THREADS)
+        raw_file_parallel = max(1, int(threadNumber // self.OMP_NUM_THREADS))
         self.logger.info(f'Running percolator with {raw_file_parallel} processes')
         if not self.dryrun:
             with concurrent.futures.ProcessPoolExecutor(max_workers=raw_file_parallel) as executor:
