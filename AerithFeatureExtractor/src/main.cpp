@@ -32,7 +32,7 @@ int main(int argc, char *argv[])
     bool doProteinInference = false;
     std::string configPath = "SIP.cfg";
     int opt;
-    while ((opt = getopt(argc, argv, "t:d:n:f:c:j:p:o:")) != -1)
+    while ((opt = getopt(argc, argv, "t:d:n:f:c:j:p:o:h")) != -1)
     {
         switch (opt)
         {
@@ -60,8 +60,11 @@ int main(int argc, char *argv[])
         case 'o':
             fileName = optarg;
             break;
+        case 'h':
+            std::cout << helpInfo << std::endl;
+            return 0;
         default:
-            std::cerr << helpInfo << std::endl;
+            std::cerr << "Unknown parameter! \n" << helpInfo << std::endl;
             return 1;
         }
     }

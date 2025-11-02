@@ -14,7 +14,7 @@ case $1 in
     mkdir bin
     ;;
 "build")
-    mkdir build
+    mkdir -p build
     cd build
     cmake -G Ninja -DCMAKE_BUILD_TYPE=Release ..
     ninja
@@ -35,7 +35,7 @@ case $1 in
     eval "$(~/.local/bin/micromamba shell hook --shell=bash)"
     micromamba activate sipros5
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_PREFIX}/lib
-    mkdir build
+    mkdir -p build
     cd build
     cmake -G Ninja ${CMAKE_ARGS} -DCMAKE_BUILD_TYPE=Release -DBUILD_CONDA=true ..
     ninja
@@ -68,6 +68,24 @@ case $1 in
 "make")
     cd build
     make .. -j8
+    ;;
+"package")
+    # Run clean and build before packaging
+    $0 clean
+    $0 build
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/sipros"
+    cp -r configTemplates tools siproswf script33 "$tmpdir/sipros"
+    if [ -f siprosRelease.zip ]; then
+        rm siprosRelease.zip
+    fi
+    cd "$tmpdir"
+    zip -r "$OLDPWD/siprosRelease.zip" "sipros" \
+        -x "sipros/script33/debugProxy.py" "sipros/script33/quant.py" \
+        -x "*/__pycache__/*"
+    cd "$OLDPWD"
+    rm -rf "$tmpdir"
+    echo "Package created: siprosRelease.zip"
     ;;
 "run")
     cd timeCompare

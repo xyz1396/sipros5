@@ -3,7 +3,9 @@
 export MAMBA_ROOT_PREFIX=~/micromamba
 eval "$(~/.local/bin/micromamba shell hook --shell=bash)"
 micromamba activate bio
+# mkdir -p /lwork/Rtmp
 export TMPDIR=/scratch/yixiong/Rtmp
+# export TMPDIR=/lwork/Rtmp
 
 # Check if the correct number of arguments are provided
 if [ "$#" -ne 3 ]; then

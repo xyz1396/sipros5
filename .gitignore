@@ -35,6 +35,7 @@
 **/bin/*
 **/build/*
 # !bin/*
+siprosRelease.zip
 
 # for vs
 .vs/

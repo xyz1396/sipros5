@@ -142,7 +142,7 @@ class search:
             sip_lower_bound = int(self.sipRange.split('-')[0])
             sip_higher_bound = int(self.sipRange.split('-')[1])
         if self.step != None:
-            sip_step = int(self.step)
+            sip_step = float(self.step)
         if self.element == "R":
             self.logger.info("It is regular search")
             cfgTempName = "Regular.cfg"
