@@ -17,6 +17,7 @@ class SIPROSWorkflow:
     def __init__(self) -> None:
         script_path = os.path.abspath(__file__)
         upper_path = os.path.dirname(os.path.dirname(script_path))
+        self.upper_path = upper_path
         # Default paths for tools
         self.defaultToolsPaths: dict[str, str] = {
             'configTemplates': f'{upper_path}/configTemplates',
@@ -43,9 +44,10 @@ class SIPROSWorkflow:
 
     def load_paths(self) -> dict[str, str]:
         paths: dict[str, str] = self.defaultToolsPaths.copy()
-        if os.path.exists(path=self.cfg_file):
+        cfg_path = os.path.join(self.upper_path, self.cfg_file)
+        if os.path.exists(path=cfg_path):
             config = configparser.ConfigParser()
-            config.read(filenames=self.cfg_file)
+            config.read(filenames=cfg_path)
             for key in paths:
                 if config.has_option(section='Paths', option=key):
                     paths[key] = config.get(section='Paths', option=key)
