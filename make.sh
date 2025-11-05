@@ -75,7 +75,7 @@ case $1 in
     $0 build
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/sipros"
-    cp -r configTemplates tools siproswf script33 "$tmpdir/sipros"
+    cp -r configTemplates tools script33 "$tmpdir/sipros"
     if [ -f siprosRelease.zip ]; then
         rm siprosRelease.zip
     fi
