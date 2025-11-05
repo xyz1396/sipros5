@@ -55,6 +55,14 @@ siproswf -i raw -f db.faa -e C13 -o sip_output
 siproswf -i raw -f db.faa -e C13 --negative_control Pan_062822_X1iso5 -o sip2_output
 ```
 
+### 5. Output Files
+
+- `SIP_filtered_psms.tsv`: PSMs from all samples that pass the unlabeled negative-control filter (1% FDR), with SIP element labeling percentages (`MS1IsotopicAbundances`, `MS2IsotopicAbundances`). MS1IsotopicAbundances are more sensitive; MS2IsotopicAbundances are more accurate.
+- `protein_with_SIP_filtered_PSM.tsv`: maps unlabeled negative-control filtered PSMs to the proteins identified in each sample.
+- For each raw-file subdirectory:
+  - `peptide.tsv`, `protein.tsv`: peptides, and proteins passing 1% FDR decoy filtering.
+  - `*_filtered_psms.tsv`: PSMs passing 1% FDR decoy filtering with `MS1IsotopicAbundances`, `MS2IsotopicAbundances`.
+
 ## Sipros5 Setup Guide (set the python and binary by yourself)
 
 ### 1. Create Conda Environment
