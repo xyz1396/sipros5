@@ -1,12 +1,12 @@
-# Sipros5 Setup Guide (install from conda - coming soon)
+## Sipros5 Setup Guide (install from conda - coming soon)
 
-## 1. Create Conda Environment
+### 1. Create Conda Environment
 
 ```bash
 conda install bioconda::sipros=5.0
 ```
 
-## 2. Download Raw Files
+### 2. Download Raw Files
 
 ```bash
 mkdir raw
@@ -16,22 +16,22 @@ wget ftp://ftp.pride.ebi.ac.uk/pride/data/archive/2024/06/PXD041414/Pan_062822_X
 wget ftp://ftp.pride.ebi.ac.uk/pride/data/archive/2024/06/PXD041414/Pan_052322_X13.raw -P raw
 ```
 
-## 3. Download E. coli Protein FASTA Sequence
+### 3. Download E. coli Protein FASTA Sequence
 
 ```bash
 wget https://ftp.uniprot.org/pub/databases/uniprot/knowledgebase/reference_proteomes/Bacteria/UP000000625/UP000000625_83333.fasta.gz
 gunzip UP000000625_83333.fasta.gz -c > Ecoli.fasta
 ```
 
-## 4. Example Commands
+### 4. Example Commands
 
-### Regular Search
+#### Regular Search
 
 ```bash
 siproswf -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o regular_output
 ```
 
-### Extract protein sequences identified in Regular search
+#### Extract protein sequences identified in Regular search
 
 > This step is particularly useful when your protein FASTA is large (for example, several GB in metaproteomics studies).
 >
@@ -43,28 +43,28 @@ siproswf -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o regular_output
 extractPro Ecoli.fasta regular_output/protein.tsv db.faa
 ```
 
-### Label Search
+#### Label Search
 
 ```bash
 siproswf -i raw -f db.faa -e C13 -o sip_output
 ```
 
-### Label Search with negative control using unlabeled sample
+#### Label Search with negative control using unlabeled sample
 
 ```bash
 siproswf -i raw -f db.faa -e C13 --negative_control Pan_062822_X1iso5 -o sip2_output
 ```
 
-# Sipros5 Setup Guide (set the python and binary by yourself)
+## Sipros5 Setup Guide (set the python and binary by yourself)
 
-## 1. Create Conda Environment
+### 1. Create Conda Environment
 
 ```bash
 conda create -n sipros5 lxml pandas seqkit python=3.12 -c bioconda -c conda-forge
 conda activate sipros5
 ```
 
-## 2. Download Sipros5 Release
+### 2. Download Sipros5 Release
 
 ```bash
 wget https://github.com/thepanlab/sipros5/releases/download/5.0/siprosRelease.zip
@@ -72,15 +72,15 @@ unzip siprosRelease.zip
 chmod +x sipros/tools/* sipros/script33/extractPro.sh
 ```
 
-## 3. Example Commands
+### 3. Example Commands
 
-### Regular Search
+#### Regular Search
 
 ```bash
 python sipros/script33/main.py -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o regular_output
 ```
 
-### Extract protein sequences identified in Regular search
+#### Extract protein sequences identified in Regular search
 
 > This step is particularly useful when your protein FASTA is large (for example, several GB in metaproteomics studies).
 >
@@ -92,19 +92,19 @@ python sipros/script33/main.py -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o re
 sipros/script33/extractPro.sh Ecoli.fasta regular_output/protein.tsv db.faa
 ```
 
-### Label Search
+#### Label Search
 
 ```bash
 python sipros/script33/main.py -i raw -f db.faa -e C13 -o sip_output
 ```
 
-### Label Search with negative control using unlabeled sample
+#### Label Search with negative control using unlabeled sample
 
 ```bash
 python sipros/script33/main.py -i raw -f db.faa -e C13 --negative_control Pan_062822_X1iso5 -o sip2_output
 ```
 
-## 6. Citation
+### 6. Citation
 
 1. Xiong, Y., Mueller, R.S., Feng, S., Guo, X. and Pan, C., 2024. Proteomic stable isotope probing with an upgraded Sipros algorithm for improved identification and quantification of isotopically labeled proteins. *Microbiome*, 12.
 2. Li, J., Xiong, Y., Feng, S., Pan, C., & Guo, X. (2024). CloudProteoAnalyzer: scalable processing of big data from proteomics using cloud computing. *Bioinformatics Advances*, vbae024.
