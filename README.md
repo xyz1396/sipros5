@@ -33,11 +33,8 @@ siproswf -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o regular_output
 
 #### Extract protein sequences identified in Regular search
 
-> This step is particularly useful when your protein FASTA is large (for example, several GB in metaproteomics studies).
->
-> The `regular_output/protein.tsv` file can be replaced with results from other proteomics search engines (e.g., FragPipe, MaxQuant, or Proteome Discoverer) as long as the first column contains the protein identifier.
->
-> If you are working with a small FASTA, you can skip this extraction step and use the original FASTA for the label search.
+- This step is particularly useful when your protein FASTA is large (for example, several GB in metaproteomics studies). The `regular_output/protein.tsv` file can be replaced with results from other proteomics search engines (e.g., FragPipe, MaxQuant, or Proteome Discoverer) as long as the first column contains the protein identifier.
+- If you are working with a small FASTA, you can skip this extraction step and use the original FASTA for the label search.
 
 ```bash
 extractPro Ecoli.fasta regular_output/protein.tsv db.faa
@@ -89,12 +86,6 @@ python sipros/script33/main.py -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o re
 ```
 
 #### Extract protein sequences identified in Regular search
-
-> This step is particularly useful when your protein FASTA is large (for example, several GB in metaproteomics studies).
->
-> The `regular_output/protein.tsv` file can be replaced with results from other proteomics search engines (e.g., FragPipe, MaxQuant, or Proteome Discoverer) as long as the first column contains the protein identifier.
->
-> If you are working with a small FASTA, you can skip this extraction step and use the original FASTA for the label search.
 
 ```bash
 sipros/script33/extractPro.sh Ecoli.fasta regular_output/protein.tsv db.faa
