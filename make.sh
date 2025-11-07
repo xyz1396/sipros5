@@ -1,8 +1,11 @@
 #!/bin/bash
+## install compile dependencies with apt
+# sudo apt install python openmpi-bin libopenmpi-dev build-essential cmake ninja-build gdb google-perftools libgoogle-perftools-dev
+## install compile dependencies from micromamba 
 # micromamba create -n sipros5 -c conda-forge openmpi gxx_linux-64 gcc_linux-64 cmake ninja gdb gperftools python=3.12 lxml pandas
-# compiler name x86_64-conda_cos6-linux-gnu-g++
+## compiler name x86_64-conda_cos6-linux-gnu-g++
 # micromamba activate sipros5
-# run follows to load dynamic libs when running bin/SiprosV3omp bin/SiprosV3mpi bin/SiprosV3test
+## run follows to load dynamic libs when running bin/SiprosV3omp bin/SiprosV3mpi bin/SiprosV3test
 # micromamba activate sipros5
 # export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_PREFIX}/lib
 case $1 in
@@ -14,7 +17,7 @@ case $1 in
     mkdir bin
     ;;
 "build")
-    mkdir -p build
+    mkdir -p build tools
     cd build
     cmake -G Ninja -DCMAKE_BUILD_TYPE=Release ..
     ninja
@@ -75,7 +78,7 @@ case $1 in
     $0 build
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/sipros"
-    cp -r configTemplates tools script33 "$tmpdir/sipros"
+    cp -r configTemplates tools script33 LICENSE "$tmpdir/sipros"
     if [ -f siprosRelease.zip ]; then
         rm siprosRelease.zip
     fi
