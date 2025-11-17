@@ -1,9 +1,9 @@
-## Sipros5 Setup Guide (install from conda - coming soon)
+## Sipros5 Setup Guide
 
 ### 1. Create Conda Environment
 
 ```bash
-conda install bioconda::sipros=5.0
+conda install bioconda::sipros
 ```
 
 ### 2. Download Raw Files
