@@ -84,6 +84,13 @@ class assembly:
             search_result = etree.SubElement(spectrum_query, "search_result")
             # split peptide sequence by "[" and "]" to get previous, current and next amino acids
             seqs = re.split(r'[\[\]]', row['Peptide']) 
+            if len(seqs) < 3:
+                raise ValueError(f"Unexpected peptide format: {row['Peptide']}")
+            # handle terminal amino acids to avoid empty strings making crash in philosopher
+            if not seqs[0] or seqs[0].strip() == "":
+                seqs[0] = "-"
+            if not seqs[2] or seqs[2].strip() == "":
+                seqs[2] = "-"
             seq = seqs[1]
             # remove PTM in the pep seq
             seq = re.sub(r'[^a-zA-Z]', '', seq)
