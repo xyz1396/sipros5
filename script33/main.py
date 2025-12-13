@@ -27,7 +27,7 @@ class SIPROSWorkflow:
             'feature_extractor': f'{upper_path}/tools/aerithFeatureExtractor',
             'filter': f'{upper_path}/tools/percolator',
             'deepfilter': f'{upper_path}/tools/deepfilter',
-            'assembly': f'{upper_path}/tools/philosopher-v5.1.1',
+            'assembly': f'{upper_path}/tools/philosopher-v5.1.2',
             'metaLP': f'{upper_path}/tools/metaLP',
             'quantification': f'{upper_path}/tools/ionquant'
         }
