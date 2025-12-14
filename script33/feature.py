@@ -17,7 +17,7 @@ class feature:
         self.scansPerFT = scansPerFT
         self.threadNumber = threadNumber
         self.core_count: int = multiprocessing.cpu_count()
-        self.OMP_NUM_THREADS = min(10, self.core_count)
+        self.OMP_NUM_THREADS = min(10, self.core_count, threadNumber)
         self.dryrun = dryrun
 
     def run_command(self, cmd):

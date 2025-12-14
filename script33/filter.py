@@ -14,7 +14,7 @@ class filter:
         self.logger = logger
         self.threadNumber = threadNumber
         self.core_count: int = multiprocessing.cpu_count()
-        self.OMP_NUM_THREADS = min(10, self.core_count)
+        self.OMP_NUM_THREADS = min(10, self.core_count, threadNumber)
         self.ignorePCT = ignorePCT
         self.dryrun = dryrun
         

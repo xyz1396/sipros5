@@ -33,7 +33,7 @@ class search:
         self.outPutPath = outputPath
         self.negative_control = negative_control
         self.threadNumber = threadNumber
-        self.OMP_NUM_THREADS = min(10, self.core_count)
+        self.OMP_NUM_THREADS = min(10, self.core_count, threadNumber)
         self.logger = logger
         self.raw_files: list[str] = []
         self.mzml_files: list[str] = []
@@ -165,19 +165,22 @@ class search:
             self.logger.info(f'{self.inputPath} is a file list')
             files = self.inputPath.split(',')
         for file in files:
-            if not os.path.exists(file):
-                self.logger.error(f'{file} does not exist')
+            real_file = os.path.realpath(file)
+            if real_file != file:
+                self.logger.info(f'{file} is a symlink, resolved to {real_file}')
+            if not os.path.exists(real_file):
+                self.logger.error(f'{real_file} does not exist')
                 exit(1)
-            if file.endswith(".raw"):
-                self.raw_files.append(file)
+            if real_file.endswith(".raw"):
+                self.raw_files.append(real_file)
                 # let base_names_of_raw match the raw files path
-                raw_base = os.path.splitext(os.path.basename(file))[0]
+                raw_base = os.path.splitext(os.path.basename(real_file))[0]
                 self.base_names_of_raw.append(raw_base)
                 self.base_names.append(raw_base)
-            if file.endswith(".mzml"):
-                self.mzml_files.append(file)
+            if real_file.endswith(".mzml"):
+                self.mzml_files.append(real_file)
                 # let base_names_of_raw match the mzml files path
-                mzml_base = os.path.splitext(os.path.basename(file))[0]
+                mzml_base = os.path.splitext(os.path.basename(real_file))[0]
                 self.base_names.append(mzml_base)
                 self.base_names_of_mzml.append(mzml_base)
         if len(self.raw_files) == 0 and len(self.mzml_files) == 0:

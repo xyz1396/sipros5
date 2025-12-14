@@ -114,6 +114,13 @@ citation:
         parser.add_argument('--dryrun', action='store_true', help='Run in dry run mode for test')
 
         args: Namespace = parser.parse_args()
+        
+        # Validate thread number
+        if args.thread < 0:
+            parser.error("Thread number must be non-negative (0 for all threads, or a positive integer)")
+        if args.thread == 0:
+            args.thread = os.cpu_count() or 1  # Use all available CPUs
+        
         # if -e is not provided, set it to "R" for regular search
         if not args.element:
             args.element = "R"

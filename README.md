@@ -72,7 +72,7 @@ conda activate sipros5
 ### 2. Download Sipros5 Release
 
 ```bash
-wget https://github.com/thepanlab/sipros5/releases/download/5.0/siprosRelease.zip
+wget https://github.com/xyz1396/sipros5/releases/download/5.0.1/siprosRelease.zip
 unzip siprosRelease.zip
 chmod +x sipros/tools/* sipros/script33/extractPro.sh
 ```
