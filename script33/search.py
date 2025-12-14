@@ -167,7 +167,7 @@ class search:
         for file in files:
             real_file = os.path.realpath(file)
             if real_file != file:
-                self.logger.info(f'{file} is a symlink, resolved to {real_file}')
+                self.logger.info(f'{file} is not an absolute path, resolved to {real_file}')
             if not os.path.exists(real_file):
                 self.logger.error(f'{real_file} does not exist')
                 exit(1)
