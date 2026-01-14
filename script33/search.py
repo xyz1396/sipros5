@@ -198,10 +198,10 @@ class search:
             for i in range(len(self.raw_files)):
                 raxport_cmd = f'{self.raxportPath} -f {self.raw_files[i]} \
                             -o {self.outPutPath}/{self.base_names_of_raw[i]}/ft -s {scansPerFT2} \
-                            -j {min(10, self.core_count)} -n {self.nPrecursor}'
+                            -j {min(10, self.threadNumber, self.core_count)} -n {self.nPrecursor}'
                 self.run_command_raxport(raxport_cmd)
         else:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=min(10, self.core_count)) as executor:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=min(10, self.threadNumber, self.core_count)) as executor:
                 commands = [f'{self.raxportPath} -f {self.raw_files[i]} \
                             -o {self.outPutPath}/{self.base_names_of_raw[i]}/ft -n {self.nPrecursor}'
                             for i in range(len(self.raw_files))]
