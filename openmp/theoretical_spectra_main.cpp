@@ -525,8 +525,16 @@ void appendChargeSeriesLine(std::ostream &out,
 	out << '\n';
 }
 
-void appendPrecursorHeaderLine(std::ostream &out,
-							   const std::string &psmId,
+struct FragmentEntry
+{
+	double mz = 0.0;
+	double intensity = 0.0;
+	char ionKind = 'b';
+	size_t position = 0;
+	int isMostAbundant = 0;
+};
+
+void appendPrecursorChargeLine(std::ostream &out,
 							   const IsotopeDistribution &dist,
 							   int charge,
 							   double probCutoff)
@@ -547,12 +555,117 @@ void appendPrecursorHeaderLine(std::ostream &out,
 			  [](const std::pair<double, double> &a, const std::pair<double, double> &b)
 			  { return a.first < b.first; });
 
-	out << psmId;
-	for (const auto &peak : peaks)
+	for (size_t i = 0; i < peaks.size(); ++i)
 	{
-		out << ' ' << std::setprecision(10) << peak.first << ' ' << std::setprecision(10) << peak.second;
+		if (i > 0)
+		{
+			out << ' ';
+		}
+		out << std::setprecision(10) << peaks[i].first;
 	}
 	out << '\n';
+
+	for (size_t i = 0; i < peaks.size(); ++i)
+	{
+		if (i > 0)
+		{
+			out << ' ';
+		}
+		out << std::setprecision(10) << peaks[i].second;
+	}
+	out << '\n';
+}
+
+void appendChargeOneFragmentBlock(std::ostream &out,
+								  const std::vector<std::vector<double>> &bMass,
+								  const std::vector<std::vector<double>> &bProb,
+								  const std::vector<std::vector<double>> &yMass,
+								  const std::vector<std::vector<double>> &yProb,
+								  double probCutoff)
+{
+	const double proton = ProNovoConfig::getProtonMass();
+	std::vector<FragmentEntry> entries;
+	entries.reserve(512);
+
+	const auto collect = [&](const std::vector<std::vector<double>> &masses,
+							 const std::vector<std::vector<double>> &probs,
+							 const char ionKind)
+	{
+		for (size_t i = 0; i < masses.size() && i < probs.size(); ++i)
+		{
+			if (masses[i].empty() || probs[i].empty())
+			{
+				continue;
+			}
+			double localMaxProb = probs[i][0];
+			for (size_t j = 1; j < probs[i].size(); ++j)
+			{
+				localMaxProb = std::max(localMaxProb, probs[i][j]);
+			}
+			for (size_t j = 0; j < masses[i].size() && j < probs[i].size(); ++j)
+			{
+				if (probs[i][j] < probCutoff)
+				{
+					continue;
+				}
+					FragmentEntry entry;
+					entry.mz = masses[i][j] + proton; // charge 1 only
+					entry.intensity = probs[i][j];
+					entry.ionKind = ionKind;
+					entry.position = i + 1;
+					entry.isMostAbundant = (std::abs(probs[i][j] - localMaxProb) <= 1e-12) ? 1 : 0;
+					entries.push_back(entry);
+				}
+		}
+	};
+
+	collect(bMass, bProb, 'b');
+	collect(yMass, yProb, 'y');
+
+	std::sort(entries.begin(), entries.end(),
+			  [](const FragmentEntry &a, const FragmentEntry &b)
+			  { return a.mz < b.mz; });
+
+	for (size_t i = 0; i < entries.size(); ++i)
+	{
+		if (i > 0)
+		{
+			out << ' ';
+		}
+		out << std::setprecision(10) << entries[i].mz;
+	}
+	out << '\n';
+
+	for (size_t i = 0; i < entries.size(); ++i)
+	{
+		if (i > 0)
+		{
+			out << ' ';
+		}
+		out << std::setprecision(10) << entries[i].intensity;
+	}
+	out << '\n';
+
+	for (size_t i = 0; i < entries.size(); ++i)
+	{
+		if (i > 0)
+		{
+			out << ' ';
+		}
+		out << entries[i].ionKind;
+	}
+	out << '\n';
+
+	for (size_t i = 0; i < entries.size(); ++i)
+	{
+		if (i > 0)
+		{
+			out << ' ';
+		}
+		out << entries[i].position;
+	}
+	out << '\n';
+
 }
 
 bool buildPrecursorDistributionFromProductIons(Isotopologue &iso,
@@ -654,6 +767,15 @@ int main(int argc, char **argv)
 		std::cerr << "Cannot open output file: " << args.outputPath << "\n";
 		return 1;
 	}
+	out << "# Theoretical precursor peaks and theoretical monocharge fragment ion peaks \n";
+	out << "# Per PSM block format:\n";
+	out << "# > <PSM id>\n";
+	out << "# line1: precursor m/z values\n";
+	out << "# line2: precursor intensities\n";
+	out << "# line3: fragment m/z values\n";
+	out << "# line4: fragment intensities\n";
+	out << "# line5: fragment ion kinds (b or y)\n";
+	out << "# line6: fragment ion positions (1-based)\n";
 
 	const Isotopologue baseIso = ProNovoConfig::configIsotopologue;
 	std::vector<std::string> blocks(rows.size());
@@ -689,18 +811,14 @@ int main(int argc, char **argv)
 					continue;
 				}
 
-				std::ostringstream ss;
-				appendPrecursorHeaderLine(ss, row.psmId, precursorDist, row.precursorCharge, args.probCutoff);
-				appendChargeSeriesLine(ss, bMass, bProb, 1, args.probCutoff);
-				appendChargeSeriesLine(ss, bMass, bProb, 2, args.probCutoff);
-				appendChargeSeriesLine(ss, bMass, bProb, 3, args.probCutoff);
-				appendChargeSeriesLine(ss, yMass, yProb, 1, args.probCutoff);
-				appendChargeSeriesLine(ss, yMass, yProb, 2, args.probCutoff);
-				appendChargeSeriesLine(ss, yMass, yProb, 3, args.probCutoff);
+					std::ostringstream ss;
+					ss << "> " << row.psmId << '\n';
+					appendPrecursorChargeLine(ss, precursorDist, row.precursorCharge, args.probCutoff);
+					appendChargeOneFragmentBlock(ss, bMass, bProb, yMass, yProb, args.probCutoff);
 
-				blocks[static_cast<size_t>(i)] = ss.str();
-				ok[static_cast<size_t>(i)] = 1;
-			}
+					blocks[static_cast<size_t>(i)] = ss.str();
+					ok[static_cast<size_t>(i)] = 1;
+				}
 			catch (const std::exception &ex)
 			{
 #pragma omp critical
