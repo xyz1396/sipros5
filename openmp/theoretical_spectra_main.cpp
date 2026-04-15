@@ -18,6 +18,13 @@
 
 namespace
 {
+enum class SipAbundanceMode
+{
+	InputRow,
+	Config,
+	FixedUser
+};
+
 struct Args
 {
 	std::string configPath;
@@ -25,6 +32,8 @@ struct Args
 	std::string outputPath;
 	char sipAtom = '\0';
 	int sipIsotopeMassNumber = -1;
+	SipAbundanceMode sipAbundanceMode = SipAbundanceMode::InputRow;
+	double fixedSipAbundancePct = 0.0;
 	double probCutoff = 0.01;
 	int threads = 0;
 };
@@ -73,8 +82,18 @@ std::vector<std::string> splitTab(const std::string &line)
 void printUsage(const char *prog)
 {
 	std::cerr << "Usage: " << prog
-			  << " -c <config.cfg> -i <input.tsv|input.pin> -o <output.txt> [-a <SIP atom/isotope, e.g. C13,H2,O18,N15,S34>] [-p <prob cutoff>] [-t <threads>]\n";
-	std::cerr << "Required columns in input: (PSMId or SpecId), MS2IsotopicAbundances, Peptide\n";
+			  << " -c <config.cfg> -i <input.tsv|input.pin> -o <output.txt> [-a <SIP atom/isotope, e.g. C13,H2,O18,N15,S34>] [-b [pct]] [-p <prob cutoff>] [-t <threads>]\n";
+	std::cerr << "Required columns in input: (PSMId or SpecId), Peptide";
+	std::cerr << " [MS2IsotopicAbundances required unless -b/--sip-abundance is set]\n";
+}
+
+std::string toLower(std::string s)
+{
+	for (char &ch : s)
+	{
+		ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+	}
+	return s;
 }
 
 bool parseSipAtomSpec(const std::string &spec, char &sipAtom, int &sipIsotopeMassNumber)
@@ -157,25 +176,40 @@ bool parseArgs(int argc, char **argv, Args &args)
 			printUsage(argv[0]);
 			return false;
 		}
-		if (i + 1 >= argc)
-		{
-			std::cerr << "Missing value for option: " << opt << "\n";
-			return false;
-		}
 		if (opt == "-c")
 		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Missing value for option: " << opt << "\n";
+				return false;
+			}
 			args.configPath = argv[++i];
 		}
 		else if (opt == "-i")
 		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Missing value for option: " << opt << "\n";
+				return false;
+			}
 			args.inputPath = argv[++i];
 		}
 		else if (opt == "-o")
 		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Missing value for option: " << opt << "\n";
+				return false;
+			}
 			args.outputPath = argv[++i];
 		}
 		else if (opt == "-a" || opt == "--sip-atom")
 		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Missing value for option: " << opt << "\n";
+				return false;
+			}
 			const std::string sipSpec = trim(argv[++i]);
 			if (!parseSipAtomSpec(sipSpec, args.sipAtom, args.sipIsotopeMassNumber))
 			{
@@ -184,8 +218,49 @@ bool parseArgs(int argc, char **argv, Args &args)
 				return false;
 			}
 		}
+		else if (opt == "-b" || opt == "--sip-abundance")
+		{
+			args.sipAbundanceMode = SipAbundanceMode::Config;
+			if (i + 1 >= argc)
+			{
+				continue;
+			}
+			const std::string abundanceSpec = trim(argv[i + 1]);
+			if (abundanceSpec.empty() || abundanceSpec[0] == '-')
+			{
+				continue;
+			}
+			const std::string abundanceSpecLower = toLower(abundanceSpec);
+			if (abundanceSpecLower == "config" || abundanceSpecLower == "cfg")
+			{
+				++i;
+				continue;
+			}
+			try
+			{
+				args.fixedSipAbundancePct = std::stod(abundanceSpec);
+				args.sipAbundanceMode = SipAbundanceMode::FixedUser;
+				++i;
+			}
+			catch (const std::exception &)
+			{
+				std::cerr << "Invalid SIP abundance value: " << abundanceSpec
+						  << ". Use -b by itself or provide a percentage in [0, 100].\n";
+				return false;
+			}
+			if (args.fixedSipAbundancePct < 0.0 || args.fixedSipAbundancePct > 100.0)
+			{
+				std::cerr << "SIP abundance percentage must be in [0, 100].\n";
+				return false;
+			}
+		}
 		else if (opt == "-p" || opt == "--prob-cutoff")
 		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Missing value for option: " << opt << "\n";
+				return false;
+			}
 			try
 			{
 				args.probCutoff = std::stod(argv[++i]);
@@ -198,6 +273,11 @@ bool parseArgs(int argc, char **argv, Args &args)
 		}
 		else if (opt == "-t" || opt == "--threads")
 		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Missing value for option: " << opt << "\n";
+				return false;
+			}
 			try
 			{
 				args.threads = std::stoi(argv[++i]);
@@ -281,7 +361,7 @@ std::string normalizePeptide(const std::string &raw)
 	return "[" + p + "]";
 }
 
-std::vector<PsmRow> readInputRows(const std::string &path)
+std::vector<PsmRow> readInputRows(const std::string &path, bool requireSipPct)
 {
 	std::ifstream in(path);
 	if (!in)
@@ -329,8 +409,12 @@ std::vector<PsmRow> readInputRows(const std::string &path)
 	{
 		throw std::runtime_error("Missing required ID column: PSMId or SpecId");
 	}
-	const size_t idxMS2Pct = getRequired("MS2IsotopicAbundances");
 	const size_t idxPeptide = getRequired("Peptide");
+	size_t idxMS2Pct = std::string::npos;
+	if (requireSipPct)
+	{
+		idxMS2Pct = getRequired("MS2IsotopicAbundances");
+	}
 	size_t idxCharge = std::string::npos;
 	const auto itCharge = col.find("parentCharges");
 	if (itCharge != col.end())
@@ -349,7 +433,11 @@ std::vector<PsmRow> readInputRows(const std::string &path)
 			continue;
 		}
 		const std::vector<std::string> f = splitTab(line);
-		const size_t need = std::max({idxPSMId, idxMS2Pct, idxPeptide});
+		size_t need = std::max(idxPSMId, idxPeptide);
+		if (requireSipPct)
+		{
+			need = std::max(need, idxMS2Pct);
+		}
 		if (f.size() <= need)
 		{
 			continue;
@@ -361,19 +449,33 @@ std::vector<PsmRow> readInputRows(const std::string &path)
 		{
 			continue;
 		}
-			try
+		try
+		{
+			if (requireSipPct)
 			{
 				row.sipPct = parseFirstDouble(f[idxMS2Pct]);
-				if (idxCharge != std::string::npos)
+			}
+			if (idxCharge != std::string::npos && f.size() > idxCharge)
+			{
+				const std::string chargeText = trim(f[idxCharge]);
+				if (!chargeText.empty())
 				{
-					row.precursorCharge = std::max(1, std::stoi(trim(f[idxCharge])));
+					row.precursorCharge = std::max(1, std::stoi(chargeText));
 				}
 			}
-			catch (const std::exception &)
+		}
+		catch (const std::exception &)
+		{
+			if (requireSipPct)
 			{
 				std::cerr << "Skipping line " << lineNo << ": invalid MS2IsotopicAbundances or parentCharges.\n";
-				continue;
 			}
+			else
+			{
+				std::cerr << "Skipping line " << lineNo << ": invalid parentCharges.\n";
+			}
+			continue;
+		}
 		rows.push_back(std::move(row));
 	}
 	return rows;
@@ -484,6 +586,22 @@ void setSipAbundance(Isotopologue &iso, char sipAtom, int isotopeIndex, double s
 	}
 
 	refreshResidueDistributions(iso);
+}
+
+double getSipAbundanceFromConfigPct(const Isotopologue &iso, char sipAtom, int isotopeIndex)
+{
+	const int ix = atomIndex(sipAtom);
+	if (ix < 0)
+	{
+		throw std::runtime_error("Unsupported SIP atom. Use one of C,H,O,N,P,S.");
+	}
+	if (ix >= static_cast<int>(iso.vAtomIsotopicDistribution.size()) ||
+		isotopeIndex < 1 ||
+		isotopeIndex >= static_cast<int>(iso.vAtomIsotopicDistribution[ix].vProb.size()))
+	{
+		throw std::runtime_error("Configured isotopic distribution for SIP atom/isotope is not usable.");
+	}
+	return iso.vAtomIsotopicDistribution[ix].vProb[isotopeIndex] * 100.0;
 }
 
 void appendChargeSeriesLine(std::ostream &out,
@@ -702,17 +820,40 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	const std::string cfgAtom = ProNovoConfig::getSetSIPelement();
 	char sipAtom = args.sipAtom;
 	int sipIsotopeMassNumber = args.sipIsotopeMassNumber;
-	if (sipAtom == '\0')
+	if (args.sipAbundanceMode == SipAbundanceMode::Config)
 	{
-		const std::string cfgAtom = ProNovoConfig::getSetSIPelement();
+		if (cfgAtom.size() != 1)
+		{
+			std::cerr << "Invalid SIP_Element in config. Pass -a explicitly.\n";
+			return 1;
+		}
+		if (args.sipAbundanceMode != SipAbundanceMode::InputRow && args.sipAtom != '\0')
+		{
+			std::cerr << "Ignoring -a/--sip-atom because -b/--sip-abundance uses SIP_Element from config.cfg.\n";
+		}
+		sipAtom = static_cast<char>(std::toupper(static_cast<unsigned char>(cfgAtom[0])));
+		sipIsotopeMassNumber = -1;
+		if (sipAtom == 'O')
+		{
+			sipIsotopeMassNumber = 18;
+		}
+		else if (sipAtom == 'S')
+		{
+			sipIsotopeMassNumber = 34;
+		}
+	}
+	else if (sipAtom == '\0')
+	{
 		if (cfgAtom.size() != 1)
 		{
 			std::cerr << "Invalid SIP_Element in config. Pass -a explicitly.\n";
 			return 1;
 		}
 		sipAtom = static_cast<char>(std::toupper(static_cast<unsigned char>(cfgAtom[0])));
+		sipIsotopeMassNumber = -1;
 		if (sipAtom == 'O')
 		{
 			sipIsotopeMassNumber = 18;
@@ -728,6 +869,7 @@ int main(int argc, char **argv)
 		std::cerr << "Invalid SIP atom '" << sipAtom << "'. Valid options: C,H,O,N,P,S\n";
 		return 1;
 	}
+
 	int sipIsotopeIndex = 1;
 	try
 	{
@@ -738,12 +880,43 @@ int main(int argc, char **argv)
 		std::cerr << ex.what() << "\n";
 		return 1;
 	}
+
+	double fixedSipAbundancePct = 0.0;
+	if (args.sipAbundanceMode == SipAbundanceMode::Config)
+	{
+		try
+		{
+			fixedSipAbundancePct = getSipAbundanceFromConfigPct(ProNovoConfig::configIsotopologue, sipAtom, sipIsotopeIndex);
+		}
+		catch (const std::exception &ex)
+		{
+			std::cerr << ex.what() << "\n";
+			return 1;
+		}
+	}
+	else if (args.sipAbundanceMode == SipAbundanceMode::FixedUser)
+	{
+		fixedSipAbundancePct = args.fixedSipAbundancePct;
+	}
+
 	std::cout << "SIP atom: " << sipAtom;
 	if (sipIsotopeMassNumber > 0)
 	{
 		std::cout << sipIsotopeMassNumber;
 	}
 	std::cout << "\n";
+	if (args.sipAbundanceMode == SipAbundanceMode::InputRow)
+	{
+		std::cout << "SIP abundance source: input MS2IsotopicAbundances\n";
+	}
+	else if (args.sipAbundanceMode == SipAbundanceMode::Config)
+	{
+		std::cout << "SIP abundance source: " << args.configPath << " (" << fixedSipAbundancePct << "%)\n";
+	}
+	else
+	{
+		std::cout << "SIP abundance source: user-defined (" << fixedSipAbundancePct << "%)\n";
+	}
 
 	if (args.threads > 0)
 	{
@@ -753,7 +926,7 @@ int main(int argc, char **argv)
 	std::vector<PsmRow> rows;
 	try
 	{
-		rows = readInputRows(args.inputPath);
+		rows = readInputRows(args.inputPath, args.sipAbundanceMode == SipAbundanceMode::InputRow);
 	}
 	catch (const std::exception &ex)
 	{
@@ -777,7 +950,19 @@ int main(int argc, char **argv)
 	out << "# line5: fragment ion kinds (b or y)\n";
 	out << "# line6: fragment ion positions (1-based)\n";
 
-	const Isotopologue baseIso = ProNovoConfig::configIsotopologue;
+	Isotopologue baseIso = ProNovoConfig::configIsotopologue;
+	if (args.sipAbundanceMode == SipAbundanceMode::FixedUser)
+	{
+		try
+		{
+			setSipAbundance(baseIso, sipAtom, sipIsotopeIndex, fixedSipAbundancePct);
+		}
+		catch (const std::exception &ex)
+		{
+			std::cerr << "Failed to apply user-defined SIP abundance: " << ex.what() << "\n";
+			return 1;
+		}
+	}
 	std::vector<std::string> blocks(rows.size());
 	std::vector<char> ok(rows.size(), 0);
 	size_t written = 0;
@@ -791,7 +976,10 @@ int main(int argc, char **argv)
 			const auto &row = rows[static_cast<size_t>(i)];
 			try
 			{
-				setSipAbundance(localIso, sipAtom, sipIsotopeIndex, row.sipPct);
+				if (args.sipAbundanceMode == SipAbundanceMode::InputRow)
+				{
+					setSipAbundance(localIso, sipAtom, sipIsotopeIndex, row.sipPct);
+				}
 				std::vector<std::vector<double>> yMass, yProb, bMass, bProb;
 				if (!localIso.computeProductIon(row.peptide, yMass, yProb, bMass, bProb))
 				{
