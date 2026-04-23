@@ -31,11 +31,19 @@ class assembly:
         
     def combine_fasta_files(self, fastaPath: str, decoyPath: str) -> None:
         self.logger.info(f'Combining target and decoy fasta files to {self.targetDecoyPath}')
-        with open(fastaPath, 'r') as fasta, open(decoyPath, 'r') as decoy, open(self.targetDecoyPath, 'w') as output:
-            for line in fasta:
-                output.write(line)
-            for line in decoy:
-                output.write(line)
+        with open(self.targetDecoyPath, 'w') as output:
+            has_target_content = False
+            target_ends_with_newline = False
+            with open(fastaPath, 'r') as fasta:
+                for line in fasta:
+                    output.write(line)
+                    has_target_content = True
+                    target_ends_with_newline = line.endswith('\n')
+                if has_target_content and not target_ends_with_newline:
+                    output.write('\n')
+            with open(decoyPath, 'r') as decoy:
+                for line in decoy:
+                    output.write(line)
         
     def intergrate_filtered_psms_with_feature(self, baseName: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         self.logger.info(f'Intergrating filtered psms with feature for {baseName}')
