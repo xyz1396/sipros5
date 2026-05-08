@@ -169,13 +169,14 @@ std::vector<std::string> splitTab(const std::string &line)
 void printUsage(const char *prog)
 {
 	std::cerr << "Usage: " << prog
-			  << " -c <config.cfg> -i <psm.tsv|frag_dir> -f <ft2_file|sipros_dir> -o <output.txt>"
+			  << " -c <config.cfg> -i <psm.tsv|frag_dir> -f <ft2_file|sipros_dir> -o <output.txt|output_dir/>"
 			  << " [-a <SIP atom/isotope, e.g. C13,H2,O18,N15,S34>]"
 			  << " [-b <fixed SIP pct|lower-upper, default 1.0>] [-s|--step <pct, default 1.0>]"
 			  << " [-p <prob cutoff, default 0.01>]"
 			  << " [--ppm <match tolerance, default 10>] [--min-matched-envelopes <N, default 3>]"
 			  << " [--decoy] [--decoy-seed <N, default 1>] [-t <threads>]\n";
 	std::cerr << "FT2 matching is always performed at the baseline 1% C13 abundance; -b controls shifted output abundance(s).\n";
+	std::cerr << "When -o is a directory path or has no extension, output files are named spectra*.txt in that directory.\n";
 }
 
 bool parseSipAtomSpec(const std::string &spec, char &sipAtom, int &sipIsotopeMassNumber)
@@ -1926,25 +1927,50 @@ std::string formatAbundancePctForPath(double pct)
 	return ss.str();
 }
 
-fs::path outputPathForAbundance(const std::string &basePath, double pct, bool useSuffix)
+bool hasTrailingPathSeparator(const std::string &path)
 {
-	fs::path path(basePath);
-	if (!useSuffix)
-	{
-		return path;
-	}
+	return !path.empty() && (path.back() == '/' || path.back() == '\\');
+}
 
-	const std::string filename = path.stem().string() + "_" +
+fs::path resolveOutputBasePath(const std::string &outputPath)
+{
+	const fs::path path(outputPath);
+	if (hasTrailingPathSeparator(outputPath) ||
+		(fs::exists(path) && fs::is_directory(path)) ||
+		!path.has_extension())
+	{
+		return path / "spectra.txt";
+	}
+	return path;
+}
+
+std::string sipLabelForPath(char sipAtom, int sipIsotopeMassNumber)
+{
+	std::string label(1, sipAtom);
+	if (sipIsotopeMassNumber > 0)
+	{
+		label += std::to_string(sipIsotopeMassNumber);
+	}
+	return label;
+}
+
+fs::path outputPathForAbundance(const fs::path &basePath, const std::string &sipLabel, double pct)
+{
+	const std::string filename = basePath.stem().string() + "_" +
+								 sipLabel + "_" +
 								 formatAbundancePctForPath(pct) + "Pct" +
-								 path.extension().string();
-	const fs::path parent = path.parent_path();
+								 basePath.extension().string();
+	const fs::path parent = basePath.parent_path();
 	return parent.empty() ? fs::path(filename) : parent / filename;
 }
 
-fs::path decoyOutputPathForTarget(const fs::path &targetPath)
+fs::path decoyOutputPathForAbundance(const fs::path &basePath, const std::string &sipLabel, double pct)
 {
-	const std::string filename = targetPath.stem().string() + "_decoy" + targetPath.extension().string();
-	const fs::path parent = targetPath.parent_path();
+	const std::string filename = basePath.stem().string() + "_Decoy_" +
+								 sipLabel + "_" +
+								 formatAbundancePctForPath(pct) + "Pct" +
+								 basePath.extension().string();
+	const fs::path parent = basePath.parent_path();
 	return parent.empty() ? fs::path(filename) : parent / filename;
 }
 
@@ -1974,7 +2000,7 @@ void appendOutputHeader(std::ostream &out, double targetSipAbundancePct, char si
 	out << "\n";
 	out << "# Experimental matches are found once at baseline 1% C13; shifted experimental envelopes use baseline real apex intensities shaped by target theoretical distributions.\n";
 	out << "# Per PSM block format:\n";
-	out << "# > <PSM id>_<SIP pct>Pct <Retention> <Peptide>\n";
+	out << "# > <PSM id>_<SIP pct>Pct <Retention> <Charge> <Peptide>\n";
 	out << "# line1: precursor m/z values generated at target SIP abundance\n";
 	out << "# line2: precursor intensities normalized to max 1\n";
 	out << "# line3: fragment m/z values generated at target SIP abundance\n";
@@ -1996,7 +2022,7 @@ void appendDecoyOutputHeader(std::ostream &out, double targetSipAbundancePct, ch
 	out << "\n";
 	out << "# Decoy peptides are shuffled and randomly add or delete one amino acid; experimental envelope apex intensities are shuffled from target matches.\n";
 	out << "# Per PSM block format:\n";
-	out << "# > DECOY_<PSM id>_<SIP pct>Pct <Retention> <Decoy peptide>\n";
+	out << "# > DECOY_<PSM id>_<SIP pct>Pct <Retention> <Charge> <Decoy peptide>\n";
 	out << "# line1: decoy precursor m/z values generated at target SIP abundance\n";
 	out << "# line2: decoy precursor intensities normalized to max 1\n";
 	out << "# line3: decoy fragment m/z values generated at target SIP abundance\n";
@@ -2004,6 +2030,55 @@ void appendDecoyOutputHeader(std::ostream &out, double targetSipAbundancePct, ch
 	out << "# line5: decoy experimental fragment intensities normalized to max 1\n";
 	out << "# line6: decoy fragment ion kinds (b or y)\n";
 	out << "# line7: decoy fragment ion positions (1-based)\n";
+}
+
+size_t appendBufferedBlocks(std::string &buffer, const std::vector<std::string> &blocks, const std::vector<char> &ok)
+{
+	size_t written = 0;
+	size_t totalSize = buffer.size();
+	for (size_t i = 0; i < blocks.size() && i < ok.size(); ++i)
+	{
+		if (!ok[i])
+		{
+			continue;
+		}
+		totalSize += blocks[i].size();
+		++written;
+	}
+
+	buffer.reserve(totalSize);
+	for (size_t i = 0; i < blocks.size() && i < ok.size(); ++i)
+	{
+		if (ok[i])
+		{
+			buffer.append(blocks[i]);
+		}
+	}
+	return written;
+}
+
+bool writeBufferedFile(const fs::path &path, const std::string &buffer)
+{
+	try
+	{
+		const fs::path parent = path.parent_path();
+		if (!parent.empty())
+		{
+			fs::create_directories(parent);
+		}
+	}
+	catch (const std::exception &)
+	{
+		return false;
+	}
+
+	std::ofstream out(path);
+	if (!out)
+	{
+		return false;
+	}
+	out.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+	return static_cast<bool>(out);
 }
 } // namespace
 
@@ -2219,6 +2294,8 @@ int main(int argc, char **argv)
 		}
 	}
 
+	const fs::path outputBasePath = resolveOutputBasePath(args.outputPath);
+	const std::string outputSipLabel = sipLabelForPath(sipAtom, sipIsotopeMassNumber);
 	size_t outputFilesWritten = 0;
 	size_t decoyFilesWritten = 0;
 	for (double targetAbundancePct : targetAbundances)
@@ -2270,6 +2347,7 @@ int main(int argc, char **argv)
 				std::ostringstream ss;
 				ss << "> " << spectraHeaderId(row.psmId, targetAbundancePct, false)
 				   << ' ' << row.retentionText
+				   << ' ' << row.precursorCharge
 				   << ' ' << row.peptide << '\n';
 				appendPrecursorChargeLine(ss, precursorDist, row.precursorCharge, args.probCutoff);
 				if (!appendShiftedChargeOneFragmentBlock(ss, bMass, bProb, yMass, yProb,
@@ -2311,6 +2389,7 @@ int main(int argc, char **argv)
 					std::ostringstream decoySs;
 					decoySs << "> " << spectraHeaderId(row.psmId, targetAbundancePct, true)
 							 << ' ' << row.retentionText
+							 << ' ' << row.precursorCharge
 							 << ' ' << decoyPeptides[rowIndex] << '\n';
 					appendPrecursorChargeLine(decoySs, decoyPrecursorDist, row.precursorCharge, args.probCutoff);
 					if (!appendDecoyChargeOneFragmentBlock(decoySs, decoyBMass, decoyBProb,
@@ -2329,24 +2408,15 @@ int main(int argc, char **argv)
 			}
 		}
 
-		const fs::path outputPath = outputPathForAbundance(args.outputPath, targetAbundancePct, args.sipAbundanceRange);
-		std::ofstream out(outputPath);
-		if (!out)
+		const fs::path outputPath = outputPathForAbundance(outputBasePath, outputSipLabel, targetAbundancePct);
+		std::ostringstream outputHeader;
+		appendOutputHeader(outputHeader, targetAbundancePct, sipAtom, sipIsotopeMassNumber);
+		std::string outputBuffer = outputHeader.str();
+		const size_t written = appendBufferedBlocks(outputBuffer, blocks, targetOk);
+		if (!writeBufferedFile(outputPath, outputBuffer))
 		{
-			std::cerr << "Cannot open output file: " << outputPath << "\n";
+			std::cerr << "Cannot write output file: " << outputPath << "\n";
 			return 1;
-		}
-		appendOutputHeader(out, targetAbundancePct, sipAtom, sipIsotopeMassNumber);
-
-		size_t written = 0;
-		for (size_t i = 0; i < blocks.size(); ++i)
-		{
-			if (!targetOk[i])
-			{
-				continue;
-			}
-			out << blocks[i];
-			++written;
 		}
 
 		++outputFilesWritten;
@@ -2355,24 +2425,15 @@ int main(int argc, char **argv)
 
 		if (args.writeDecoy)
 		{
-			const fs::path decoyOutputPath = decoyOutputPathForTarget(outputPath);
-			std::ofstream decoyOut(decoyOutputPath);
-			if (!decoyOut)
+			const fs::path decoyOutputPath = decoyOutputPathForAbundance(outputBasePath, outputSipLabel, targetAbundancePct);
+			std::ostringstream decoyOutputHeader;
+			appendDecoyOutputHeader(decoyOutputHeader, targetAbundancePct, sipAtom, sipIsotopeMassNumber);
+			std::string decoyOutputBuffer = decoyOutputHeader.str();
+			const size_t decoyWritten = appendBufferedBlocks(decoyOutputBuffer, decoyBlocks, decoyOk);
+			if (!writeBufferedFile(decoyOutputPath, decoyOutputBuffer))
 			{
-				std::cerr << "Cannot open decoy output file: " << decoyOutputPath << "\n";
+				std::cerr << "Cannot write decoy output file: " << decoyOutputPath << "\n";
 				return 1;
-			}
-			appendDecoyOutputHeader(decoyOut, targetAbundancePct, sipAtom, sipIsotopeMassNumber);
-
-			size_t decoyWritten = 0;
-			for (size_t i = 0; i < decoyBlocks.size(); ++i)
-			{
-				if (!decoyOk[i])
-				{
-					continue;
-				}
-				decoyOut << decoyBlocks[i];
-				++decoyWritten;
 			}
 
 			++decoyFilesWritten;
