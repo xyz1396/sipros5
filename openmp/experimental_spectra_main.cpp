@@ -4,6 +4,9 @@
 #include <cmath>
 #include <clocale>
 #include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -20,8 +23,16 @@
 #include <utility>
 #include <vector>
 
+#include <H5Cpp.h>
 #include "averagine.h"
 #include "proNovoConfig.h"
+
+#if !defined(_WIN32)
+#include <cerrno>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -97,6 +108,92 @@ struct FragmentEntry
 	size_t position = 0;
 };
 
+struct SpectrumOutputRecord
+{
+	std::string psmId;
+	std::string retention;
+	int charge = 1;
+	std::string peptide;
+	std::vector<double> precursorMz;
+	std::vector<double> precursorIntensity;
+	std::vector<double> fragmentMz;
+	std::vector<double> theoreticalIntensity;
+	std::vector<double> experimentalIntensity;
+	std::vector<char> ionKinds;
+	std::vector<uint64_t> ionPositions;
+};
+
+struct Hdf5OutputData
+{
+	std::vector<std::string> psmIds;
+	std::vector<std::string> retentions;
+	std::vector<int> charges;
+	std::vector<std::string> peptides;
+	std::vector<double> precursorMz;
+	std::vector<double> precursorIntensity;
+	std::vector<uint64_t> precursorOffset;
+	std::vector<uint64_t> precursorCount;
+	std::vector<double> fragmentMz;
+	std::vector<double> theoreticalIntensity;
+	std::vector<double> experimentalIntensity;
+	std::vector<char> ionKind;
+	std::vector<uint64_t> ionPosition;
+	std::vector<uint64_t> fragmentOffset;
+	std::vector<uint64_t> fragmentCount;
+
+	void reserveRecords(size_t count)
+	{
+		psmIds.reserve(count);
+		retentions.reserve(count);
+		charges.reserve(count);
+		peptides.reserve(count);
+		precursorOffset.reserve(count);
+		precursorCount.reserve(count);
+		fragmentOffset.reserve(count);
+		fragmentCount.reserve(count);
+	}
+
+	size_t recordCount() const
+	{
+		return psmIds.size();
+	}
+};
+
+struct Hdf5OutputMetadata
+{
+	std::string recordKind;
+	double targetSipAbundancePct = 0.0;
+	char sipAtom = '\0';
+	int sipIsotopeMassNumber = -1;
+	double probCutoff = 0.0;
+	double ppmTolerance = 0.0;
+	uint64_t minMatchedEnvelopes = 0;
+};
+
+struct Ft2SampleTask
+{
+	std::string sample;
+	fs::path path;
+	std::unordered_set<int> requestedScans;
+	std::vector<size_t> rowIndices;
+};
+
+struct OutputFileJob
+{
+	fs::path path;
+	Hdf5OutputMetadata metadata;
+	bool decoy = false;
+	size_t written = 0;
+	bool success = false;
+	std::string error;
+};
+
+struct OutputJobStats
+{
+	uint64_t targetFailed = 0;
+	uint64_t decoyComputeFailed = 0;
+};
+
 struct MatchedEnvelopeSet
 {
 	std::vector<std::pair<char, size_t>> envelopeKeys;
@@ -169,14 +266,15 @@ std::vector<std::string> splitTab(const std::string &line)
 void printUsage(const char *prog)
 {
 	std::cerr << "Usage: " << prog
-			  << " -c <config.cfg> -i <psm.tsv|frag_dir> -f <ft2_file|sipros_dir> -o <output.txt|output_dir/>"
+			  << " -c <config.cfg> -i <psm.tsv|frag_dir> -f <ft2_file|sipros_dir> -o <output.h5|output_dir/>"
 			  << " [-a <SIP atom/isotope, e.g. C13,H2,O18,N15,S34>]"
 			  << " [-b <fixed SIP pct|lower-upper, default 1.0>] [-s|--step <pct, default 1.0>]"
 			  << " [-p <prob cutoff, default 0.01>]"
 			  << " [--ppm <match tolerance, default 10>] [--min-matched-envelopes <N, default 3>]"
 			  << " [--decoy] [--decoy-seed <N, default 1>] [-t <threads>]\n";
 	std::cerr << "FT2 matching is always performed at the baseline 1% C13 abundance; -b controls shifted output abundance(s).\n";
-	std::cerr << "When -o is a directory path or has no extension, output files are named spectra*.txt in that directory.\n";
+	std::cerr << "When one file is produced, -o is used as the output file and .h5 is appended if needed.\n";
+	std::cerr << "When multiple files are produced, -o is used as an output directory unless it already names one.\n";
 }
 
 bool parseSipAtomSpec(const std::string &spec, char &sipAtom, int &sipIsotopeMassNumber)
@@ -1135,30 +1233,45 @@ std::unordered_map<int, ObservedScan> readRequestedScans(const fs::path &ft2File
 	return scans;
 }
 
-std::unordered_map<std::string, std::unordered_map<int, ObservedScan>>
-loadRequestedFt2Scans(const std::vector<PsmRow> &rows,
-					  const std::unordered_map<std::string, fs::path> &ft2Files)
+std::vector<Ft2SampleTask> buildFt2SampleTasks(const std::vector<PsmRow> &rows,
+											   const std::unordered_map<std::string, fs::path> &ft2Files,
+											   ProcessingStats &processingStats)
 {
-	std::unordered_map<std::string, std::unordered_set<int>> requestedBySample;
-	for (const PsmRow &row : rows)
+	struct SampleRows
 	{
-		requestedBySample[row.sample].insert(row.scanNumber);
+		std::unordered_set<int> requestedScans;
+		std::vector<size_t> rowIndices;
+	};
+
+	std::map<std::string, SampleRows> groupedBySample;
+	for (size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
+	{
+		const PsmRow &row = rows[rowIndex];
+		SampleRows &group = groupedBySample[row.sample];
+		group.requestedScans.insert(row.scanNumber);
+		group.rowIndices.push_back(rowIndex);
 	}
 
-	std::unordered_map<std::string, std::unordered_map<int, ObservedScan>> scansBySample;
-	for (const auto &kv : requestedBySample)
+	std::vector<Ft2SampleTask> tasks;
+	tasks.reserve(groupedBySample.size());
+	for (auto &kv : groupedBySample)
 	{
-		const std::string &sample = kv.first;
-		const auto ft2It = ft2Files.find(sample);
+		const auto ft2It = ft2Files.find(kv.first);
 		if (ft2It == ft2Files.end())
 		{
-			std::cerr << "No FT2 file found for sample: " << sample << "\n";
+			std::cerr << "No FT2 file found for sample: " << kv.first << "\n";
+			processingStats.missingFt2.fetch_add(kv.second.rowIndices.size(), std::memory_order_relaxed);
 			continue;
 		}
-		std::cerr << "Reading " << kv.second.size() << " requested scans from " << ft2It->second << "\n";
-		scansBySample[sample] = readRequestedScans(ft2It->second, kv.second);
+
+		Ft2SampleTask task;
+		task.sample = kv.first;
+		task.path = ft2It->second;
+		task.requestedScans = std::move(kv.second.requestedScans);
+		task.rowIndices = std::move(kv.second.rowIndices);
+		tasks.push_back(std::move(task));
 	}
-	return scansBySample;
+	return tasks;
 }
 
 int atomIndex(char sipAtom)
@@ -1262,10 +1375,11 @@ void setSipAbundance(Isotopologue &iso, char sipAtom, int isotopeIndex, double s
 	refreshResidueDistributions(iso);
 }
 
-void appendPrecursorChargeLine(std::ostream &out,
-							   const IsotopeDistribution &dist,
+void buildPrecursorChargePeaks(const IsotopeDistribution &dist,
 							   int charge,
-							   double probCutoff)
+							   double probCutoff,
+							   std::vector<double> &mzs,
+							   std::vector<double> &intensities)
 {
 	const double proton = ProNovoConfig::getProtonMass();
 	std::vector<std::pair<double, double>> peaks;
@@ -1289,26 +1403,15 @@ void appendPrecursorChargeLine(std::ostream &out,
 		apexProbability = std::max(apexProbability, peak.second);
 	}
 
-	for (size_t i = 0; i < peaks.size(); ++i)
+	mzs.clear();
+	intensities.clear();
+	mzs.reserve(peaks.size());
+	intensities.reserve(peaks.size());
+	for (const auto &peak : peaks)
 	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << std::setprecision(10) << peaks[i].first;
+		mzs.push_back(peak.first);
+		intensities.push_back(apexProbability > 0.0 ? peak.second / apexProbability : peak.second);
 	}
-	out << '\n';
-
-	for (size_t i = 0; i < peaks.size(); ++i)
-	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		const double intensity = apexProbability > 0.0 ? peaks[i].second / apexProbability : peaks[i].second;
-		out << std::setprecision(10) << intensity;
-	}
-	out << '\n';
 }
 
 bool buildPrecursorDistributionFromProductIons(Isotopologue &iso,
@@ -1437,16 +1540,132 @@ bool collectMatchedEnvelopeApexIntensities(const std::vector<std::vector<double>
 	return true;
 }
 
-bool appendShiftedChargeOneFragmentBlock(std::ostream &out,
-										 const std::vector<std::vector<double>> &bMass,
-										 const std::vector<std::vector<double>> &bProb,
-										 const std::vector<std::vector<double>> &yMass,
-										 const std::vector<std::vector<double>> &yProb,
-										 const MatchedEnvelopeSet &matchedSet,
-										 double probCutoff)
+void matchBaselineInFt2Batches(const std::vector<PsmRow> &rows,
+							   const std::unordered_map<std::string, fs::path> &ft2Files,
+							   const Isotopologue &baselineIso,
+							   const Args &args,
+							   int effectiveThreads,
+							   std::vector<MatchedEnvelopeSet> &matchedEnvelopeSets,
+							   std::vector<char> &baselineOk,
+							   ProcessingStats &processingStats)
+{
+	const std::vector<Ft2SampleTask> tasks = buildFt2SampleTasks(rows, ft2Files, processingStats);
+	const size_t batchSize = static_cast<size_t>(std::max(1, effectiveThreads));
+
+	for (size_t batchStart = 0; batchStart < tasks.size(); batchStart += batchSize)
+	{
+		const size_t batchEnd = std::min(batchStart + batchSize, tasks.size());
+		const size_t batchCount = batchEnd - batchStart;
+		std::vector<std::unordered_map<int, ObservedScan>> loadedScans(batchCount);
+		std::vector<std::string> errors(batchCount);
+
+		{
+			std::cout << "Timing parallel region: load FT2 batch "
+					  << (batchStart / batchSize + 1) << " of "
+					  << ((tasks.size() + batchSize - 1) / batchSize)
+					  << " (" << batchCount << " FT2 files)" << std::endl;
+			CLOCKSTART;
+#pragma omp parallel for schedule(dynamic)
+			for (int i = 0; i < static_cast<int>(batchCount); ++i)
+			{
+				const size_t localTaskIndex = static_cast<size_t>(i);
+				const Ft2SampleTask &task = tasks[batchStart + localTaskIndex];
+#pragma omp critical(cerr_output)
+				{
+					std::cerr << "Reading " << task.requestedScans.size()
+							  << " requested scans from " << task.path << "\n";
+				}
+				try
+				{
+					loadedScans[localTaskIndex] = readRequestedScans(task.path, task.requestedScans);
+				}
+				catch (const std::exception &ex)
+				{
+					errors[localTaskIndex] = ex.what();
+				}
+			}
+			CLOCKSTOP;
+		}
+
+		for (const std::string &error : errors)
+		{
+			if (!error.empty())
+			{
+				throw std::runtime_error(error);
+			}
+		}
+
+		struct BatchRowRef
+		{
+			size_t localTaskIndex = 0;
+			size_t rowIndex = 0;
+		};
+
+		std::vector<BatchRowRef> batchRows;
+		for (size_t localTaskIndex = 0; localTaskIndex < batchCount; ++localTaskIndex)
+		{
+			const Ft2SampleTask &task = tasks[batchStart + localTaskIndex];
+			for (size_t rowIndex : task.rowIndices)
+			{
+				batchRows.push_back({localTaskIndex, rowIndex});
+			}
+		}
+
+		{
+			std::cout << "Timing parallel region: baseline match FT2 batch "
+					  << (batchStart / batchSize + 1) << " of "
+					  << ((tasks.size() + batchSize - 1) / batchSize)
+					  << " (" << batchRows.size() << " PSM rows)" << std::endl;
+			CLOCKSTART;
+#pragma omp parallel
+			{
+				Isotopologue localIso = baselineIso;
+#pragma omp for schedule(dynamic)
+				for (int i = 0; i < static_cast<int>(batchRows.size()); ++i)
+				{
+					const BatchRowRef &ref = batchRows[static_cast<size_t>(i)];
+					const PsmRow &row = rows[ref.rowIndex];
+					const auto scanIt = loadedScans[ref.localTaskIndex].find(row.scanNumber);
+					if (scanIt == loadedScans[ref.localTaskIndex].end())
+					{
+						++processingStats.missingScan;
+						continue;
+					}
+
+					std::vector<std::vector<double>> yMass, yProb, bMass, bProb;
+					if (!localIso.computeProductIon(row.peptide, yMass, yProb, bMass, bProb))
+					{
+						++processingStats.computeFailed;
+						continue;
+					}
+
+					if (!collectMatchedEnvelopeApexIntensities(bMass, bProb, yMass, yProb,
+															   scanIt->second, args.probCutoff, args.ppmTolerance,
+															   args.minMatchedEnvelopes,
+															   matchedEnvelopeSets[ref.rowIndex]))
+					{
+						++processingStats.unmatched;
+						continue;
+					}
+
+					baselineOk[ref.rowIndex] = 1;
+				}
+			}
+			CLOCKSTOP;
+		}
+	}
+}
+
+bool buildShiftedChargeOneFragmentEntries(const std::vector<std::vector<double>> &bMass,
+										  const std::vector<std::vector<double>> &bProb,
+										  const std::vector<std::vector<double>> &yMass,
+										  const std::vector<std::vector<double>> &yProb,
+										  const MatchedEnvelopeSet &matchedSet,
+										  double probCutoff,
+										  std::vector<FragmentEntry> &entries)
 {
 	const double proton = ProNovoConfig::getProtonMass();
-	std::vector<FragmentEntry> entries;
+	entries.clear();
 	entries.reserve(512);
 
 	const auto collect = [&](const std::vector<std::vector<double>> &masses,
@@ -1529,57 +1748,6 @@ bool appendShiftedChargeOneFragmentBlock(std::ostream &out,
 	std::sort(entries.begin(), entries.end(),
 			  [](const FragmentEntry &a, const FragmentEntry &b)
 			  { return a.mz < b.mz; });
-
-	for (size_t i = 0; i < entries.size(); ++i)
-	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << std::setprecision(10) << entries[i].mz;
-	}
-	out << '\n';
-
-	for (size_t i = 0; i < entries.size(); ++i)
-	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << std::setprecision(10) << entries[i].theoreticalIntensity;
-	}
-	out << '\n';
-
-	for (size_t i = 0; i < entries.size(); ++i)
-	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << std::setprecision(10) << entries[i].experimentalIntensity;
-	}
-	out << '\n';
-
-	for (size_t i = 0; i < entries.size(); ++i)
-	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << entries[i].ionKind;
-	}
-	out << '\n';
-
-	for (size_t i = 0; i < entries.size(); ++i)
-	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << entries[i].position;
-	}
-	out << '\n';
-
 	return true;
 }
 
@@ -1731,15 +1899,15 @@ bool generateDecoyPeptide(const std::string &targetPeptide,
 	return false;
 }
 
-bool appendDecoyChargeOneFragmentBlock(std::ostream &out,
-									   const std::vector<std::vector<double>> &bMass,
-									   const std::vector<std::vector<double>> &bProb,
-									   const std::vector<std::vector<double>> &yMass,
-									   const std::vector<std::vector<double>> &yProb,
-									   const std::vector<double> &shuffledApexIntensities,
-									   double meanApexIntensity,
-									   bool useOneMeanApex,
-									   double probCutoff)
+bool buildDecoyChargeOneFragmentEntries(const std::vector<std::vector<double>> &bMass,
+										const std::vector<std::vector<double>> &bProb,
+										const std::vector<std::vector<double>> &yMass,
+										const std::vector<std::vector<double>> &yProb,
+										const std::vector<double> &shuffledApexIntensities,
+										double meanApexIntensity,
+										bool useOneMeanApex,
+										double probCutoff,
+										std::vector<FragmentEntry> &entries)
 {
 	if (shuffledApexIntensities.empty() && (!useOneMeanApex || meanApexIntensity <= 0.0))
 	{
@@ -1747,7 +1915,7 @@ bool appendDecoyChargeOneFragmentBlock(std::ostream &out,
 	}
 
 	const double proton = ProNovoConfig::getProtonMass();
-	std::vector<FragmentEntry> entries;
+	entries.clear();
 	entries.reserve(512);
 	size_t nextEnvelopeIndex = 0;
 	bool meanApexUsed = false;
@@ -1843,57 +2011,6 @@ bool appendDecoyChargeOneFragmentBlock(std::ostream &out,
 	std::sort(entries.begin(), entries.end(),
 			  [](const FragmentEntry &a, const FragmentEntry &b)
 			  { return a.mz < b.mz; });
-
-	for (size_t i = 0; i < entries.size(); ++i)
-	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << std::setprecision(10) << entries[i].mz;
-	}
-	out << '\n';
-
-	for (size_t i = 0; i < entries.size(); ++i)
-	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << std::setprecision(10) << entries[i].theoreticalIntensity;
-	}
-	out << '\n';
-
-	for (size_t i = 0; i < entries.size(); ++i)
-	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << std::setprecision(10) << entries[i].experimentalIntensity;
-	}
-	out << '\n';
-
-	for (size_t i = 0; i < entries.size(); ++i)
-	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << entries[i].ionKind;
-	}
-	out << '\n';
-
-	for (size_t i = 0; i < entries.size(); ++i)
-	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << entries[i].position;
-	}
-	out << '\n';
-
 	return true;
 }
 
@@ -1932,16 +2049,38 @@ bool hasTrailingPathSeparator(const std::string &path)
 	return !path.empty() && (path.back() == '/' || path.back() == '\\');
 }
 
-fs::path resolveOutputBasePath(const std::string &outputPath)
+fs::path appendHdf5ExtensionIfNeeded(const fs::path &path)
+{
+	if (toLower(path.extension().string()) == ".h5")
+	{
+		return path;
+	}
+	fs::path hdf5Path = path;
+	hdf5Path += ".h5";
+	return hdf5Path;
+}
+
+fs::path resolveOutputBasePath(const std::string &outputPath, bool multipleOutputFiles)
 {
 	const fs::path path(outputPath);
 	if (hasTrailingPathSeparator(outputPath) ||
-		(fs::exists(path) && fs::is_directory(path)) ||
-		!path.has_extension())
+		(fs::exists(path) && fs::is_directory(path)))
 	{
-		return path / "spectra.txt";
+		return path / "spectra.h5";
 	}
-	return path;
+
+	const fs::path hdf5Path = appendHdf5ExtensionIfNeeded(path);
+	if (!multipleOutputFiles)
+	{
+		return hdf5Path;
+	}
+
+	if (toLower(path.extension().string()) == ".h5")
+	{
+		throw std::runtime_error("Multiple output files requested, but -o names a single .h5 file. Use an output directory path, for example -o out or -o out/.");
+	}
+
+	return path / "spectra.h5";
 }
 
 std::string sipLabelForPath(char sipAtom, int sipIsotopeMassNumber)
@@ -1988,76 +2127,231 @@ std::string spectraHeaderId(const std::string &psmId, double targetSipAbundanceP
 	return id;
 }
 
-void appendOutputHeader(std::ostream &out, double targetSipAbundancePct, char sipAtom, int sipIsotopeMassNumber)
+void copyFragmentEntriesToRecord(const std::vector<FragmentEntry> &entries, SpectrumOutputRecord &record)
 {
-	out << "# Matched experimental fragment spectra with shifted theoretical precursor peaks\n";
-	out << "# Target SIP abundance: " << std::setprecision(10) << targetSipAbundancePct << "% ";
-	out << sipAtom;
-	if (sipIsotopeMassNumber > 0)
+	record.fragmentMz.clear();
+	record.theoreticalIntensity.clear();
+	record.experimentalIntensity.clear();
+	record.ionKinds.clear();
+	record.ionPositions.clear();
+	record.fragmentMz.reserve(entries.size());
+	record.theoreticalIntensity.reserve(entries.size());
+	record.experimentalIntensity.reserve(entries.size());
+	record.ionKinds.reserve(entries.size());
+	record.ionPositions.reserve(entries.size());
+	for (const FragmentEntry &entry : entries)
 	{
-		out << sipIsotopeMassNumber;
+		record.fragmentMz.push_back(entry.mz);
+		record.theoreticalIntensity.push_back(entry.theoreticalIntensity);
+		record.experimentalIntensity.push_back(entry.experimentalIntensity);
+		record.ionKinds.push_back(entry.ionKind);
+		record.ionPositions.push_back(static_cast<uint64_t>(entry.position));
 	}
-	out << "\n";
-	out << "# Experimental matches are found once at baseline 1% C13; shifted experimental envelopes use baseline real apex intensities shaped by target theoretical distributions.\n";
-	out << "# Per PSM block format:\n";
-	out << "# > <PSM id>_<SIP pct>Pct <Retention> <Charge> <Peptide>\n";
-	out << "# line1: precursor m/z values generated at target SIP abundance\n";
-	out << "# line2: precursor intensities normalized to max 1\n";
-	out << "# line3: fragment m/z values generated at target SIP abundance\n";
-	out << "# line4: theoretical fragment intensities normalized per envelope to max 1\n";
-	out << "# line5: matched experimental fragment intensities normalized to max 1; unmatched envelopes are 0\n";
-	out << "# line6: fragment ion kinds (b or y)\n";
-	out << "# line7: fragment ion positions (1-based)\n";
 }
 
-void appendDecoyOutputHeader(std::ostream &out, double targetSipAbundancePct, char sipAtom, int sipIsotopeMassNumber)
+H5::DataSpace createDataspace(size_t count)
 {
-	out << "# Decoy matched experimental fragment spectra with shifted theoretical precursor peaks\n";
-	out << "# Target SIP abundance: " << std::setprecision(10) << targetSipAbundancePct << "% ";
-	out << sipAtom;
-	if (sipIsotopeMassNumber > 0)
-	{
-		out << sipIsotopeMassNumber;
-	}
-	out << "\n";
-	out << "# Decoy peptides are shuffled and randomly add or delete one amino acid; experimental envelope apex intensities are shuffled from target matches.\n";
-	out << "# Per PSM block format:\n";
-	out << "# > DECOY_<PSM id>_<SIP pct>Pct <Retention> <Charge> <Decoy peptide>\n";
-	out << "# line1: decoy precursor m/z values generated at target SIP abundance\n";
-	out << "# line2: decoy precursor intensities normalized to max 1\n";
-	out << "# line3: decoy fragment m/z values generated at target SIP abundance\n";
-	out << "# line4: decoy theoretical fragment intensities normalized per envelope to max 1\n";
-	out << "# line5: decoy experimental fragment intensities normalized to max 1\n";
-	out << "# line6: decoy fragment ion kinds (b or y)\n";
-	out << "# line7: decoy fragment ion positions (1-based)\n";
+	const hsize_t dim = static_cast<hsize_t>(count);
+	return H5::DataSpace(1, &dim);
 }
 
-size_t appendBufferedBlocks(std::string &buffer, const std::vector<std::string> &blocks, const std::vector<char> &ok)
+H5::DataSpace createScalarDataspace()
 {
-	size_t written = 0;
-	size_t totalSize = buffer.size();
-	for (size_t i = 0; i < blocks.size() && i < ok.size(); ++i)
+	return H5::DataSpace(H5S_SCALAR);
+}
+
+H5::DSetCreatPropList createCompressedDatasetProperties(size_t count, size_t chunkSize)
+{
+	H5::DSetCreatPropList plist;
+	if (count > 0)
+	{
+		const hsize_t chunk = static_cast<hsize_t>(std::min(count, chunkSize));
+		plist.setChunk(1, &chunk);
+		plist.setShuffle();
+		plist.setDeflate(6);
+	}
+	return plist;
+}
+
+template <typename T>
+void writeVectorDataset(const H5::Group &group,
+						const char *name,
+						const H5::DataType &type,
+						const std::vector<T> &values,
+						bool compress = false,
+						size_t chunkSize = 262144)
+{
+	H5::DataSpace space = createDataspace(values.size());
+	H5::DataSet dataset = compress && !values.empty()
+							  ? group.createDataSet(name, type, space, createCompressedDatasetProperties(values.size(), chunkSize))
+							  : group.createDataSet(name, type, space);
+	if (!values.empty())
+	{
+		dataset.write(values.data(), type);
+	}
+}
+
+void writeStringDataset(const H5::Group &group,
+						const char *name,
+						const std::vector<std::string> &values,
+						bool compress = false,
+						size_t chunkSize = 262144)
+{
+	size_t width = 1;
+	for (const std::string &value : values)
+	{
+		width = std::max(width, value.size() + 1);
+	}
+
+	H5::StrType type(H5::PredType::C_S1, width);
+	type.setStrpad(H5T_STR_NULLTERM);
+	type.setCset(H5T_CSET_UTF8);
+
+	std::vector<char> flat(values.size() * width, '\0');
+	for (size_t i = 0; i < values.size(); ++i)
+	{
+		std::memcpy(flat.data() + i * width, values[i].c_str(), std::min(values[i].size(), width - 1));
+	}
+
+	H5::DataSpace space = createDataspace(values.size());
+	H5::DataSet dataset = compress && !values.empty()
+							  ? group.createDataSet(name, type, space, createCompressedDatasetProperties(values.size(), chunkSize))
+							  : group.createDataSet(name, type, space);
+	if (!values.empty())
+	{
+		dataset.write(flat.data(), type);
+	}
+}
+
+void writeStringAttribute(const H5::H5Object &object, const char *name, const std::string &value)
+{
+	H5::StrType type(H5::PredType::C_S1, std::max<size_t>(1, value.size() + 1));
+	type.setStrpad(H5T_STR_NULLTERM);
+	type.setCset(H5T_CSET_UTF8);
+	H5::DataSpace space = createScalarDataspace();
+	H5::Attribute attr = object.createAttribute(name, type, space);
+	attr.write(type, value.c_str());
+}
+
+void writeIntAttribute(const H5::H5Object &object, const char *name, int value)
+{
+	H5::DataSpace space = createScalarDataspace();
+	H5::Attribute attr = object.createAttribute(name, H5::PredType::NATIVE_INT, space);
+	attr.write(H5::PredType::NATIVE_INT, &value);
+}
+
+void writeUInt64Attribute(const H5::H5Object &object, const char *name, uint64_t value)
+{
+	H5::DataSpace space = createScalarDataspace();
+	H5::Attribute attr = object.createAttribute(name, H5::PredType::NATIVE_UINT64, space);
+	attr.write(H5::PredType::NATIVE_UINT64, &value);
+}
+
+void writeDoubleAttribute(const H5::H5Object &object, const char *name, double value)
+{
+	H5::DataSpace space = createScalarDataspace();
+	H5::Attribute attr = object.createAttribute(name, H5::PredType::NATIVE_DOUBLE, space);
+	attr.write(H5::PredType::NATIVE_DOUBLE, &value);
+}
+
+void writeSpectraAttributes(const H5::H5Object &file, const Hdf5OutputMetadata &metadata)
+{
+	writeIntAttribute(file, "format_version", 1);
+	writeStringAttribute(file, "record_kind", metadata.recordKind);
+	writeDoubleAttribute(file, "target_sip_abundance_pct", metadata.targetSipAbundancePct);
+	writeStringAttribute(file, "sip_atom", std::string(1, metadata.sipAtom));
+	writeIntAttribute(file, "sip_isotope_mass_number", metadata.sipIsotopeMassNumber);
+	writeDoubleAttribute(file, "prob_cutoff", metadata.probCutoff);
+	writeDoubleAttribute(file, "ppm_tolerance", metadata.ppmTolerance);
+	writeUInt64Attribute(file, "min_matched_envelopes", metadata.minMatchedEnvelopes);
+}
+
+Hdf5OutputData buildOutputDataFromRecords(const std::vector<SpectrumOutputRecord> &records,
+										  const std::vector<char> &ok)
+{
+	Hdf5OutputData output;
+	const size_t n = std::min(records.size(), ok.size());
+	constexpr size_t invalidIndex = std::numeric_limits<size_t>::max();
+	std::vector<size_t> recordIndex(n, invalidIndex);
+	std::vector<size_t> precursorOffsetByRow(n, 0);
+	std::vector<size_t> fragmentOffsetByRow(n, 0);
+
+	size_t recordCount = 0;
+	size_t precursorValueCount = 0;
+	size_t fragmentValueCount = 0;
+	for (size_t i = 0; i < n; ++i)
 	{
 		if (!ok[i])
 		{
 			continue;
 		}
-		totalSize += blocks[i].size();
-		++written;
+		recordIndex[i] = recordCount++;
+		precursorOffsetByRow[i] = precursorValueCount;
+		fragmentOffsetByRow[i] = fragmentValueCount;
+		precursorValueCount += records[i].precursorMz.size();
+		fragmentValueCount += records[i].fragmentMz.size();
 	}
 
-	buffer.reserve(totalSize);
-	for (size_t i = 0; i < blocks.size() && i < ok.size(); ++i)
+	output.psmIds.resize(recordCount);
+	output.retentions.resize(recordCount);
+	output.charges.resize(recordCount);
+	output.peptides.resize(recordCount);
+	output.precursorOffset.resize(recordCount);
+	output.precursorCount.resize(recordCount);
+	output.fragmentOffset.resize(recordCount);
+	output.fragmentCount.resize(recordCount);
+	output.precursorMz.resize(precursorValueCount);
+	output.precursorIntensity.resize(precursorValueCount);
+	output.fragmentMz.resize(fragmentValueCount);
+	output.theoreticalIntensity.resize(fragmentValueCount);
+	output.experimentalIntensity.resize(fragmentValueCount);
+	output.ionKind.resize(fragmentValueCount);
+	output.ionPosition.resize(fragmentValueCount);
+
+	for (int i = 0; i < static_cast<int>(n); ++i)
 	{
-		if (ok[i])
+		const size_t rowIndex = static_cast<size_t>(i);
+		const size_t outIndex = recordIndex[rowIndex];
+		if (outIndex == invalidIndex)
 		{
-			buffer.append(blocks[i]);
+			continue;
 		}
+
+		const SpectrumOutputRecord &record = records[rowIndex];
+		const size_t precursorOffset = precursorOffsetByRow[rowIndex];
+		const size_t fragmentOffset = fragmentOffsetByRow[rowIndex];
+
+		output.psmIds[outIndex] = record.psmId;
+		output.retentions[outIndex] = record.retention;
+		output.charges[outIndex] = record.charge;
+		output.peptides[outIndex] = record.peptide;
+		output.precursorOffset[outIndex] = static_cast<uint64_t>(precursorOffset);
+		output.precursorCount[outIndex] = static_cast<uint64_t>(record.precursorMz.size());
+		output.fragmentOffset[outIndex] = static_cast<uint64_t>(fragmentOffset);
+		output.fragmentCount[outIndex] = static_cast<uint64_t>(record.fragmentMz.size());
+
+		std::copy(record.precursorMz.begin(), record.precursorMz.end(),
+				  output.precursorMz.begin() + static_cast<std::ptrdiff_t>(precursorOffset));
+		std::copy(record.precursorIntensity.begin(), record.precursorIntensity.end(),
+				  output.precursorIntensity.begin() + static_cast<std::ptrdiff_t>(precursorOffset));
+		std::copy(record.fragmentMz.begin(), record.fragmentMz.end(),
+				  output.fragmentMz.begin() + static_cast<std::ptrdiff_t>(fragmentOffset));
+		std::copy(record.theoreticalIntensity.begin(), record.theoreticalIntensity.end(),
+				  output.theoreticalIntensity.begin() + static_cast<std::ptrdiff_t>(fragmentOffset));
+		std::copy(record.experimentalIntensity.begin(), record.experimentalIntensity.end(),
+				  output.experimentalIntensity.begin() + static_cast<std::ptrdiff_t>(fragmentOffset));
+		std::copy(record.ionKinds.begin(), record.ionKinds.end(),
+				  output.ionKind.begin() + static_cast<std::ptrdiff_t>(fragmentOffset));
+		std::copy(record.ionPositions.begin(), record.ionPositions.end(),
+				  output.ionPosition.begin() + static_cast<std::ptrdiff_t>(fragmentOffset));
 	}
-	return written;
+
+	return output;
 }
 
-bool writeBufferedFile(const fs::path &path, const std::string &buffer)
+bool writeSpectraHdf5File(const fs::path &path,
+						  const Hdf5OutputData &data,
+						  const Hdf5OutputMetadata &metadata)
 {
 	try
 	{
@@ -2066,20 +2360,470 @@ bool writeBufferedFile(const fs::path &path, const std::string &buffer)
 		{
 			fs::create_directories(parent);
 		}
+
+		H5::H5File file(path.string(), H5F_ACC_TRUNC);
+		writeSpectraAttributes(file, metadata);
+
+		H5::Group recordsGroup = file.createGroup("records");
+		H5::Group precursorGroup = file.createGroup("precursor");
+		H5::Group fragmentsGroup = file.createGroup("fragments");
+
+		writeStringDataset(recordsGroup, "psm_id", data.psmIds, true);
+		writeStringDataset(recordsGroup, "retention", data.retentions, true);
+		writeVectorDataset(recordsGroup, "charge", H5::PredType::NATIVE_INT, data.charges, true);
+		writeStringDataset(recordsGroup, "peptide", data.peptides, true);
+
+		writeVectorDataset(precursorGroup, "mz", H5::PredType::NATIVE_DOUBLE, data.precursorMz, true);
+		writeVectorDataset(precursorGroup, "intensity", H5::PredType::NATIVE_DOUBLE, data.precursorIntensity, true);
+		writeVectorDataset(precursorGroup, "offset", H5::PredType::NATIVE_UINT64, data.precursorOffset, true);
+		writeVectorDataset(precursorGroup, "count", H5::PredType::NATIVE_UINT64, data.precursorCount, true);
+
+		writeVectorDataset(fragmentsGroup, "mz", H5::PredType::NATIVE_DOUBLE, data.fragmentMz, true);
+		writeVectorDataset(fragmentsGroup, "theoretical_intensity", H5::PredType::NATIVE_DOUBLE, data.theoreticalIntensity, true);
+		writeVectorDataset(fragmentsGroup, "experimental_intensity", H5::PredType::NATIVE_DOUBLE, data.experimentalIntensity, true);
+		writeVectorDataset(fragmentsGroup, "ion_kind", H5::PredType::NATIVE_CHAR, data.ionKind, true);
+		writeVectorDataset(fragmentsGroup, "ion_position", H5::PredType::NATIVE_UINT64, data.ionPosition, true);
+		writeVectorDataset(fragmentsGroup, "offset", H5::PredType::NATIVE_UINT64, data.fragmentOffset, true);
+		writeVectorDataset(fragmentsGroup, "count", H5::PredType::NATIVE_UINT64, data.fragmentCount, true);
+
+		file.close();
+		return true;
 	}
-	catch (const std::exception &)
+	catch (const H5::Exception &ex)
 	{
+		std::cerr << ex.getDetailMsg() << "\n";
 		return false;
+	}
+	catch (const std::exception &ex)
+	{
+		std::cerr << ex.what() << "\n";
+		return false;
+	}
+}
+
+bool writeGeneratedSpectraFile(const fs::path &path,
+							   const std::vector<SpectrumOutputRecord> &records,
+							   const std::vector<char> &ok,
+							   const Hdf5OutputMetadata &metadata,
+							   size_t &written)
+{
+	Hdf5OutputData data = buildOutputDataFromRecords(records, ok);
+	written = data.recordCount();
+	return writeSpectraHdf5File(path, data, metadata);
+}
+
+void addOutputJobStats(ProcessingStats &processingStats, const OutputJobStats &jobStats)
+{
+	processingStats.targetFailed.fetch_add(static_cast<size_t>(jobStats.targetFailed), std::memory_order_relaxed);
+	processingStats.decoyComputeFailed.fetch_add(static_cast<size_t>(jobStats.decoyComputeFailed), std::memory_order_relaxed);
+}
+
+bool generateAndWriteOutputFileJob(OutputFileJob &job,
+								   const std::vector<PsmRow> &rows,
+								   const std::vector<char> &baselineOk,
+								   const std::vector<MatchedEnvelopeSet> &matchedEnvelopeSets,
+								   const std::vector<std::string> &decoyPeptides,
+								   const std::vector<char> &decoyAddedResidues,
+								   const Isotopologue &pristineIso,
+								   const Args &args,
+								   char sipAtom,
+								   int targetSipIsotopeIndex,
+								   OutputJobStats &jobStats)
+{
+	try
+	{
+		Isotopologue localIso = pristineIso;
+		setSipAbundance(localIso, sipAtom, targetSipIsotopeIndex, job.metadata.targetSipAbundancePct);
+
+		std::vector<SpectrumOutputRecord> records(rows.size());
+		std::vector<char> ok(rows.size(), 0);
+
+		for (size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
+		{
+			if (!baselineOk[rowIndex])
+			{
+				continue;
+			}
+
+			const PsmRow &row = rows[rowIndex];
+			if (!job.decoy)
+			{
+				std::vector<std::vector<double>> yMass, yProb, bMass, bProb;
+				if (!localIso.computeProductIon(row.peptide, yMass, yProb, bMass, bProb))
+				{
+					++jobStats.targetFailed;
+					continue;
+				}
+
+				IsotopeDistribution precursorDist;
+				if (!buildPrecursorDistributionFromProductIons(localIso, yMass, yProb, bMass, bProb, precursorDist))
+				{
+					++jobStats.targetFailed;
+					continue;
+				}
+
+				SpectrumOutputRecord record;
+				record.psmId = spectraHeaderId(row.psmId, job.metadata.targetSipAbundancePct, false);
+				record.retention = row.retentionText;
+				record.charge = row.precursorCharge;
+				record.peptide = row.peptide;
+				buildPrecursorChargePeaks(precursorDist, row.precursorCharge, args.probCutoff,
+										  record.precursorMz, record.precursorIntensity);
+
+				std::vector<FragmentEntry> entries;
+				if (!buildShiftedChargeOneFragmentEntries(bMass, bProb, yMass, yProb,
+														  matchedEnvelopeSets[rowIndex], args.probCutoff,
+														  entries))
+				{
+					++jobStats.targetFailed;
+					continue;
+				}
+
+				copyFragmentEntriesToRecord(entries, record);
+				records[rowIndex] = std::move(record);
+				ok[rowIndex] = 1;
+				continue;
+			}
+
+			if (decoyPeptides[rowIndex].empty())
+			{
+				continue;
+			}
+
+			const std::vector<double> apexPool =
+				shuffledApexIntensityPool(matchedEnvelopeSets[rowIndex], args.decoySeed, rowIndex);
+			const double meanApex = meanIntensity(apexPool);
+			if (apexPool.empty() || meanApex <= 0.0)
+			{
+				++jobStats.decoyComputeFailed;
+				continue;
+			}
+
+			std::vector<std::vector<double>> decoyYMass, decoyYProb, decoyBMass, decoyBProb;
+			if (!localIso.computeProductIon(decoyPeptides[rowIndex], decoyYMass, decoyYProb, decoyBMass, decoyBProb))
+			{
+				++jobStats.decoyComputeFailed;
+				continue;
+			}
+
+			IsotopeDistribution decoyPrecursorDist;
+			if (!buildPrecursorDistributionFromProductIons(localIso, decoyYMass, decoyYProb,
+															decoyBMass, decoyBProb, decoyPrecursorDist))
+			{
+				++jobStats.decoyComputeFailed;
+				continue;
+			}
+
+			SpectrumOutputRecord decoyRecord;
+			decoyRecord.psmId = spectraHeaderId(row.psmId, job.metadata.targetSipAbundancePct, true);
+			decoyRecord.retention = row.retentionText;
+			decoyRecord.charge = row.precursorCharge;
+			decoyRecord.peptide = decoyPeptides[rowIndex];
+			buildPrecursorChargePeaks(decoyPrecursorDist, row.precursorCharge, args.probCutoff,
+									  decoyRecord.precursorMz, decoyRecord.precursorIntensity);
+
+			std::vector<FragmentEntry> decoyEntries;
+			if (!buildDecoyChargeOneFragmentEntries(decoyBMass, decoyBProb,
+													decoyYMass, decoyYProb,
+													apexPool, meanApex,
+													decoyAddedResidues[rowIndex] != 0,
+													args.probCutoff,
+													decoyEntries))
+			{
+				++jobStats.decoyComputeFailed;
+				continue;
+			}
+
+			copyFragmentEntriesToRecord(decoyEntries, decoyRecord);
+			records[rowIndex] = std::move(decoyRecord);
+			ok[rowIndex] = 1;
+		}
+
+		job.success = writeGeneratedSpectraFile(job.path, records, ok, job.metadata, job.written);
+		return job.success;
+	}
+	catch (const std::exception &ex)
+	{
+		job.error = ex.what();
+		job.success = false;
+		return false;
+	}
+}
+
+#if !defined(_WIN32)
+struct OutputJobChildMessage
+{
+	uint64_t written = 0;
+	uint64_t targetFailed = 0;
+	uint64_t decoyComputeFailed = 0;
+	uint8_t success = 0;
+	char error[512] = {0};
+};
+
+struct ActiveOutputChild
+{
+	pid_t pid = -1;
+	int readFd = -1;
+	size_t jobIndex = 0;
+};
+
+bool writeAllToFd(int fd, const void *buffer, size_t size)
+{
+	const char *cursor = static_cast<const char *>(buffer);
+	size_t remaining = size;
+	while (remaining > 0)
+	{
+		const ssize_t written = ::write(fd, cursor, remaining);
+		if (written < 0)
+		{
+			if (errno == EINTR)
+			{
+				continue;
+			}
+			return false;
+		}
+		if (written == 0)
+		{
+			return false;
+		}
+		cursor += written;
+		remaining -= static_cast<size_t>(written);
+	}
+	return true;
+}
+
+bool readAllFromFd(int fd, void *buffer, size_t size)
+{
+	char *cursor = static_cast<char *>(buffer);
+	size_t remaining = size;
+	while (remaining > 0)
+	{
+		const ssize_t bytesRead = ::read(fd, cursor, remaining);
+		if (bytesRead < 0)
+		{
+			if (errno == EINTR)
+			{
+				continue;
+			}
+			return false;
+		}
+		if (bytesRead == 0)
+		{
+			return false;
+		}
+		cursor += bytesRead;
+		remaining -= static_cast<size_t>(bytesRead);
+	}
+	return true;
+}
+
+void closeFdIfOpen(int &fd)
+{
+	if (fd >= 0)
+	{
+		::close(fd);
+		fd = -1;
+	}
+}
+
+OutputJobChildMessage makeOutputJobChildMessage(const OutputFileJob &job,
+												const OutputJobStats &jobStats)
+{
+	OutputJobChildMessage message;
+	message.written = static_cast<uint64_t>(job.written);
+	message.targetFailed = jobStats.targetFailed;
+	message.decoyComputeFailed = jobStats.decoyComputeFailed;
+	message.success = job.success ? 1 : 0;
+	const std::string error = job.error.empty() && !job.success ? "child writer failed" : job.error;
+	if (!error.empty())
+	{
+		std::strncpy(message.error, error.c_str(), sizeof(message.error) - 1);
+		message.error[sizeof(message.error) - 1] = '\0';
+	}
+	return message;
+}
+
+void applyOutputJobChildMessage(OutputFileJob &job,
+								const OutputJobChildMessage &message,
+								int childStatus,
+								bool messageRead,
+								ProcessingStats &processingStats)
+{
+	if (messageRead)
+	{
+		job.written = static_cast<size_t>(message.written);
+		job.success = message.success != 0 && WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0;
+		job.error = message.error;
+		OutputJobStats jobStats;
+		jobStats.targetFailed = message.targetFailed;
+		jobStats.decoyComputeFailed = message.decoyComputeFailed;
+		addOutputJobStats(processingStats, jobStats);
+	}
+	else
+	{
+		job.success = false;
+		job.error = "failed to read child writer result";
 	}
 
-	std::ofstream out(path);
-	if (!out)
+	if (!WIFEXITED(childStatus))
 	{
-		return false;
+		job.success = false;
+		job.error = "child writer process did not exit normally";
 	}
-	out.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-	return static_cast<bool>(out);
+	else if (WEXITSTATUS(childStatus) != 0 && job.error.empty())
+	{
+		job.success = false;
+		job.error = "child writer process exited with status " + std::to_string(WEXITSTATUS(childStatus));
+	}
 }
+
+bool waitForOneOutputChild(std::vector<ActiveOutputChild> &activeChildren,
+						   std::vector<OutputFileJob> &outputJobs,
+						   ProcessingStats &processingStats)
+{
+	while (true)
+	{
+		int status = 0;
+		const pid_t pid = ::waitpid(-1, &status, 0);
+		if (pid < 0)
+		{
+			if (errno == EINTR)
+			{
+				continue;
+			}
+			std::cerr << "waitpid failed while waiting for output writer process: "
+					  << std::strerror(errno) << "\n";
+			return false;
+		}
+
+		const auto childIt = std::find_if(activeChildren.begin(), activeChildren.end(),
+										  [pid](const ActiveOutputChild &child)
+										  { return child.pid == pid; });
+		if (childIt == activeChildren.end())
+		{
+			continue;
+		}
+
+		OutputJobChildMessage message;
+		const bool messageRead = readAllFromFd(childIt->readFd, &message, sizeof(message));
+		closeFdIfOpen(childIt->readFd);
+		applyOutputJobChildMessage(outputJobs[childIt->jobIndex], message, status,
+								   messageRead, processingStats);
+		activeChildren.erase(childIt);
+		return true;
+	}
+}
+
+bool runOutputJobsWithFork(std::vector<OutputFileJob> &outputJobs,
+						   const std::vector<PsmRow> &rows,
+						   const std::vector<char> &baselineOk,
+						   const std::vector<MatchedEnvelopeSet> &matchedEnvelopeSets,
+						   const std::vector<std::string> &decoyPeptides,
+						   const std::vector<char> &decoyAddedResidues,
+						   const Isotopologue &pristineIso,
+						   const Args &args,
+						   char sipAtom,
+						   int targetSipIsotopeIndex,
+						   int effectiveThreads,
+						   ProcessingStats &processingStats)
+{
+	const size_t processLimit = static_cast<size_t>(std::max(1, effectiveThreads));
+	std::vector<ActiveOutputChild> activeChildren;
+	activeChildren.reserve(processLimit);
+
+	for (size_t jobIndex = 0; jobIndex < outputJobs.size(); ++jobIndex)
+	{
+		while (activeChildren.size() >= processLimit)
+		{
+			if (!waitForOneOutputChild(activeChildren, outputJobs, processingStats))
+			{
+				return false;
+			}
+		}
+
+		int pipeFd[2] = {-1, -1};
+		if (::pipe(pipeFd) != 0)
+		{
+			std::cerr << "Cannot create output writer pipe: " << std::strerror(errno) << "\n";
+			return false;
+		}
+
+		std::cout.flush();
+		std::cerr.flush();
+		const pid_t pid = ::fork();
+		if (pid < 0)
+		{
+			closeFdIfOpen(pipeFd[0]);
+			closeFdIfOpen(pipeFd[1]);
+			std::cerr << "Cannot fork output writer process: " << std::strerror(errno) << "\n";
+			return false;
+		}
+
+		if (pid == 0)
+		{
+			closeFdIfOpen(pipeFd[0]);
+			omp_set_num_threads(1);
+			OutputJobStats childStats;
+			generateAndWriteOutputFileJob(outputJobs[jobIndex], rows, baselineOk, matchedEnvelopeSets,
+										  decoyPeptides, decoyAddedResidues, pristineIso,
+										  args, sipAtom, targetSipIsotopeIndex, childStats);
+			const OutputJobChildMessage message =
+				makeOutputJobChildMessage(outputJobs[jobIndex], childStats);
+			const bool wroteMessage = writeAllToFd(pipeFd[1], &message, sizeof(message));
+			closeFdIfOpen(pipeFd[1]);
+			std::_Exit(outputJobs[jobIndex].success && wroteMessage ? 0 : 1);
+		}
+
+		closeFdIfOpen(pipeFd[1]);
+		activeChildren.push_back({pid, pipeFd[0], jobIndex});
+	}
+
+	while (!activeChildren.empty())
+	{
+		if (!waitForOneOutputChild(activeChildren, outputJobs, processingStats))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+#endif
+
+bool runOutputJobs(std::vector<OutputFileJob> &outputJobs,
+				   const std::vector<PsmRow> &rows,
+				   const std::vector<char> &baselineOk,
+				   const std::vector<MatchedEnvelopeSet> &matchedEnvelopeSets,
+				   const std::vector<std::string> &decoyPeptides,
+				   const std::vector<char> &decoyAddedResidues,
+				   const Isotopologue &pristineIso,
+				   const Args &args,
+				   char sipAtom,
+				   int targetSipIsotopeIndex,
+				   int effectiveThreads,
+				   ProcessingStats &processingStats)
+{
+#if !defined(_WIN32)
+	return runOutputJobsWithFork(outputJobs, rows, baselineOk, matchedEnvelopeSets,
+								 decoyPeptides, decoyAddedResidues, pristineIso, args,
+								 sipAtom, targetSipIsotopeIndex, effectiveThreads, processingStats);
+#else
+	std::vector<OutputJobStats> jobStats(outputJobs.size());
+#pragma omp parallel for schedule(dynamic)
+	for (int i = 0; i < static_cast<int>(outputJobs.size()); ++i)
+	{
+		generateAndWriteOutputFileJob(outputJobs[static_cast<size_t>(i)], rows, baselineOk,
+									  matchedEnvelopeSets, decoyPeptides, decoyAddedResidues,
+									  pristineIso, args, sipAtom, targetSipIsotopeIndex,
+									  jobStats[static_cast<size_t>(i)]);
+	}
+	for (const OutputJobStats &stats : jobStats)
+	{
+		addOutputJobStats(processingStats, stats);
+	}
+	return true;
+#endif
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -2170,6 +2914,7 @@ int main(int argc, char **argv)
 	{
 		omp_set_num_threads(args.threads);
 	}
+	const int effectiveThreads = std::max(1, omp_get_max_threads());
 
 	ReadStats readStats;
 	std::vector<PsmRow> allRows;
@@ -2202,11 +2947,9 @@ int main(int argc, char **argv)
 	std::cerr << "\n";
 
 	std::unordered_map<std::string, fs::path> ft2Files;
-	std::unordered_map<std::string, std::unordered_map<int, ObservedScan>> scansBySample;
 	try
 	{
 		ft2Files = collectFt2Files(args.ft2Path);
-		scansBySample = loadRequestedFt2Scans(rows, ft2Files);
 	}
 	catch (const std::exception &ex)
 	{
@@ -2218,45 +2961,15 @@ int main(int argc, char **argv)
 	std::vector<char> baselineOk(rows.size(), 0);
 	ProcessingStats processingStats;
 
-#pragma omp parallel
+	try
 	{
-		Isotopologue localIso = baselineIso;
-#pragma omp for schedule(dynamic)
-		for (int i = 0; i < static_cast<int>(rows.size()); ++i)
-		{
-			const PsmRow &row = rows[static_cast<size_t>(i)];
-
-			const auto sampleIt = scansBySample.find(row.sample);
-			if (sampleIt == scansBySample.end())
-			{
-				++processingStats.missingFt2;
-				continue;
-			}
-			const auto scanIt = sampleIt->second.find(row.scanNumber);
-			if (scanIt == sampleIt->second.end())
-			{
-				++processingStats.missingScan;
-				continue;
-			}
-
-			std::vector<std::vector<double>> yMass, yProb, bMass, bProb;
-			if (!localIso.computeProductIon(row.peptide, yMass, yProb, bMass, bProb))
-			{
-				++processingStats.computeFailed;
-				continue;
-			}
-
-			if (!collectMatchedEnvelopeApexIntensities(bMass, bProb, yMass, yProb,
-													   scanIt->second, args.probCutoff, args.ppmTolerance,
-													   args.minMatchedEnvelopes,
-													   matchedEnvelopeSets[static_cast<size_t>(i)]))
-			{
-				++processingStats.unmatched;
-				continue;
-			}
-
-			baselineOk[static_cast<size_t>(i)] = 1;
-		}
+		matchBaselineInFt2Batches(rows, ft2Files, baselineIso, args, effectiveThreads,
+								  matchedEnvelopeSets, baselineOk, processingStats);
+	}
+	catch (const std::exception &ex)
+	{
+		std::cerr << ex.what() << "\n";
+		return 1;
 	}
 
 	size_t baselineMatchedRows = 0;
@@ -2273,54 +2986,12 @@ int main(int argc, char **argv)
 	size_t decoyPeptidesGenerated = 0;
 	if (args.writeDecoy)
 	{
-		for (size_t i = 0; i < rows.size(); ++i)
+		size_t generatedCount = 0;
 		{
-			if (!baselineOk[i])
-			{
-				continue;
-			}
-			bool addedResidue = false;
-			if (generateDecoyPeptide(rows[i].peptide, experimentalPeptides,
-									 args.decoySeed, i, decoyPeptides[i],
-									 addedResidue))
-			{
-				decoyAddedResidues[i] = addedResidue ? 1 : 0;
-				++decoyPeptidesGenerated;
-			}
-			else
-			{
-				++processingStats.decoyCollision;
-			}
-		}
-	}
-
-	const fs::path outputBasePath = resolveOutputBasePath(args.outputPath);
-	const std::string outputSipLabel = sipLabelForPath(sipAtom, sipIsotopeMassNumber);
-	size_t outputFilesWritten = 0;
-	size_t decoyFilesWritten = 0;
-	for (double targetAbundancePct : targetAbundances)
-	{
-		Isotopologue targetIso = pristineIso;
-		try
-		{
-			setSipAbundance(targetIso, sipAtom, targetSipIsotopeIndex, targetAbundancePct);
-		}
-		catch (const std::exception &ex)
-		{
-			std::cerr << "Failed to apply target SIP abundance " << targetAbundancePct
-					  << "%: " << ex.what() << "\n";
-			return 1;
-		}
-
-		std::vector<std::string> blocks(rows.size());
-		std::vector<char> targetOk(rows.size(), 0);
-		std::vector<std::string> decoyBlocks(rows.size());
-		std::vector<char> decoyOk(rows.size(), 0);
-
-#pragma omp parallel
-		{
-			Isotopologue localIso = targetIso;
-#pragma omp for schedule(dynamic)
+			std::cout << "Timing parallel region: generate decoy peptides ("
+					  << rows.size() << " PSM rows)" << std::endl;
+			CLOCKSTART;
+#pragma omp parallel for schedule(dynamic) reduction(+ : generatedCount)
 			for (int i = 0; i < static_cast<int>(rows.size()); ++i)
 			{
 				const size_t rowIndex = static_cast<size_t>(i);
@@ -2328,118 +2999,119 @@ int main(int argc, char **argv)
 				{
 					continue;
 				}
-
-				const PsmRow &row = rows[rowIndex];
-				std::vector<std::vector<double>> yMass, yProb, bMass, bProb;
-				if (!localIso.computeProductIon(row.peptide, yMass, yProb, bMass, bProb))
+				bool addedResidue = false;
+				if (generateDecoyPeptide(rows[rowIndex].peptide, experimentalPeptides,
+										 args.decoySeed, rowIndex, decoyPeptides[rowIndex],
+										 addedResidue))
 				{
-					++processingStats.targetFailed;
-					continue;
+					decoyAddedResidues[rowIndex] = addedResidue ? 1 : 0;
+					++generatedCount;
 				}
-
-				IsotopeDistribution precursorDist;
-				if (!buildPrecursorDistributionFromProductIons(localIso, yMass, yProb, bMass, bProb, precursorDist))
+				else
 				{
-					++processingStats.targetFailed;
-					continue;
-				}
-
-				std::ostringstream ss;
-				ss << "> " << spectraHeaderId(row.psmId, targetAbundancePct, false)
-				   << ' ' << row.retentionText
-				   << ' ' << row.precursorCharge
-				   << ' ' << row.peptide << '\n';
-				appendPrecursorChargeLine(ss, precursorDist, row.precursorCharge, args.probCutoff);
-				if (!appendShiftedChargeOneFragmentBlock(ss, bMass, bProb, yMass, yProb,
-														 matchedEnvelopeSets[rowIndex], args.probCutoff))
-				{
-					++processingStats.targetFailed;
-					continue;
-				}
-
-				blocks[rowIndex] = ss.str();
-				targetOk[rowIndex] = 1;
-
-				if (args.writeDecoy && !decoyPeptides[rowIndex].empty())
-				{
-					const std::vector<double> apexPool =
-						shuffledApexIntensityPool(matchedEnvelopeSets[rowIndex], args.decoySeed, rowIndex);
-					const double meanApex = meanIntensity(apexPool);
-					if (apexPool.empty() || meanApex <= 0.0)
-					{
-						++processingStats.decoyComputeFailed;
-						continue;
-					}
-
-					std::vector<std::vector<double>> decoyYMass, decoyYProb, decoyBMass, decoyBProb;
-					if (!localIso.computeProductIon(decoyPeptides[rowIndex], decoyYMass, decoyYProb, decoyBMass, decoyBProb))
-					{
-						++processingStats.decoyComputeFailed;
-						continue;
-					}
-
-					IsotopeDistribution decoyPrecursorDist;
-					if (!buildPrecursorDistributionFromProductIons(localIso, decoyYMass, decoyYProb,
-																	decoyBMass, decoyBProb, decoyPrecursorDist))
-					{
-						++processingStats.decoyComputeFailed;
-						continue;
-					}
-
-					std::ostringstream decoySs;
-					decoySs << "> " << spectraHeaderId(row.psmId, targetAbundancePct, true)
-							 << ' ' << row.retentionText
-							 << ' ' << row.precursorCharge
-							 << ' ' << decoyPeptides[rowIndex] << '\n';
-					appendPrecursorChargeLine(decoySs, decoyPrecursorDist, row.precursorCharge, args.probCutoff);
-					if (!appendDecoyChargeOneFragmentBlock(decoySs, decoyBMass, decoyBProb,
-														   decoyYMass, decoyYProb,
-														   apexPool, meanApex,
-														   decoyAddedResidues[rowIndex] != 0,
-														   args.probCutoff))
-					{
-						++processingStats.decoyComputeFailed;
-						continue;
-					}
-
-					decoyBlocks[rowIndex] = decoySs.str();
-					decoyOk[rowIndex] = 1;
+					++processingStats.decoyCollision;
 				}
 			}
+			CLOCKSTOP;
 		}
+		decoyPeptidesGenerated = generatedCount;
+	}
 
-		const fs::path outputPath = outputPathForAbundance(outputBasePath, outputSipLabel, targetAbundancePct);
-		std::ostringstream outputHeader;
-		appendOutputHeader(outputHeader, targetAbundancePct, sipAtom, sipIsotopeMassNumber);
-		std::string outputBuffer = outputHeader.str();
-		const size_t written = appendBufferedBlocks(outputBuffer, blocks, targetOk);
-		if (!writeBufferedFile(outputPath, outputBuffer))
-		{
-			std::cerr << "Cannot write output file: " << outputPath << "\n";
-			return 1;
-		}
+	const size_t plannedOutputFileCount = targetAbundances.size() * (args.writeDecoy ? 2 : 1);
+	const bool multipleOutputFiles = plannedOutputFileCount > 1;
+	fs::path outputBasePath;
+	try
+	{
+		outputBasePath = resolveOutputBasePath(args.outputPath, multipleOutputFiles);
+	}
+	catch (const std::exception &ex)
+	{
+		std::cerr << ex.what() << "\n";
+		return 1;
+	}
+	const std::string outputSipLabel = sipLabelForPath(sipAtom, sipIsotopeMassNumber);
+	size_t outputFilesWritten = 0;
+	size_t decoyFilesWritten = 0;
+	std::vector<OutputFileJob> outputJobs;
+	outputJobs.reserve(targetAbundances.size() * (args.writeDecoy ? 2 : 1));
+	for (double targetAbundancePct : targetAbundances)
+	{
+		Hdf5OutputMetadata outputMetadata;
+		outputMetadata.recordKind = "target";
+		outputMetadata.targetSipAbundancePct = targetAbundancePct;
+		outputMetadata.sipAtom = sipAtom;
+		outputMetadata.sipIsotopeMassNumber = sipIsotopeMassNumber;
+		outputMetadata.probCutoff = args.probCutoff;
+		outputMetadata.ppmTolerance = args.ppmTolerance;
+		outputMetadata.minMatchedEnvelopes = static_cast<uint64_t>(args.minMatchedEnvelopes);
 
-		++outputFilesWritten;
-		std::cerr << "Wrote shifted matched experimental spectra for " << written
-				  << " PSMs at " << targetAbundancePct << "% to " << outputPath << "\n";
+		OutputFileJob targetJob;
+		targetJob.path = multipleOutputFiles
+							 ? outputPathForAbundance(outputBasePath, outputSipLabel, targetAbundancePct)
+							 : outputBasePath;
+		targetJob.metadata = outputMetadata;
+		targetJob.decoy = false;
+		outputJobs.push_back(std::move(targetJob));
 
 		if (args.writeDecoy)
 		{
-			const fs::path decoyOutputPath = decoyOutputPathForAbundance(outputBasePath, outputSipLabel, targetAbundancePct);
-			std::ostringstream decoyOutputHeader;
-			appendDecoyOutputHeader(decoyOutputHeader, targetAbundancePct, sipAtom, sipIsotopeMassNumber);
-			std::string decoyOutputBuffer = decoyOutputHeader.str();
-			const size_t decoyWritten = appendBufferedBlocks(decoyOutputBuffer, decoyBlocks, decoyOk);
-			if (!writeBufferedFile(decoyOutputPath, decoyOutputBuffer))
-			{
-				std::cerr << "Cannot write decoy output file: " << decoyOutputPath << "\n";
-				return 1;
-			}
-
-			++decoyFilesWritten;
-			std::cerr << "Wrote decoy shifted spectra for " << decoyWritten
-					  << " PSMs at " << targetAbundancePct << "% to " << decoyOutputPath << "\n";
+			Hdf5OutputMetadata decoyMetadata = outputMetadata;
+			decoyMetadata.recordKind = "decoy";
+			OutputFileJob decoyJob;
+			decoyJob.path = decoyOutputPathForAbundance(outputBasePath, outputSipLabel, targetAbundancePct);
+			decoyJob.metadata = decoyMetadata;
+			decoyJob.decoy = true;
+			outputJobs.push_back(std::move(decoyJob));
 		}
+	}
+
+	{
+		std::cout << "Timing parallel region: process output HDF5 files with fork pool ("
+				  << outputJobs.size() << " files, up to " << effectiveThreads
+				  << " processes)" << std::endl;
+		CLOCKSTART;
+		if (!runOutputJobs(outputJobs, rows, baselineOk, matchedEnvelopeSets,
+						   decoyPeptides, decoyAddedResidues, pristineIso, args,
+						   sipAtom, targetSipIsotopeIndex, effectiveThreads, processingStats))
+		{
+			return 1;
+		}
+		CLOCKSTOP;
+	}
+
+	bool allOutputSucceeded = true;
+	for (const OutputFileJob &job : outputJobs)
+	{
+		if (!job.success)
+		{
+			if (!job.error.empty())
+			{
+				std::cerr << job.error << "\n";
+			}
+			std::cerr << "Cannot write output file: " << job.path << "\n";
+			allOutputSucceeded = false;
+			continue;
+		}
+
+		if (job.decoy)
+		{
+			++decoyFilesWritten;
+			std::cerr << "Wrote decoy shifted spectra for " << job.written
+					  << " PSMs at " << job.metadata.targetSipAbundancePct
+					  << "% to " << job.path << "\n";
+		}
+		else
+		{
+			++outputFilesWritten;
+			std::cerr << "Wrote shifted matched experimental spectra for " << job.written
+					  << " PSMs at " << job.metadata.targetSipAbundancePct
+					  << "% to " << job.path << "\n";
+		}
+	}
+
+	if (!allOutputSucceeded)
+	{
+		return 1;
 	}
 
 	std::cerr << "Input peptide spectra: " << rows.size()

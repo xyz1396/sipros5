@@ -3,6 +3,8 @@ add_executable(sipros ${SRC_LIST} ${PROJECT_SOURCE_DIR}/openmp/main.cpp)
 add_executable(sipros_theoretical_spectra ${SRC_LIST} ${PROJECT_SOURCE_DIR}/openmp/theoretical_spectra_main.cpp)
 add_executable(sipros_experimental_spectra ${SRC_LIST} ${PROJECT_SOURCE_DIR}/openmp/experimental_spectra_main.cpp)
 
+target_include_directories(sipros_experimental_spectra PUBLIC ${HDF5_INCLUDE_DIRS})
+
 IF(MSVC)
   target_link_libraries(sipros PUBLIC mstoolkit OpenMP::OpenMP_CXX)
   target_link_libraries(sipros_theoretical_spectra PUBLIC mstoolkit OpenMP::OpenMP_CXX)
@@ -40,6 +42,8 @@ ELSE()
     message(CMAKE_EXE_LINKER_FLAGS: "${CMAKE_EXE_LINKER_FLAGS}")
   ENDIF()
 ENDIF()
+
+target_link_libraries(sipros_experimental_spectra PUBLIC ${SIPROS_HDF5_LIBRARIES})
 
 IF(WIN32)
   target_compile_definitions(sipros PUBLIC _NO_THERMORAW _NOSQLITE)
