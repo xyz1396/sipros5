@@ -232,6 +232,8 @@ public:
 		return dMassAccuracyFragmentIon;
 	}
 
+	static void setMassAccuracy(double parentIonToleranceDa, double fragmentIonToleranceDa);
+
 	// retrieve <Parent_Mass_Windows>
 	static vector<int> getParentMassWindows()
 	{

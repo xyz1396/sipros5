@@ -7,6 +7,12 @@ void ProNovoConfig::setFASTAfilename(const string &fastaFilename)
 	sFASTAFilename = fastaFilename;
 }
 
+void ProNovoConfig::setMassAccuracy(double parentIonToleranceDa, double fragmentIonToleranceDa)
+{
+	dMassAccuracyParentIon = parentIonToleranceDa;
+	dMassAccuracyFragmentIon = fragmentIonToleranceDa;
+}
+
 #if _WIN32
 string ProNovoConfig::sWorkingDirectory = ".\\";
 #else
