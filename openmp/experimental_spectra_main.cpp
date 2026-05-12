@@ -12,9 +12,11 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <locale>
 #include <map>
 #include <omp.h>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -65,6 +67,7 @@ struct PsmRow
 	std::string sample;
 	int scanNumber = 0;
 	std::string peptide;
+	std::string proteins;
 	int precursorCharge = 1;
 	std::string retentionText = "0";
 	double probability = 0.0;
@@ -114,6 +117,7 @@ struct SpectrumOutputRecord
 	std::string retention;
 	int charge = 1;
 	std::string peptide;
+	std::string proteins;
 	std::vector<double> precursorMz;
 	std::vector<double> precursorIntensity;
 	std::vector<double> fragmentMz;
@@ -129,6 +133,7 @@ struct Hdf5OutputData
 	std::vector<std::string> retentions;
 	std::vector<int> charges;
 	std::vector<std::string> peptides;
+	std::vector<std::string> proteins;
 	std::vector<double> precursorMz;
 	std::vector<double> precursorIntensity;
 	std::vector<uint64_t> precursorOffset;
@@ -147,6 +152,7 @@ struct Hdf5OutputData
 		retentions.reserve(count);
 		charges.reserve(count);
 		peptides.reserve(count);
+		proteins.reserve(count);
 		precursorOffset.reserve(count);
 		precursorCount.reserve(count);
 		fragmentOffset.reserve(count);
@@ -222,6 +228,7 @@ struct ProcessingStats
 };
 
 int atomIndex(char sipAtom);
+std::string peptideMassClassKey(const std::string &peptide);
 
 std::string trim(const std::string &s)
 {
@@ -900,6 +907,157 @@ size_t getOptionalColumn(const std::unordered_map<std::string, size_t> &columns,
 	return it == columns.end() ? std::string::npos : it->second;
 }
 
+size_t getRequiredColumnAny(const std::unordered_map<std::string, size_t> &columns,
+							const std::vector<std::string> &names)
+{
+	for (const std::string &name : names)
+	{
+		const size_t idx = getOptionalColumn(columns, name);
+		if (idx != std::string::npos)
+		{
+			return idx;
+		}
+	}
+	std::string msg = "Missing required protein-name column; expected one of:";
+	for (const std::string &name : names)
+	{
+		msg += " ";
+		msg += name;
+	}
+	throw std::runtime_error(msg);
+}
+
+std::string requireProteinNames(const std::string &value, const std::string &context)
+{
+	std::string proteins = trim(value);
+	if (proteins.empty())
+	{
+		throw std::runtime_error("Missing protein names for " + context);
+	}
+	return proteins;
+}
+
+std::vector<std::string> splitProteinList(const std::string &proteins)
+{
+	std::string inner = trim(proteins);
+	if (inner.size() >= 2 && inner.front() == '{' && inner.back() == '}')
+	{
+		inner = inner.substr(1, inner.size() - 2);
+	}
+
+	std::vector<std::string> out;
+	std::stringstream ss(inner);
+	std::string token;
+	while (std::getline(ss, token, ','))
+	{
+		token = trim(token);
+		if (!token.empty())
+		{
+			out.push_back(token);
+		}
+	}
+	return out;
+}
+
+std::string formatProteinList(const std::vector<std::string> &proteins)
+{
+	std::string out = "{";
+	for (const std::string &protein : proteins)
+	{
+		if (protein.empty())
+			continue;
+		if (out.size() > 1)
+			out += ",";
+		out += protein;
+	}
+	out += "}";
+	return out;
+}
+
+std::string mergeProteinLists(const std::string &a, const std::string &b)
+{
+	std::set<std::string> seen;
+	std::vector<std::string> merged;
+	for (const std::string &protein : splitProteinList(a))
+	{
+		if (seen.insert(protein).second)
+			merged.push_back(protein);
+	}
+	for (const std::string &protein : splitProteinList(b))
+	{
+		if (seen.insert(protein).second)
+			merged.push_back(protein);
+	}
+	return formatProteinList(merged);
+}
+
+std::string combineProteinColumns(const std::string &protein,
+								  const std::string &mappedProteins,
+								  const std::string &context)
+{
+	const std::string primary = requireProteinNames(protein, context);
+	return mergeProteinLists(primary, mappedProteins);
+}
+
+std::string requireRetentionSeconds(const std::string &value, const std::string &context)
+{
+	std::string seconds = trim(value);
+	if (seconds.empty())
+	{
+		throw std::runtime_error("Missing retention time in seconds for " + context);
+	}
+
+	size_t parsedChars = 0;
+	try
+	{
+		(void)std::stod(seconds, &parsedChars);
+	}
+	catch (const std::exception &)
+	{
+		throw std::runtime_error("Retention time must be numeric seconds for " + context +
+								 ": " + value);
+	}
+
+	if (!trim(seconds.substr(parsedChars)).empty())
+	{
+		throw std::runtime_error("Retention time must be numeric seconds without units for " +
+								 context + ": " + value);
+	}
+	return seconds;
+}
+
+std::string decoyProteinNames(const std::string &value)
+{
+	std::string proteins = requireProteinNames(value, "decoy spectrum");
+	const bool braced = proteins.size() >= 2 && proteins.front() == '{' && proteins.back() == '}';
+	std::string inner = braced ? proteins.substr(1, proteins.size() - 2) : proteins;
+	std::stringstream in(inner);
+	std::string token;
+	std::string out;
+	while (std::getline(in, token, ','))
+	{
+		token = trim(token);
+		if (token.empty())
+		{
+			continue;
+		}
+		if (token.rfind("DECOY_", 0) != 0)
+		{
+			token = "DECOY_" + token;
+		}
+		if (!out.empty())
+		{
+			out += ",";
+		}
+		out += token;
+	}
+	if (out.empty())
+	{
+		throw std::runtime_error("Missing protein names for decoy spectrum");
+	}
+	return braced ? "{" + out + "}" : out;
+}
+
 void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &stats, size_t &nextOrder)
 {
 	std::ifstream in(path);
@@ -929,8 +1087,11 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 	const size_t idxModifiedPeptide = getOptionalColumn(columns, "Modified Peptide");
 	const size_t idxExpectation = getOptionalColumn(columns, "Expectation");
 	const size_t idxHyperscore = getOptionalColumn(columns, "Hyperscore");
+	const size_t idxMappedProteins = getOptionalColumn(columns, "Mapped Proteins");
+	const size_t idxProteins = getRequiredColumnAny(columns, {"Proteins", "ProteinNames", "proteinNames",
+															  "ProteinName", "proteinName", "Protein", "protein"});
 
-	size_t requiredMax = std::max({idxSpectrum, idxPeptide, idxCharge, idxRetention, idxProbability});
+	size_t requiredMax = std::max({idxSpectrum, idxPeptide, idxCharge, idxRetention, idxProbability, idxProteins});
 	if (idxModifiedPeptide != std::string::npos)
 	{
 		requiredMax = std::max(requiredMax, idxModifiedPeptide);
@@ -971,11 +1132,14 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 			row.precursorCharge = charge;
 		}
 		row.precursorCharge = std::max(1, row.precursorCharge);
-		row.retentionText = trim(fields[idxRetention]);
-		if (row.retentionText.empty())
-		{
-			row.retentionText = "0";
-		}
+		row.retentionText = requireRetentionSeconds(fields[idxRetention],
+													path.string() + " PSM " + row.psmId);
+		const std::string mappedProteins =
+			(idxMappedProteins != std::string::npos && fields.size() > idxMappedProteins)
+				? fields[idxMappedProteins]
+				: std::string();
+		row.proteins = combineProteinColumns(fields[idxProteins], mappedProteins,
+											 path.string() + " PSM " + row.psmId);
 		if (!parseDoubleField(fields[idxProbability], row.probability))
 		{
 			++stats.invalidRows;
@@ -1058,7 +1222,7 @@ std::vector<PsmRow> selectBestRowsByPeptideCharge(const std::vector<PsmRow> &row
 	std::vector<PsmRow> selected;
 	for (const PsmRow &row : rows)
 	{
-		const std::string key = row.peptide + "\t" + std::to_string(row.precursorCharge);
+		const std::string key = peptideMassClassKey(row.peptide) + "\t" + std::to_string(row.precursorCharge);
 		const auto it = bestIndex.find(key);
 		if (it == bestIndex.end())
 		{
@@ -1067,9 +1231,15 @@ std::vector<PsmRow> selectBestRowsByPeptideCharge(const std::vector<PsmRow> &row
 			continue;
 		}
 		PsmRow &current = selected[it->second];
+		const std::string mergedProteins = mergeProteinLists(current.proteins, row.proteins);
 		if (isBetterPsm(row, current))
 		{
 			current = row;
+			current.proteins = mergedProteins;
+		}
+		else
+		{
+			current.proteins = mergedProteins;
 		}
 	}
 
@@ -1807,6 +1977,40 @@ std::string buildPeptideFromTokens(const PeptideTokens &tokens)
 	return peptide;
 }
 
+std::string peptideMassClassKey(const std::string &peptide)
+{
+	std::string key = peptide;
+	for (char &c : key)
+	{
+		if (c == 'I')
+		{
+			c = 'L';
+		}
+	}
+	return key;
+}
+
+std::string adjustedDecoyRetention(const std::string &retentionText,
+								   unsigned int seed,
+								   size_t rowIndex,
+								   bool decoyAddedResidue)
+{
+	const std::string secondsText = requireRetentionSeconds(retentionText, "decoy spectrum");
+	const double retentionSeconds = std::stod(secondsText);
+
+	std::mt19937 rng(seed ^
+					 static_cast<unsigned int>((rowIndex + 1) * 2654435761u) ^
+					 0x9E3779B9u);
+	std::uniform_real_distribution<double> jitterSecondsDist(15.0, 60.0);
+	const double signedJitterSeconds = (decoyAddedResidue ? 1.0 : -1.0) * jitterSecondsDist(rng);
+	const double adjusted = retentionSeconds + signedJitterSeconds;
+
+	std::ostringstream out;
+	out.imbue(std::locale::classic());
+	out << std::setprecision(10) << adjusted;
+	return out.str();
+}
+
 std::vector<double> shuffledApexIntensityPool(const MatchedEnvelopeSet &matchedSet,
 											  unsigned int seed,
 											  size_t rowIndex)
@@ -1839,7 +2043,7 @@ double meanIntensity(const std::vector<double> &intensities)
 }
 
 bool generateDecoyPeptide(const std::string &targetPeptide,
-						  const std::unordered_set<std::string> &experimentalPeptides,
+						  const std::unordered_set<std::string> &experimentalPeptideMassClasses,
 						  unsigned int seed,
 						  size_t rowIndex,
 						  std::string &decoyPeptide,
@@ -1854,6 +2058,7 @@ bool generateDecoyPeptide(const std::string &targetPeptide,
 	constexpr size_t maxAttempts = 100;
 	const std::string standardResidues = "ACDEFGHIKLMNPQRSTVWY";
 	const int minPeptideLength = ProNovoConfig::getMinPeptideLength();
+	const std::string targetMassClass = peptideMassClassKey(targetPeptide);
 	for (size_t attempt = 0; attempt < maxAttempts; ++attempt)
 	{
 		PeptideTokens tokens = baseTokens;
@@ -1889,7 +2094,9 @@ bool generateDecoyPeptide(const std::string &targetPeptide,
 		}
 
 		const std::string candidate = buildPeptideFromTokens(tokens);
-		if (candidate != targetPeptide && experimentalPeptides.find(candidate) == experimentalPeptides.end())
+		const std::string candidateMassClass = peptideMassClassKey(candidate);
+		if (candidateMassClass != targetMassClass &&
+			experimentalPeptideMassClasses.find(candidateMassClass) == experimentalPeptideMassClasses.end())
 		{
 			decoyPeptide = candidate;
 			decoyAddedResidue = !deleteResidue;
@@ -2296,6 +2503,7 @@ Hdf5OutputData buildOutputDataFromRecords(const std::vector<SpectrumOutputRecord
 	output.retentions.resize(recordCount);
 	output.charges.resize(recordCount);
 	output.peptides.resize(recordCount);
+	output.proteins.resize(recordCount);
 	output.precursorOffset.resize(recordCount);
 	output.precursorCount.resize(recordCount);
 	output.fragmentOffset.resize(recordCount);
@@ -2325,6 +2533,8 @@ Hdf5OutputData buildOutputDataFromRecords(const std::vector<SpectrumOutputRecord
 		output.retentions[outIndex] = record.retention;
 		output.charges[outIndex] = record.charge;
 		output.peptides[outIndex] = record.peptide;
+		output.proteins[outIndex] = requireProteinNames(record.proteins,
+														"HDF5 record " + record.psmId);
 		output.precursorOffset[outIndex] = static_cast<uint64_t>(precursorOffset);
 		output.precursorCount[outIndex] = static_cast<uint64_t>(record.precursorMz.size());
 		output.fragmentOffset[outIndex] = static_cast<uint64_t>(fragmentOffset);
@@ -2372,6 +2582,7 @@ bool writeSpectraHdf5File(const fs::path &path,
 		writeStringDataset(recordsGroup, "retention", data.retentions, true);
 		writeVectorDataset(recordsGroup, "charge", H5::PredType::NATIVE_INT, data.charges, true);
 		writeStringDataset(recordsGroup, "peptide", data.peptides, true);
+		writeStringDataset(recordsGroup, "proteins", data.proteins, true);
 
 		writeVectorDataset(precursorGroup, "mz", H5::PredType::NATIVE_DOUBLE, data.precursorMz, true);
 		writeVectorDataset(precursorGroup, "intensity", H5::PredType::NATIVE_DOUBLE, data.precursorIntensity, true);
@@ -2467,6 +2678,7 @@ bool generateAndWriteOutputFileJob(OutputFileJob &job,
 				record.retention = row.retentionText;
 				record.charge = row.precursorCharge;
 				record.peptide = row.peptide;
+				record.proteins = row.proteins;
 				buildPrecursorChargePeaks(precursorDist, row.precursorCharge, args.probCutoff,
 										  record.precursorMz, record.precursorIntensity);
 
@@ -2516,9 +2728,11 @@ bool generateAndWriteOutputFileJob(OutputFileJob &job,
 
 			SpectrumOutputRecord decoyRecord;
 			decoyRecord.psmId = spectraHeaderId(row.psmId, job.metadata.targetSipAbundancePct, true);
-			decoyRecord.retention = row.retentionText;
+			decoyRecord.retention = adjustedDecoyRetention(row.retentionText, args.decoySeed,
+														   rowIndex, decoyAddedResidues[rowIndex] != 0);
 			decoyRecord.charge = row.precursorCharge;
 			decoyRecord.peptide = decoyPeptides[rowIndex];
+			decoyRecord.proteins = decoyProteinNames(row.proteins);
 			buildPrecursorChargePeaks(decoyPrecursorDist, row.precursorCharge, args.probCutoff,
 									  decoyRecord.precursorMz, decoyRecord.precursorIntensity);
 
@@ -2928,11 +3142,11 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	std::unordered_set<std::string> experimentalPeptides;
-	experimentalPeptides.reserve(allRows.size());
+	std::unordered_set<std::string> experimentalPeptideMassClasses;
+	experimentalPeptideMassClasses.reserve(allRows.size());
 	for (const PsmRow &row : allRows)
 	{
-		experimentalPeptides.insert(row.peptide);
+		experimentalPeptideMassClasses.insert(peptideMassClassKey(row.peptide));
 	}
 
 	std::vector<PsmRow> rows = selectBestRowsByPeptideCharge(allRows);
@@ -3000,7 +3214,7 @@ int main(int argc, char **argv)
 					continue;
 				}
 				bool addedResidue = false;
-				if (generateDecoyPeptide(rows[rowIndex].peptide, experimentalPeptides,
+				if (generateDecoyPeptide(rows[rowIndex].peptide, experimentalPeptideMassClasses,
 										 args.decoySeed, rowIndex, decoyPeptides[rowIndex],
 										 addedResidue))
 				{
