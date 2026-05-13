@@ -31,6 +31,7 @@
 
 #if !defined(_WIN32)
 #include <cerrno>
+#include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -40,6 +41,166 @@ namespace fs = std::filesystem;
 
 namespace
 {
+double timevalSeconds(const timeval &tv)
+{
+	return static_cast<double>(tv.tv_sec) + static_cast<double>(tv.tv_usec) / 1.0e6;
+}
+
+double processTreeCpuSeconds()
+{
+#if !defined(_WIN32)
+	rusage self{};
+	rusage children{};
+	getrusage(RUSAGE_SELF, &self);
+	getrusage(RUSAGE_CHILDREN, &children);
+	return timevalSeconds(self.ru_utime) + timevalSeconds(self.ru_stime) +
+		   timevalSeconds(children.ru_utime) + timevalSeconds(children.ru_stime);
+#else
+	return omp_get_wtime();
+#endif
+}
+
+struct TimingEntry
+{
+	std::string group;
+	std::string label;
+	std::string workName;
+	double wallSeconds = 0.0;
+	double cpuSeconds = 0.0;
+	long memoryMbDelta = 0;
+	size_t workItems = 0;
+};
+
+struct TimingLogger
+{
+	std::vector<TimingEntry> entries;
+
+	void printHeader() const
+	{
+		std::cout << "\nTiming log\n"
+				  << "  " << std::left << std::setw(34) << "Region"
+				  << std::right << std::setw(10) << "Wall(s)"
+				  << std::setw(10) << "CPU(s)"
+				  << std::setw(9) << "CPU/Wall"
+				  << std::setw(11) << "Mem(MB)"
+				  << "  Work\n";
+	}
+
+	template <typename Fn>
+	void run(const std::string &group,
+			 const std::string &label,
+			 size_t workItems,
+			 const std::string &workName,
+			 Fn &&fn)
+	{
+		const long memStart = static_cast<long>(checkMemoryUsage());
+		const double cpuStart = processTreeCpuSeconds();
+		const double wallStart = omp_get_wtime();
+		fn();
+		const double wallSeconds = omp_get_wtime() - wallStart;
+		const double cpuSeconds = processTreeCpuSeconds() - cpuStart;
+		const long memEnd = static_cast<long>(checkMemoryUsage());
+
+		TimingEntry entry;
+		entry.group = group;
+		entry.label = label;
+		entry.workName = workName;
+		entry.wallSeconds = wallSeconds;
+		entry.cpuSeconds = cpuSeconds;
+		entry.memoryMbDelta = memEnd - memStart;
+		entry.workItems = workItems;
+		entries.push_back(entry);
+		printEntry(entry);
+	}
+
+	static void printEntry(const TimingEntry &entry)
+	{
+		const double speedup = entry.wallSeconds > 0.0 ? entry.cpuSeconds / entry.wallSeconds : 0.0;
+		std::cout << "  " << std::left << std::setw(34) << entry.label
+				  << std::right << std::setw(10) << std::fixed << std::setprecision(3) << entry.wallSeconds
+				  << std::setw(10) << std::fixed << std::setprecision(3) << entry.cpuSeconds
+				  << std::setw(9) << std::fixed << std::setprecision(2) << speedup
+				  << std::setw(11) << std::showpos << entry.memoryMbDelta << std::noshowpos;
+		if (entry.workItems > 0 && !entry.workName.empty())
+		{
+			const double rate = entry.wallSeconds > 0.0
+									? static_cast<double>(entry.workItems) / entry.wallSeconds
+									: 0.0;
+			std::cout << "  " << entry.workItems << ' ' << entry.workName
+					  << " (" << std::fixed << std::setprecision(0) << rate << "/s)";
+		}
+		std::cout << '\n';
+	}
+
+	void printSummary(double totalWallSeconds,
+					  double totalCpuSeconds,
+					  size_t inputRows,
+					  size_t retainedRows,
+					  size_t baselineMatchedRows,
+					  size_t outputFilesWritten) const
+	{
+		std::map<std::string, TimingEntry> totals;
+		std::vector<std::string> groupOrder;
+		for (const TimingEntry &entry : entries)
+		{
+			if (totals.find(entry.group) == totals.end())
+				groupOrder.push_back(entry.group);
+			TimingEntry &sum = totals[entry.group];
+			sum.group = entry.group;
+			sum.label = entry.group;
+			sum.wallSeconds += entry.wallSeconds;
+			sum.cpuSeconds += entry.cpuSeconds;
+			sum.memoryMbDelta += entry.memoryMbDelta;
+			sum.workItems += entry.workItems;
+			if (sum.workName.empty())
+				sum.workName = entry.workName;
+		}
+
+		std::cout << "\nTiming summary\n"
+				  << "  " << std::left << std::setw(28) << "Stage"
+				  << std::right << std::setw(10) << "Wall(s)"
+				  << std::setw(9) << "Share"
+				  << std::setw(10) << "CPU(s)"
+				  << std::setw(9) << "CPU/Wall"
+				  << std::setw(11) << "Mem(MB)"
+				  << '\n';
+		for (const std::string &group : groupOrder)
+		{
+			const TimingEntry &entry = totals[group];
+			const double share = totalWallSeconds > 0.0 ? entry.wallSeconds / totalWallSeconds * 100.0 : 0.0;
+			const double speedup = entry.wallSeconds > 0.0 ? entry.cpuSeconds / entry.wallSeconds : 0.0;
+			std::cout << "  " << std::left << std::setw(28) << entry.label
+					  << std::right << std::setw(10) << std::fixed << std::setprecision(3) << entry.wallSeconds
+					  << std::setw(8) << std::fixed << std::setprecision(1) << share << "%"
+					  << std::setw(10) << std::fixed << std::setprecision(3) << entry.cpuSeconds
+					  << std::setw(9) << std::fixed << std::setprecision(2) << speedup
+					  << std::setw(11) << std::showpos << entry.memoryMbDelta << std::noshowpos
+					  << '\n';
+		}
+
+		const double totalSpeedup = totalWallSeconds > 0.0 ? totalCpuSeconds / totalWallSeconds : 0.0;
+		std::cout << "  " << std::left << std::setw(28) << "End-to-end"
+				  << std::right << std::setw(10) << std::fixed << std::setprecision(3) << totalWallSeconds
+				  << std::setw(8) << "100.0%"
+				  << std::setw(10) << std::fixed << std::setprecision(3) << totalCpuSeconds
+				  << std::setw(9) << std::fixed << std::setprecision(2) << totalSpeedup
+				  << std::setw(11) << "-" << '\n';
+
+		std::cout << "\nThroughput\n"
+				  << "  PSM rows read:              " << inputRows << '\n'
+				  << "  Retained peptide/charge:    " << retainedRows << '\n'
+				  << "  Baseline matched spectra:   " << baselineMatchedRows << '\n'
+				  << "  HDF5 output files written:  " << outputFilesWritten << '\n';
+		if (totalWallSeconds > 0.0)
+		{
+			std::cout << "  Retained rows/sec:          "
+					  << std::fixed << std::setprecision(0)
+					  << static_cast<double>(retainedRows) / totalWallSeconds << '\n';
+		}
+		std::cout << '\n';
+	}
+};
+
 struct Args
 {
 	std::string configPath;
@@ -1188,6 +1349,22 @@ std::vector<PsmRow> readInputRows(const std::string &inputPath, ReadStats &stats
 	return rows;
 }
 
+std::map<std::string, size_t> requestedScanCountsBySample(const std::vector<PsmRow> &rows)
+{
+	std::map<std::string, std::set<int>> scansBySample;
+	for (const PsmRow &row : rows)
+	{
+		scansBySample[row.sample].insert(row.scanNumber);
+	}
+
+	std::map<std::string, size_t> counts;
+	for (const auto &kv : scansBySample)
+	{
+		counts[kv.first] = kv.second.size();
+	}
+	return counts;
+}
+
 bool isBetterPsm(const PsmRow &candidate, const PsmRow &current)
 {
 	constexpr double eps = 1e-15;
@@ -1545,6 +1722,32 @@ void setSipAbundance(Isotopologue &iso, char sipAtom, int isotopeIndex, double s
 	refreshResidueDistributions(iso);
 }
 
+double configuredIsotopeAbundancePct(const Isotopologue &iso, char sipAtom, int isotopeIndex)
+{
+	const int ix = atomIndex(sipAtom);
+	if (ix < 0 ||
+		ix >= static_cast<int>(iso.vAtomIsotopicDistribution.size()) ||
+		isotopeIndex < 0 ||
+		isotopeIndex >= static_cast<int>(iso.vAtomIsotopicDistribution[ix].vProb.size()))
+	{
+		throw std::runtime_error("Configured isotope abundance is not available.");
+	}
+	return iso.vAtomIsotopicDistribution[ix].vProb[isotopeIndex] * 100.0;
+}
+
+double effectiveTargetSipAbundancePct(const Isotopologue &iso,
+									  char sipAtom,
+									  int isotopeIndex,
+									  double requestedPct)
+{
+	const char atom = static_cast<char>(std::toupper(static_cast<unsigned char>(sipAtom)));
+	if (atom == 'C' && isotopeIndex == 1 && std::abs(requestedPct - 1.0) <= 1e-9)
+	{
+		return configuredIsotopeAbundancePct(iso, atom, isotopeIndex);
+	}
+	return requestedPct;
+}
+
 void buildPrecursorChargePeaks(const IsotopeDistribution &dist,
 							   int charge,
 							   double probCutoff,
@@ -1717,7 +1920,8 @@ void matchBaselineInFt2Batches(const std::vector<PsmRow> &rows,
 							   int effectiveThreads,
 							   std::vector<MatchedEnvelopeSet> &matchedEnvelopeSets,
 							   std::vector<char> &baselineOk,
-							   ProcessingStats &processingStats)
+							   ProcessingStats &processingStats,
+							   TimingLogger &timing)
 {
 	const std::vector<Ft2SampleTask> tasks = buildFt2SampleTasks(rows, ft2Files, processingStats);
 	const size_t batchSize = static_cast<size_t>(std::max(1, effectiveThreads));
@@ -1730,31 +1934,31 @@ void matchBaselineInFt2Batches(const std::vector<PsmRow> &rows,
 		std::vector<std::string> errors(batchCount);
 
 		{
-			std::cout << "Timing parallel region: load FT2 batch "
-					  << (batchStart / batchSize + 1) << " of "
-					  << ((tasks.size() + batchSize - 1) / batchSize)
-					  << " (" << batchCount << " FT2 files)" << std::endl;
-			CLOCKSTART;
-#pragma omp parallel for schedule(dynamic)
-			for (int i = 0; i < static_cast<int>(batchCount); ++i)
+			std::ostringstream label;
+			label << "load FT2 batch " << (batchStart / batchSize + 1)
+				  << '/' << ((tasks.size() + batchSize - 1) / batchSize);
+			timing.run("Load FT2", label.str(), batchCount, "files", [&]()
 			{
-				const size_t localTaskIndex = static_cast<size_t>(i);
-				const Ft2SampleTask &task = tasks[batchStart + localTaskIndex];
+#pragma omp parallel for schedule(dynamic)
+				for (int i = 0; i < static_cast<int>(batchCount); ++i)
+				{
+					const size_t localTaskIndex = static_cast<size_t>(i);
+					const Ft2SampleTask &task = tasks[batchStart + localTaskIndex];
 #pragma omp critical(cerr_output)
-				{
-					std::cerr << "Reading " << task.requestedScans.size()
-							  << " requested scans from " << task.path << "\n";
+					{
+						std::cerr << "Reading " << task.requestedScans.size()
+								  << " requested scans from " << task.path << "\n";
+					}
+					try
+					{
+						loadedScans[localTaskIndex] = readRequestedScans(task.path, task.requestedScans);
+					}
+					catch (const std::exception &ex)
+					{
+						errors[localTaskIndex] = ex.what();
+					}
 				}
-				try
-				{
-					loadedScans[localTaskIndex] = readRequestedScans(task.path, task.requestedScans);
-				}
-				catch (const std::exception &ex)
-				{
-					errors[localTaskIndex] = ex.what();
-				}
-			}
-			CLOCKSTOP;
+			});
 		}
 
 		for (const std::string &error : errors)
@@ -1782,46 +1986,46 @@ void matchBaselineInFt2Batches(const std::vector<PsmRow> &rows,
 		}
 
 		{
-			std::cout << "Timing parallel region: baseline match FT2 batch "
-					  << (batchStart / batchSize + 1) << " of "
-					  << ((tasks.size() + batchSize - 1) / batchSize)
-					  << " (" << batchRows.size() << " PSM rows)" << std::endl;
-			CLOCKSTART;
-#pragma omp parallel
+			std::ostringstream label;
+			label << "baseline match batch " << (batchStart / batchSize + 1)
+				  << '/' << ((tasks.size() + batchSize - 1) / batchSize);
+			timing.run("Baseline Match", label.str(), batchRows.size(), "rows", [&]()
 			{
-				Isotopologue localIso = baselineIso;
-#pragma omp for schedule(dynamic)
-				for (int i = 0; i < static_cast<int>(batchRows.size()); ++i)
+#pragma omp parallel
 				{
-					const BatchRowRef &ref = batchRows[static_cast<size_t>(i)];
-					const PsmRow &row = rows[ref.rowIndex];
-					const auto scanIt = loadedScans[ref.localTaskIndex].find(row.scanNumber);
-					if (scanIt == loadedScans[ref.localTaskIndex].end())
+					Isotopologue localIso = baselineIso;
+#pragma omp for schedule(dynamic)
+					for (int i = 0; i < static_cast<int>(batchRows.size()); ++i)
 					{
-						++processingStats.missingScan;
-						continue;
-					}
+						const BatchRowRef &ref = batchRows[static_cast<size_t>(i)];
+						const PsmRow &row = rows[ref.rowIndex];
+						const auto scanIt = loadedScans[ref.localTaskIndex].find(row.scanNumber);
+						if (scanIt == loadedScans[ref.localTaskIndex].end())
+						{
+							++processingStats.missingScan;
+							continue;
+						}
 
-					std::vector<std::vector<double>> yMass, yProb, bMass, bProb;
-					if (!localIso.computeProductIon(row.peptide, yMass, yProb, bMass, bProb))
-					{
-						++processingStats.computeFailed;
-						continue;
-					}
+						std::vector<std::vector<double>> yMass, yProb, bMass, bProb;
+						if (!localIso.computeProductIon(row.peptide, yMass, yProb, bMass, bProb))
+						{
+							++processingStats.computeFailed;
+							continue;
+						}
 
-					if (!collectMatchedEnvelopeApexIntensities(bMass, bProb, yMass, yProb,
-															   scanIt->second, args.probCutoff, args.ppmTolerance,
-															   args.minMatchedEnvelopes,
-															   matchedEnvelopeSets[ref.rowIndex]))
-					{
-						++processingStats.unmatched;
-						continue;
-					}
+						if (!collectMatchedEnvelopeApexIntensities(bMass, bProb, yMass, yProb,
+																   scanIt->second, args.probCutoff, args.ppmTolerance,
+																   args.minMatchedEnvelopes,
+																   matchedEnvelopeSets[ref.rowIndex]))
+						{
+							++processingStats.unmatched;
+							continue;
+						}
 
-					baselineOk[ref.rowIndex] = 1;
+						baselineOk[ref.rowIndex] = 1;
+					}
 				}
-			}
-			CLOCKSTOP;
+			});
 		}
 	}
 }
@@ -3114,11 +3318,13 @@ int main(int argc, char **argv)
 	Isotopologue baselineIso = pristineIso;
 	try
 	{
-		setSipAbundance(baselineIso, 'C', baselineSipIsotopeIndex, 1.0);
+		const double baselineC13Pct = configuredIsotopeAbundancePct(
+			pristineIso, 'C', baselineSipIsotopeIndex);
+		setSipAbundance(baselineIso, 'C', baselineSipIsotopeIndex, baselineC13Pct);
 	}
 	catch (const std::exception &ex)
 	{
-		std::cerr << "Failed to apply baseline 1% C13 abundance: " << ex.what() << "\n";
+		std::cerr << "Failed to apply baseline natural C13 abundance: " << ex.what() << "\n";
 		return 1;
 	}
 
@@ -3129,12 +3335,19 @@ int main(int argc, char **argv)
 		omp_set_num_threads(args.threads);
 	}
 	const int effectiveThreads = std::max(1, omp_get_max_threads());
+	const double processWallStart = omp_get_wtime();
+	const double processCpuStart = processTreeCpuSeconds();
+	TimingLogger timing;
+	timing.printHeader();
 
 	ReadStats readStats;
 	std::vector<PsmRow> allRows;
 	try
 	{
-		allRows = readInputRows(args.inputPath, readStats);
+		timing.run("Read PSM", "read PSM rows", 0, "", [&]()
+		{
+			allRows = readInputRows(args.inputPath, readStats);
+		});
 	}
 	catch (const std::exception &ex)
 	{
@@ -3149,27 +3362,61 @@ int main(int argc, char **argv)
 		experimentalPeptideMassClasses.insert(peptideMassClassKey(row.peptide));
 	}
 
-	std::vector<PsmRow> rows = selectBestRowsByPeptideCharge(allRows);
-	std::cerr << "Read " << readStats.totalRows << " PSM rows; retained " << rows.size()
-			  << " highest-probability peptide/charge rows";
+	std::vector<PsmRow> rows;
+	timing.run("Select PSM", "select best peptide/charge", allRows.size(), "rows", [&]()
+	{
+		rows = selectBestRowsByPeptideCharge(allRows);
+	});
+	std::cout << "PSM: " << args.inputPath << "  ("
+			  << readStats.totalRows << " rows; " << rows.size()
+			  << " retained peptide/charge rows)\n";
 	if (readStats.shortRows > 0 || readStats.invalidRows > 0 || readStats.unsupportedMods > 0)
 	{
-		std::cerr << " (skipped short=" << readStats.shortRows
+		std::cerr << "PSM skipped rows: short=" << readStats.shortRows
 				  << ", invalid=" << readStats.invalidRows
-				  << ", unsupported_mods=" << readStats.unsupportedMods << ")";
+				  << ", unsupported_mods=" << readStats.unsupportedMods << "\n";
 	}
-	std::cerr << "\n";
 
 	std::unordered_map<std::string, fs::path> ft2Files;
 	try
 	{
-		ft2Files = collectFt2Files(args.ft2Path);
+		timing.run("Collect FT2", "collect FT2 files", 0, "", [&]()
+		{
+			ft2Files = collectFt2Files(args.ft2Path);
+		});
 	}
 	catch (const std::exception &ex)
 	{
 		std::cerr << ex.what() << "\n";
 		return 1;
 	}
+	const std::map<std::string, size_t> requestedScanCounts = requestedScanCountsBySample(rows);
+	std::vector<std::pair<std::string, fs::path>> sortedFt2Files(ft2Files.begin(), ft2Files.end());
+	std::sort(sortedFt2Files.begin(), sortedFt2Files.end(),
+			  [](const auto &a, const auto &b)
+			  { return a.second.string() < b.second.string(); });
+	if (sortedFt2Files.size() == 1)
+	{
+		const auto &entry = sortedFt2Files.front();
+		const auto countIt = requestedScanCounts.find(entry.first);
+		const size_t requestedScans = countIt == requestedScanCounts.end() ? 0 : countIt->second;
+		std::cout << "FT2: " << entry.second << "  ("
+				  << requestedScans << " requested scans)\n";
+	}
+	else
+	{
+		std::cout << "FT2: " << args.ft2Path << "  ("
+				  << sortedFt2Files.size() << " files)\n";
+		for (const auto &entry : sortedFt2Files)
+		{
+			const auto countIt = requestedScanCounts.find(entry.first);
+			const size_t requestedScans = countIt == requestedScanCounts.end() ? 0 : countIt->second;
+			std::cout << "  FT2: " << entry.second << "  ("
+					  << requestedScans << " requested scans)\n";
+		}
+	}
+	std::cout << targetAbundances.size() * (args.writeDecoy ? 2 : 1)
+			  << " HDF5 output files planned\n";
 
 	std::vector<MatchedEnvelopeSet> matchedEnvelopeSets(rows.size());
 	std::vector<char> baselineOk(rows.size(), 0);
@@ -3178,7 +3425,7 @@ int main(int argc, char **argv)
 	try
 	{
 		matchBaselineInFt2Batches(rows, ft2Files, baselineIso, args, effectiveThreads,
-								  matchedEnvelopeSets, baselineOk, processingStats);
+								  matchedEnvelopeSets, baselineOk, processingStats, timing);
 	}
 	catch (const std::exception &ex)
 	{
@@ -3202,31 +3449,30 @@ int main(int argc, char **argv)
 	{
 		size_t generatedCount = 0;
 		{
-			std::cout << "Timing parallel region: generate decoy peptides ("
-					  << rows.size() << " PSM rows)" << std::endl;
-			CLOCKSTART;
-#pragma omp parallel for schedule(dynamic) reduction(+ : generatedCount)
-			for (int i = 0; i < static_cast<int>(rows.size()); ++i)
+			timing.run("Generate Decoy", "generate decoy peptides", rows.size(), "rows", [&]()
 			{
-				const size_t rowIndex = static_cast<size_t>(i);
-				if (!baselineOk[rowIndex])
+#pragma omp parallel for schedule(dynamic) reduction(+ : generatedCount)
+				for (int i = 0; i < static_cast<int>(rows.size()); ++i)
 				{
-					continue;
+					const size_t rowIndex = static_cast<size_t>(i);
+					if (!baselineOk[rowIndex])
+					{
+						continue;
+					}
+					bool addedResidue = false;
+					if (generateDecoyPeptide(rows[rowIndex].peptide, experimentalPeptideMassClasses,
+											 args.decoySeed, rowIndex, decoyPeptides[rowIndex],
+											 addedResidue))
+					{
+						decoyAddedResidues[rowIndex] = addedResidue ? 1 : 0;
+						++generatedCount;
+					}
+					else
+					{
+						++processingStats.decoyCollision;
+					}
 				}
-				bool addedResidue = false;
-				if (generateDecoyPeptide(rows[rowIndex].peptide, experimentalPeptideMassClasses,
-										 args.decoySeed, rowIndex, decoyPeptides[rowIndex],
-										 addedResidue))
-				{
-					decoyAddedResidues[rowIndex] = addedResidue ? 1 : 0;
-					++generatedCount;
-				}
-				else
-				{
-					++processingStats.decoyCollision;
-				}
-			}
-			CLOCKSTOP;
+			});
 		}
 		decoyPeptidesGenerated = generatedCount;
 	}
@@ -3250,9 +3496,11 @@ int main(int argc, char **argv)
 	outputJobs.reserve(targetAbundances.size() * (args.writeDecoy ? 2 : 1));
 	for (double targetAbundancePct : targetAbundances)
 	{
+		const double effectiveAbundancePct = effectiveTargetSipAbundancePct(
+			pristineIso, sipAtom, targetSipIsotopeIndex, targetAbundancePct);
 		Hdf5OutputMetadata outputMetadata;
 		outputMetadata.recordKind = "target";
-		outputMetadata.targetSipAbundancePct = targetAbundancePct;
+		outputMetadata.targetSipAbundancePct = effectiveAbundancePct;
 		outputMetadata.sipAtom = sipAtom;
 		outputMetadata.sipIsotopeMassNumber = sipIsotopeMassNumber;
 		outputMetadata.probCutoff = args.probCutoff;
@@ -3280,17 +3528,17 @@ int main(int argc, char **argv)
 	}
 
 	{
-		std::cout << "Timing parallel region: process output HDF5 files with fork pool ("
-				  << outputJobs.size() << " files, up to " << effectiveThreads
-				  << " processes)" << std::endl;
-		CLOCKSTART;
-		if (!runOutputJobs(outputJobs, rows, baselineOk, matchedEnvelopeSets,
-						   decoyPeptides, decoyAddedResidues, pristineIso, args,
-						   sipAtom, targetSipIsotopeIndex, effectiveThreads, processingStats))
+		bool outputOk = false;
+		timing.run("Write HDF5", "write output HDF5 files", outputJobs.size(), "files", [&]()
+		{
+			outputOk = runOutputJobs(outputJobs, rows, baselineOk, matchedEnvelopeSets,
+									 decoyPeptides, decoyAddedResidues, pristineIso, args,
+									 sipAtom, targetSipIsotopeIndex, effectiveThreads, processingStats);
+		});
+		if (!outputOk)
 		{
 			return 1;
 		}
-		CLOCKSTOP;
 	}
 
 	bool allOutputSucceeded = true;
@@ -3350,5 +3598,10 @@ int main(int argc, char **argv)
 				  << ", decoy_compute_failed=" << processingStats.decoyComputeFailed.load();
 	}
 	std::cerr << "\n";
+	const double processWallSeconds = omp_get_wtime() - processWallStart;
+	const double processCpuSeconds = processTreeCpuSeconds() - processCpuStart;
+	timing.printSummary(processWallSeconds, processCpuSeconds,
+						readStats.totalRows, rows.size(), baselineMatchedRows,
+						outputFilesWritten + decoyFilesWritten);
 	return 0;
 }

@@ -14,12 +14,14 @@
 #include <set>
 #include <unordered_map>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <cctype>
 #include <cerrno>
+#include <ctime>
 #include <filesystem>
 #include <chrono>
 #include <memory>
@@ -32,6 +34,7 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -83,6 +86,165 @@ struct MassTolerance
 	double daAt(double mz) const
 	{
 		return ppm ? (value * mz / 1.0e6) : value;
+	}
+};
+
+double timevalSeconds(const timeval &tv)
+{
+	return static_cast<double>(tv.tv_sec) + static_cast<double>(tv.tv_usec) / 1.0e6;
+}
+
+double processTreeCpuSeconds()
+{
+	rusage self{};
+	rusage children{};
+	getrusage(RUSAGE_SELF, &self);
+	getrusage(RUSAGE_CHILDREN, &children);
+	return timevalSeconds(self.ru_utime) + timevalSeconds(self.ru_stime) +
+		   timevalSeconds(children.ru_utime) + timevalSeconds(children.ru_stime);
+}
+
+struct TimingEntry
+{
+	std::string group;
+	std::string label;
+	std::string workName;
+	double wallSeconds = 0.0;
+	double cpuSeconds = 0.0;
+	long memoryMbDelta = 0;
+	size_t workItems = 0;
+};
+
+struct TimingLogger
+{
+	std::vector<TimingEntry> entries;
+
+	void printHeader() const
+	{
+		std::cout << "\nTiming log\n"
+				  << "  " << std::left << std::setw(34) << "Region"
+				  << std::right << std::setw(10) << "Wall(s)"
+				  << std::setw(10) << "CPU(s)"
+				  << std::setw(9) << "CPU/Wall"
+				  << std::setw(11) << "Mem(MB)"
+				  << "  Work\n";
+	}
+
+	template <typename Fn>
+	void run(const std::string &group,
+			 const std::string &label,
+			 size_t workItems,
+			 const std::string &workName,
+			 Fn &&fn)
+	{
+		const long memStart = static_cast<long>(checkMemoryUsage());
+		const double cpuStart = processTreeCpuSeconds();
+		const double wallStart = omp_get_wtime();
+		fn();
+		const double wallSeconds = omp_get_wtime() - wallStart;
+		const double cpuSeconds = processTreeCpuSeconds() - cpuStart;
+		const long memEnd = static_cast<long>(checkMemoryUsage());
+
+		TimingEntry entry;
+		entry.group = group;
+		entry.label = label;
+		entry.workName = workName;
+		entry.wallSeconds = wallSeconds;
+		entry.cpuSeconds = cpuSeconds;
+		entry.memoryMbDelta = memEnd - memStart;
+		entry.workItems = workItems;
+		entries.push_back(entry);
+		printEntry(entry);
+	}
+
+	static void printEntry(const TimingEntry &entry)
+	{
+		const double speedup = entry.wallSeconds > 0.0 ? entry.cpuSeconds / entry.wallSeconds : 0.0;
+		std::cout << "  " << std::left << std::setw(34) << entry.label
+				  << std::right << std::setw(10) << std::fixed << std::setprecision(3) << entry.wallSeconds
+				  << std::setw(10) << std::fixed << std::setprecision(3) << entry.cpuSeconds
+				  << std::setw(9) << std::fixed << std::setprecision(2) << speedup
+				  << std::setw(11) << std::showpos << entry.memoryMbDelta << std::noshowpos;
+		if (entry.workItems > 0 && !entry.workName.empty())
+		{
+			const double rate = entry.wallSeconds > 0.0
+									? static_cast<double>(entry.workItems) / entry.wallSeconds
+									: 0.0;
+			std::cout << "  " << entry.workItems << ' ' << entry.workName
+					  << " (" << std::fixed << std::setprecision(0) << rate << "/s)";
+		}
+		std::cout << '\n';
+	}
+
+	void printSummary(double totalWallSeconds,
+					  double totalCpuSeconds,
+					  size_t totalRecords,
+					  size_t totalCandidates,
+					  size_t retainedPsms,
+					  size_t writtenRows) const
+	{
+		std::map<std::string, TimingEntry> totals;
+		std::vector<std::string> groupOrder;
+		for (const TimingEntry &entry : entries)
+		{
+			if (totals.find(entry.group) == totals.end())
+				groupOrder.push_back(entry.group);
+			TimingEntry &sum = totals[entry.group];
+			sum.group = entry.group;
+			sum.label = entry.group;
+			sum.wallSeconds += entry.wallSeconds;
+			sum.cpuSeconds += entry.cpuSeconds;
+			sum.memoryMbDelta += entry.memoryMbDelta;
+			sum.workItems += entry.workItems;
+			if (sum.workName.empty())
+				sum.workName = entry.workName;
+		}
+
+		std::cout << "\nTiming summary\n"
+				  << "  " << std::left << std::setw(28) << "Stage"
+				  << std::right << std::setw(10) << "Wall(s)"
+				  << std::setw(9) << "Share"
+				  << std::setw(10) << "CPU(s)"
+				  << std::setw(9) << "CPU/Wall"
+				  << std::setw(11) << "Mem(MB)"
+				  << '\n';
+		for (const std::string &group : groupOrder)
+		{
+			const TimingEntry &entry = totals[group];
+			const double share = totalWallSeconds > 0.0 ? entry.wallSeconds / totalWallSeconds * 100.0 : 0.0;
+			const double speedup = entry.wallSeconds > 0.0 ? entry.cpuSeconds / entry.wallSeconds : 0.0;
+			std::cout << "  " << std::left << std::setw(28) << entry.label
+					  << std::right << std::setw(10) << std::fixed << std::setprecision(3) << entry.wallSeconds
+					  << std::setw(8) << std::fixed << std::setprecision(1) << share << "%"
+					  << std::setw(10) << std::fixed << std::setprecision(3) << entry.cpuSeconds
+					  << std::setw(9) << std::fixed << std::setprecision(2) << speedup
+					  << std::setw(11) << std::showpos << entry.memoryMbDelta << std::noshowpos
+					  << '\n';
+		}
+
+		const double totalSpeedup = totalWallSeconds > 0.0 ? totalCpuSeconds / totalWallSeconds : 0.0;
+		std::cout << "  " << std::left << std::setw(28) << "End-to-end"
+				  << std::right << std::setw(10) << std::fixed << std::setprecision(3) << totalWallSeconds
+				  << std::setw(8) << "100.0%"
+				  << std::setw(10) << std::fixed << std::setprecision(3) << totalCpuSeconds
+				  << std::setw(9) << std::fixed << std::setprecision(2) << totalSpeedup
+				  << std::setw(11) << "-" << '\n';
+
+		std::cout << "\nThroughput\n"
+				  << "  HDF5 records loaded:       " << totalRecords << '\n'
+				  << "  Assigned candidates:       " << totalCandidates << '\n'
+				  << "  Retained top PSMs:         " << retainedPsms << '\n'
+				  << "  PIN rows written:          " << writtenRows << '\n';
+		if (totalWallSeconds > 0.0)
+		{
+			std::cout << "  Records/sec end-to-end:    "
+					  << std::fixed << std::setprecision(0)
+					  << static_cast<double>(totalRecords) / totalWallSeconds << '\n'
+					  << "  Candidates/sec end-to-end: "
+					  << std::fixed << std::setprecision(0)
+					  << static_cast<double>(totalCandidates) / totalWallSeconds << '\n';
+		}
+		std::cout << '\n';
 	}
 };
 
@@ -1140,7 +1302,7 @@ struct PrecursorMatch
 	int isotopicShift = 0;
 	double mzShift = 0.0;        // (real_mz - sip_mz) Da
 	double mzAbsErrPpm = 0.0;
-	double deltaRT = 0.0;        // scan.RT - record.rtMinutes (minutes)
+	double deltaRT = 0.0;        // abs(scan.RT - record.rtMinutes) in minutes
 	int matchedCharge = 0;
 	double matchedMz = 0.0;
 };
@@ -1213,7 +1375,7 @@ PrecursorMatch matchPrecursor(const MS2Scan *scan,
 			best.isotopicShift = shift;
 			best.mzShift = dm;
 			best.mzAbsErrPpm = (rec.topPrecursorMz > 0) ? std::fabs(resid) / rec.topPrecursorMz * 1e6 : 0.0;
-			best.deltaRT = dRt;
+			best.deltaRT = std::fabs(dRt);
 			best.matchedCharge = realCharge;
 			best.matchedMz = realMz;
 		}
@@ -1317,6 +1479,67 @@ void alignSpectra(const std::vector<double> &fragMz,
 	norm(q);
 }
 
+// HDF5-driven sparse alignment for cosine: keep every positive HDF5 fragment
+// intensity and pair it with the nearest observed scan peak within tolerance,
+// or zero when no observed peak is present.
+void alignSpectraSparseCosine(const std::vector<double> &fragMz,
+							  const std::vector<double> &fragInt,
+							  const std::vector<double> &scanMz,
+							  const std::vector<double> &scanIntensity,
+							  const MassTolerance &tol,
+							  std::vector<double> &p,
+							  std::vector<double> &q)
+{
+	p.clear();
+	q.clear();
+	const size_t nFrag = std::min(fragMz.size(), fragInt.size());
+	if (nFrag == 0)
+		return;
+
+	const size_t nScan = std::min(scanMz.size(), scanIntensity.size());
+	for (size_t i = 0; i < nFrag; ++i)
+	{
+		const double m = fragMz[i];
+		const double intensity = fragInt[i];
+		if (intensity <= 0.0 || !std::isfinite(intensity) || !std::isfinite(m))
+			continue;
+
+		double bestI = 0.0;
+		if (nScan > 0)
+		{
+			const double tolDa = tol.daAt(m);
+			auto it = std::lower_bound(scanMz.begin(), scanMz.begin() + static_cast<std::ptrdiff_t>(nScan),
+									   m - tolDa);
+			double bestErr = tolDa + 1.0;
+			while (it != scanMz.begin() + static_cast<std::ptrdiff_t>(nScan) && *it <= m + tolDa)
+			{
+				const double err = std::fabs(*it - m);
+				if (err < bestErr)
+				{
+					bestErr = err;
+					bestI = scanIntensity[static_cast<size_t>(it - scanMz.begin())];
+				}
+				++it;
+			}
+		}
+
+		p.push_back(intensity);
+		q.push_back(bestI > 0.0 && std::isfinite(bestI) ? bestI : 0.0);
+	}
+
+	auto norm = [](std::vector<double> &v)
+	{
+		double s = 0.0;
+		for (double x : v)
+			s += x;
+		if (s > 0.0)
+			for (double &x : v)
+				x /= s;
+	};
+	norm(p);
+	norm(q);
+}
+
 double computeCosine(const std::vector<double> &p, const std::vector<double> &q)
 {
 	double dot = 0.0, np = 0.0, nq = 0.0;
@@ -1378,6 +1601,40 @@ int sipAtomIndex(const std::string &sipAtom)
 	return 0;
 }
 
+int sipNominalShiftPerAtom(const std::string &sipAtom)
+{
+	if (sipAtom.empty())
+		return 1;
+	const char atom = static_cast<char>(std::toupper(static_cast<unsigned char>(sipAtom.front())));
+	return (atom == 'O' || atom == 'S') ? 2 : 1;
+}
+
+double expectedNaturalNominalShiftExceptTarget(const std::array<int, 6> &atomCounts,
+											   int targetAtomIndex,
+											   int targetIsotopeIndex)
+{
+	double expectedShift = 0.0;
+	const auto &atomDistributions = ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution;
+	const size_t atomCount = std::min(atomCounts.size(), atomDistributions.size());
+	for (size_t atomIdx = 0; atomIdx < atomCount; ++atomIdx)
+	{
+		if (atomCounts[atomIdx] <= 0)
+			continue;
+		const auto &probs = atomDistributions[atomIdx].vProb;
+		for (size_t isotopeIdx = 1; isotopeIdx < probs.size(); ++isotopeIdx)
+		{
+			if (static_cast<int>(atomIdx) == targetAtomIndex &&
+				static_cast<int>(isotopeIdx) == targetIsotopeIndex)
+			{
+				continue;
+			}
+			expectedShift += static_cast<double>(atomCounts[atomIdx]) *
+							 static_cast<double>(isotopeIdx) * probs[isotopeIdx];
+		}
+	}
+	return expectedShift;
+}
+
 int countMissCleavage(const std::string &naked)
 {
 	if (naked.size() <= 1)
@@ -1430,6 +1687,7 @@ struct IsotopicPeak
 	double mz = 0.0;
 	int charge = 0;
 	double intensity = 0.0;
+	int isotopeIndex = -1;
 };
 
 int ft1PeakCharge(const Ft1Scan &scan, size_t idx)
@@ -1471,7 +1729,9 @@ size_t findFt1Peak(const Ft1Scan &scan,
 std::vector<IsotopicPeak> findFt1IsotopicPeaks(const Ft1Data *ft1Data,
 											   int &ms1ScanNumber,
 											   int precursorCharge,
+											   double monoPrecursorMz,
 											   double matchedPrecursorMz,
+											   int maxNominalShift,
 											   const MassTolerance &mzTol)
 {
 	std::vector<IsotopicPeak> peaks;
@@ -1482,47 +1742,63 @@ std::vector<IsotopicPeak> findFt1IsotopicPeaks(const Ft1Data *ft1Data,
 		return peaks;
 
 	const double neutronMz = ProNovoConfig::getNeutronMass() / precursorCharge;
+	constexpr int kMs1QuantWindowNeutrons = 10;
+	constexpr int kMs1AssignmentIndexTolerance = 1;
+	const int assignedIndex = static_cast<int>(std::round(
+		(matchedPrecursorMz - monoPrecursorMz) / neutronMz));
+	if (assignedIndex < 0 || assignedIndex > maxNominalShift)
+		return peaks;
 
 	size_t scanIdx = scanIt->second;
-	size_t peakIdx = std::numeric_limits<size_t>::max();
 	for (int attempt = 0; attempt < 3; ++attempt)
 	{
 		const Ft1Scan &scan = ft1Data->scans[scanIdx];
-		peakIdx = findFt1Peak(scan, matchedPrecursorMz, mzTol, precursorCharge);
-		if (peakIdx == std::numeric_limits<size_t>::max())
+		peaks.clear();
+		for (int isotopeIndex = 0; isotopeIndex <= maxNominalShift; ++isotopeIndex)
 		{
-			peakIdx = findFt1Peak(scan, matchedPrecursorMz, mzTol);
+			const double expectedMz = monoPrecursorMz + isotopeIndex * neutronMz;
+			if (std::fabs(expectedMz - matchedPrecursorMz) >
+				kMs1QuantWindowNeutrons * neutronMz)
+			{
+				continue;
+			}
+
+			size_t idx = findFt1Peak(scan, expectedMz, mzTol, precursorCharge);
+			if (idx == std::numeric_limits<size_t>::max())
+			{
+				idx = findFt1Peak(scan, expectedMz, mzTol);
+			}
+			if (idx != std::numeric_limits<size_t>::max())
+			{
+				peaks.push_back({scan.mz[idx],
+								 ft1PeakCharge(scan, idx),
+								 scan.intensity[idx],
+								 isotopeIndex});
+			}
 		}
-		if (peakIdx != std::numeric_limits<size_t>::max())
+		bool hasAssignmentAnchor = false;
+		bool hasExactAssignmentAnchor = false;
+		for (const IsotopicPeak &peak : peaks)
+		{
+			const int indexDelta = std::abs(peak.isotopeIndex - assignedIndex);
+			if (indexDelta <= kMs1AssignmentIndexTolerance)
+				hasAssignmentAnchor = true;
+			if (indexDelta == 0)
+				hasExactAssignmentAnchor = true;
+		}
+		if (!peaks.empty() && hasAssignmentAnchor &&
+			(peaks.size() > 1 || hasExactAssignmentAnchor))
 		{
 			ms1ScanNumber = scan.scanNumber;
 			break;
 		}
+		peaks.clear();
 		if (scanIdx == 0)
 			break;
 		--scanIdx;
 	}
-	if (peakIdx == std::numeric_limits<size_t>::max())
+	if (peaks.empty())
 		return peaks;
-
-	const Ft1Scan &scan = ft1Data->scans[scanIdx];
-	constexpr int kNumIsotopicPeaksEachSide = 20;
-	peaks.reserve(kNumIsotopicPeaksEachSide * 2 + 1);
-	peaks.push_back({scan.mz[peakIdx], ft1PeakCharge(scan, peakIdx), scan.intensity[peakIdx]});
-
-	for (int direction : {-1, 1})
-	{
-		for (int iso = 1; iso <= kNumIsotopicPeaksEachSide; ++iso)
-		{
-			const double expectedMz = scan.mz[peakIdx] + direction * iso * neutronMz;
-			const size_t idx = findFt1Peak(scan, expectedMz, mzTol);
-			if (idx == std::numeric_limits<size_t>::max())
-				break;
-			peaks.push_back({scan.mz[idx],
-							 ft1PeakCharge(scan, idx),
-							 scan.intensity[idx]});
-		}
-	}
 
 	std::sort(peaks.begin(), peaks.end(),
 			  [](const IsotopicPeak &a, const IsotopicPeak &b)
@@ -1541,6 +1817,7 @@ std::vector<IsotopicPeak> ft1IsotopicPeaksForMatch(const Ft1Data *ft1Data,
 												   const SipRecord &rec,
 												   const PrecursorMatch &match,
 												   const MassTolerance &mzTol,
+												   const std::string &sipAtom,
 												   double &baseMass)
 {
 	baseMass = 0.0;
@@ -1551,8 +1828,17 @@ std::vector<IsotopicPeak> ft1IsotopicPeaksForMatch(const Ft1Data *ft1Data,
 	baseMass = avg.calPrecursorBaseMass(peptideBodyWithPtms(rec.peptide));
 	int ms1ScanNumber = scan->iParentScanID;
 	const int precursorCharge = rec.charge > 0 ? rec.charge : match.matchedCharge;
+	avg.calPepAtomCounts(peptideBodyWithPtms(rec.peptide));
+	const int atomIndex = sipAtomIndex(sipAtom);
+	const int targetNominalShift = sipNominalShiftPerAtom(sipAtom);
+	const double maxTargetShift = atomIndex < static_cast<int>(avg.pepAtomCounts.size())
+									  ? avg.pepAtomCounts[atomIndex] * targetNominalShift
+									  : 0.0;
+	const int maxNominalShift = std::min(512, std::max(20, static_cast<int>(std::ceil(maxTargetShift)) + 20));
+	const double monoPrecursorMz = baseMass / precursorCharge + ProNovoConfig::getProtonMass();
 	return findFt1IsotopicPeaks(
-		ft1Data, ms1ScanNumber, precursorCharge, match.matchedMz, mzTol);
+		ft1Data, ms1ScanNumber, precursorCharge, monoPrecursorMz,
+		match.matchedMz, maxNominalShift, mzTol);
 }
 
 struct Ms1AbundanceResult
@@ -1581,7 +1867,7 @@ Ms1AbundanceResult ms1AbundanceFromFt1Peaks(const std::vector<IsotopicPeak> &pea
 	const char atom = sipAtom.empty()
 						  ? 'C'
 						  : static_cast<char>(std::toupper(static_cast<unsigned char>(sipAtom.front())));
-	const double deltaNeutron = (atom == 'O' || atom == 'S') ? 2.0 : 1.0;
+	const int targetIsotopeIndex = sipNominalShiftPerAtom(std::string(1, atom));
 	avg.calPepAtomCounts(peptideBodyWithPtms(rec.peptide));
 	const int atomIndex = sipAtomIndex(sipAtom);
 	const double atomNumber = avg.pepAtomCounts[atomIndex];
@@ -1590,47 +1876,25 @@ Ms1AbundanceResult ms1AbundanceFromFt1Peaks(const std::vector<IsotopicPeak> &pea
 		return {};
 	}
 
-	const double maxIsotopeIndex = atomNumber * deltaNeutron;
+	const double maxIsotopeIndex = atomNumber * targetIsotopeIndex;
 	const double baseMz = baseMass / precursorCharge + ProNovoConfig::getProtonMass();
-
-	size_t firstUsefulPeak = peaks.size();
-	for (size_t i = 0; i < peaks.size(); ++i)
-	{
-		if (peaks[i].intensity > 0.0 && peaks[i].mz > baseMz)
-		{
-			firstUsefulPeak = i;
-			break;
-		}
-	}
-	if (firstUsefulPeak == peaks.size())
-	{
-		return {};
-	}
-
-	const int firstDeltaNeutron = static_cast<int>(std::round(
-		(peaks[firstUsefulPeak].mz - baseMz) /
-		ProNovoConfig::getNeutronMass() * precursorCharge));
-	if (firstDeltaNeutron < 0)
-	{
-		return {};
-	}
 
 	double sumIntensity = 0.0;
 	double weightedIsotopeIndex = 0.0;
 	int validPeakCount = 0;
-	for (size_t i = firstUsefulPeak; i < peaks.size(); ++i)
+	for (size_t i = 0; i < peaks.size(); ++i)
 	{
 		const IsotopicPeak &peak = peaks[i];
 		if (peak.intensity <= 0.0)
 		{
 			continue;
 		}
-		const double deltaFromFirst =
-			(peak.mz - peaks[firstUsefulPeak].mz) /
-			ProNovoConfig::getNeutronMass() * precursorCharge;
-		const int isotopeIndex = firstDeltaNeutron +
-								 static_cast<int>(std::round(deltaFromFirst));
-		if (isotopeIndex < firstDeltaNeutron)
+		const int isotopeIndex = peak.isotopeIndex >= 0
+									 ? peak.isotopeIndex
+									 : static_cast<int>(std::round(
+										   (peak.mz - baseMz) /
+										   ProNovoConfig::getNeutronMass() * precursorCharge));
+		if (isotopeIndex < 0)
 		{
 			continue;
 		}
@@ -1644,7 +1908,9 @@ Ms1AbundanceResult ms1AbundanceFromFt1Peaks(const std::vector<IsotopicPeak> &pea
 	}
 
 	const double meanIsotopeIndex = weightedIsotopeIndex / sumIntensity;
-	double pct = meanIsotopeIndex / maxIsotopeIndex * 100.0;
+	const double naturalOtherShift = expectedNaturalNominalShiftExceptTarget(
+		avg.pepAtomCounts, atomIndex, targetIsotopeIndex);
+	double pct = (meanIsotopeIndex - naturalOtherShift) / maxIsotopeIndex * 100.0;
 	if (!std::isfinite(pct))
 	{
 		return {};
@@ -1696,6 +1962,8 @@ const char *kPinHeader =
 	"matchedYenvelopes\tmatchedBenvelopes\tdeltaRT\t"
 	"diffScores\tlog10_precursorIntensities\tPeptide\tProteins\n";
 
+constexpr double kMinPinWdpScore = 0.5;
+
 struct MergedRow
 {
 	ShardPsmRow row;
@@ -1705,115 +1973,79 @@ struct MergedRow
 	int rank = 0;
 };
 
-void writePinFile(const std::string &path,
-				  const std::string &ft2Basename,
-				  const std::vector<MergedRow> &rows)
+size_t writePinFileWithDiff(const std::string &path,
+							const std::string &ft2Basename,
+							const std::vector<MergedRow> &rows)
 {
-	std::ofstream os(path);
-	if (!os)
-	{
-		std::cerr << "Cannot write " << path << "\n";
-		return;
-	}
-	os.imbue(std::locale::classic());
-	os << kPinHeader;
-	os << std::fixed << std::setprecision(6);
+	std::vector<const MergedRow *> outputRows;
+	outputRows.reserve(rows.size());
 	for (const auto &m : rows)
-	{
-		const auto &r = m.row;
-		os << ft2Basename << "." << m.scanNumber << "." << m.rank << '\t';
-		os << m.label << '\t';
-		os << m.scanNumber << '\t';
-		os << r.calcMassNeutral << '\t';
-		os << r.rtScan << '\t';
-		os << m.rank << '\t';
-		os << r.parentCharge << '\t';
-		os << r.mzAbsErrPpm << '\t';
-		os << r.isotopicShift << '\t';
-		os << r.mzShiftDa << '\t';
-		os << r.peptideLength << '\t';
-		os << r.missCleavage << '\t';
-		os << r.ptmCount << '\t';
-		os << r.isotopicPeakNumbers << '\t';
-		os << r.ms1IsotopicAbundancePct << '\t';
-		os << m.ms2Pct << '\t';
-		os << (r.ms1IsotopicAbundancePct - m.ms2Pct) << '\t';
-		os << r.wdp << '\t';
-		os << r.xcorr << '\t';
-		os << r.mvh << '\t';
-		os << r.entropy << '\t';
-		os << r.cosine << '\t';
-		os << r.matchedY << '\t';
-		os << r.matchedB << '\t';
-		os << r.deltaRT << '\t';
-		// diffScores = top WDP for this scan&label - this WDP (0 for rank 1)
-		// computed later (passed in)
-		// For now placeholder: use rank-1 diff
-		double diff = 0.0;
-		os << diff << '\t';
-		os << r.log10PrecursorIntensity << '\t';
-		os << r.peptide << '\t';
-		os << r.proteins << '\n';
-	}
-}
+		outputRows.push_back(&m);
 
-void writePinFileWithDiff(const std::string &path,
-						  const std::string &ft2Basename,
-						  std::vector<MergedRow> &rows)
-{
-	// fill in diffScores per (scanNumber, label)
-	std::map<std::pair<int, int>, double> topByGroup;
-	for (auto &m : rows)
+	// Target and decoy rows are ranked together per scan, so diffScores use
+	// the best WDP among both labels for that scan.
+	std::map<int, double> topByScan;
+	for (const MergedRow *m : outputRows)
 	{
-		auto key = std::make_pair(m.scanNumber, m.label);
-		auto it = topByGroup.find(key);
-		if (it == topByGroup.end() || m.row.wdp > it->second)
-			topByGroup[key] = m.row.wdp;
+		auto it = topByScan.find(m->scanNumber);
+		if (it == topByScan.end() || m->row.wdp > it->second)
+			topByScan[m->scanNumber] = m->row.wdp;
 	}
+
+	std::ostringstream pin;
+	pin.imbue(std::locale::classic());
+	pin << kPinHeader;
+	pin << std::fixed << std::setprecision(6);
+	for (const MergedRow *m : outputRows)
+	{
+		const auto &r = m->row;
+		double top = topByScan[m->scanNumber];
+		double diff = top - r.wdp;
+		pin << ft2Basename << "." << m->scanNumber << "." << m->rank << '\t';
+		pin << m->label << '\t';
+		pin << m->scanNumber << '\t';
+		pin << r.calcMassNeutral << '\t';
+		pin << r.rtScan << '\t';
+		pin << m->rank << '\t';
+		pin << r.parentCharge << '\t';
+		pin << r.mzAbsErrPpm << '\t';
+		pin << r.isotopicShift << '\t';
+		pin << r.mzShiftDa << '\t';
+		pin << r.peptideLength << '\t';
+		pin << r.missCleavage << '\t';
+		pin << r.ptmCount << '\t';
+		pin << r.isotopicPeakNumbers << '\t';
+		pin << r.ms1IsotopicAbundancePct << '\t';
+		pin << m->ms2Pct << '\t';
+		pin << (r.ms1IsotopicAbundancePct - m->ms2Pct) << '\t';
+		pin << r.wdp << '\t';
+		pin << r.xcorr << '\t';
+		pin << r.mvh << '\t';
+		pin << r.entropy << '\t';
+		pin << r.cosine << '\t';
+		pin << r.matchedY << '\t';
+		pin << r.matchedB << '\t';
+		pin << r.deltaRT << '\t';
+		pin << diff << '\t';
+		pin << r.log10PrecursorIntensity << '\t';
+		pin << r.peptide << '\t';
+		pin << r.proteins << '\n';
+	}
+
+	const std::string pinText = pin.str();
 	std::ofstream os(path);
 	if (!os)
 	{
 		std::cerr << "Cannot write " << path << "\n";
-		return;
+		return 0;
 	}
-	os.imbue(std::locale::classic());
-	os << kPinHeader;
-	os << std::fixed << std::setprecision(6);
-	for (const auto &m : rows)
+	os.write(pinText.data(), static_cast<std::streamsize>(pinText.size()));
+	if (!os)
 	{
-		const auto &r = m.row;
-		double top = topByGroup[std::make_pair(m.scanNumber, m.label)];
-		double diff = top - r.wdp;
-		os << ft2Basename << "." << m.scanNumber << "." << m.rank << '\t';
-		os << m.label << '\t';
-		os << m.scanNumber << '\t';
-		os << r.calcMassNeutral << '\t';
-		os << r.rtScan << '\t';
-		os << m.rank << '\t';
-		os << r.parentCharge << '\t';
-		os << r.mzAbsErrPpm << '\t';
-		os << r.isotopicShift << '\t';
-		os << r.mzShiftDa << '\t';
-		os << r.peptideLength << '\t';
-		os << r.missCleavage << '\t';
-		os << r.ptmCount << '\t';
-		os << r.isotopicPeakNumbers << '\t';
-		os << r.ms1IsotopicAbundancePct << '\t';
-		os << m.ms2Pct << '\t';
-		os << (r.ms1IsotopicAbundancePct - m.ms2Pct) << '\t';
-		os << r.wdp << '\t';
-		os << r.xcorr << '\t';
-		os << r.mvh << '\t';
-		os << r.entropy << '\t';
-		os << r.cosine << '\t';
-		os << r.matchedY << '\t';
-		os << r.matchedB << '\t';
-		os << r.deltaRT << '\t';
-		os << diff << '\t';
-		os << r.log10PrecursorIntensity << '\t';
-		os << r.peptide << '\t';
-		os << r.proteins << '\n';
+		std::cerr << "Failed while writing " << path << "\n";
+		return 0;
 	}
+	return outputRows.size();
 }
 
 // -------------------- Parent: per-FT2 driver --------------------
@@ -2587,7 +2819,7 @@ ShardPsmRow makeScoringRow(size_t scanIdx,
 {
 	double baseMass = 0.0;
 	const std::vector<IsotopicPeak> ft1Peaks = ft1IsotopicPeaksForMatch(
-		ft1Data, scan, rec, match, mzTol, baseMass);
+		ft1Data, scan, rec, match, mzTol, labeledRecord.sipAtom, baseMass);
 	const Ms1AbundanceResult ms1Abundance = ms1AbundanceFromFt1Peaks(
 		ft1Peaks, baseMass, rec, match, labeledRecord.sipAtom);
 
@@ -2628,16 +2860,19 @@ int processOneFt2(const Args &args, const std::string &ft2Path,
 				  const std::vector<std::string> &hdf5Files,
 				  const Ft1Data *ft1Data)
 {
+	const double processWallStart = omp_get_wtime();
+	const double processCpuStart = processTreeCpuSeconds();
+	TimingLogger timing;
+
 	const std::string ft2Basename = fs::path(ft2Path).stem().string();
-	std::cout << "FT2: " << ft2Path << "  (" << hdf5Files.size() << " HDF5 files)\n";
 
 	// ppm mode is approximated to a fixed Da window at representative m/z
-	// (MS1 at 1000 Da, MS2 at 500 Da). My matchPrecursor / alignSpectra /
+	// (1000 m/z for both MS1 and MS2). My matchPrecursor / alignSpectra /
 	// countMatchedEnvelopes use the ppm value DIRECTLY (per-peak scaling),
 	// so they remain exact ppm; only the upstream scoring funcs see the
 	// approximated Da window.
 	const double parentTolRefMz = 1000.0;
-	const double fragTolRefMz = 500.0;
+	const double fragTolRefMz = 1000.0;
 	const double parentTolDa = args.toleranceMs1Ppm
 								   ? args.toleranceMs1 * parentTolRefMz / 1.0e6
 								   : args.toleranceMs1;
@@ -2667,26 +2902,28 @@ int processOneFt2(const Args &args, const std::string &ft2Path,
 	// -------- Read FT2 and score assigned SIP spectra --------
 	const int nThreads = std::max(1, args.threads);
 	omp_set_num_threads(nThreads);
+	timing.printHeader();
 
 	std::vector<MS2Scan *> scans;
-	if (!readFt2File(ft2Path, scans))
+	bool readFt2Ok = false;
+	timing.run("Read FT2", "read FT2 scans", 0, "", [&]()
+			   { readFt2Ok = readFt2File(ft2Path, scans); });
+	if (!readFt2Ok)
 	{
 		std::cerr << "Parent: cannot read " << ft2Path << "\n";
 		return 3;
 	}
+	std::cout << "FT2: " << ft2Path << "  (" << scans.size() << " scans)\n";
+	std::cout << "HDF5: " << (fs::path(args.hdf5Dir) / "*.h5").string()
+			  << " (" << hdf5Files.size() << " percentages)\n";
 	auto preprocessScans = [&]()
 	{
 #pragma omp parallel for schedule(guided)
 		for (size_t i = 0; i < scans.size(); ++i)
 			scans[i]->preprocess();
 	};
-	{
-		std::cout << "Timing parallel region: preprocess FT2 scans ("
-				  << scans.size() << " scans)" << std::endl;
-		CLOCKSTART;
-		preprocessScans();
-		CLOCKSTOP;
-	}
+	timing.run("Preprocess FT2", "preprocess FT2 scans",
+			   scans.size(), "scans", preprocessScans);
 
 	MassTolerance mzTol{args.toleranceMs1Ppm, args.toleranceMs1};
 	MassTolerance fragTol{args.toleranceMs2Ppm, args.toleranceMs2};
@@ -2756,13 +2993,8 @@ int processOneFt2(const Args &args, const std::string &ft2Path,
 			}
 		}
 	};
-	{
-		std::cout << "Timing parallel region: prepare scan scoring ("
-				  << scans.size() << " scans, " << nThreads << " threads)" << std::endl;
-		CLOCKSTART;
-		prepareScanScoring();
-		CLOCKSTOP;
-	}
+	timing.run("Prepare scan scoring", "prepare scan scoring",
+			   scans.size(), "scans", prepareScanScoring);
 
 	// Per-scan WDP winners split by label. Entries are self-contained so the
 	// current HDF5 cache batch can be freed after each scoring pass.
@@ -2784,18 +3016,14 @@ int processOneFt2(const Args &args, const std::string &ft2Path,
 		{
 			hdf5LoadFailures += loadHdf5Batch(hdf5Files, batchBegin, batchEnd, batchRecords);
 		};
-		{
-			std::cout << "Timing step: load HDF5 batch " << batchesScored
-					  << " of " << ((hdf5Files.size() + cacheBatchSize - 1) / cacheBatchSize)
-					  << " (" << (batchEnd - batchBegin) << " files)" << std::endl;
-			CLOCKSTART;
-			loadBatch();
-			CLOCKSTOP;
-		}
+		const size_t totalBatches = (hdf5Files.size() + cacheBatchSize - 1) / cacheBatchSize;
+		std::ostringstream loadLabel;
+		loadLabel << "load HDF5 batch " << batchesScored << '/' << totalBatches;
+		timing.run("Load HDF5", loadLabel.str(),
+				   batchEnd - batchBegin, "files", loadBatch);
 
 		const size_t nRec = batchRecords.size();
 		totalRecordsScored += nRec;
-		std::cout << "  Loaded " << nRec << " HDF5 records\n";
 		if (nRec == 0)
 			continue;
 
@@ -2808,13 +3036,10 @@ int processOneFt2(const Args &args, const std::string &ft2Path,
 														 mzIndex, mzTol, rtTol,
 														 scanCandidates);
 		};
-		{
-			std::cout << "Timing parallel region: assign SIP spectra to FT2 scans for HDF5 batch "
-					  << batchesScored << " (" << nRec << " records)" << std::endl;
-			CLOCKSTART;
-			assignBatch();
-			CLOCKSTOP;
-		}
+		std::ostringstream assignLabel;
+		assignLabel << "assign candidates batch " << batchesScored << '/' << totalBatches;
+		timing.run("Assign candidates", assignLabel.str(),
+				   nRec, "records", assignBatch);
 		totalAssignedCandidates += assignedCandidates;
 
 		auto scoreBatch = [&]()
@@ -2860,13 +3085,10 @@ int processOneFt2(const Args &args, const std::string &ft2Path,
 				}
 			}
 		};
-		{
-			std::cout << "Timing parallel region: rank assigned SIP spectra by WDP for HDF5 batch "
-					  << batchesScored << " (" << assignedCandidates << " candidates)" << std::endl;
-			CLOCKSTART;
-			scoreBatch();
-			CLOCKSTOP;
-		}
+		std::ostringstream rankLabel;
+		rankLabel << "rank WDP batch " << batchesScored << '/' << totalBatches;
+		timing.run("Rank WDP candidates", rankLabel.str(),
+				   assignedCandidates, "candidates", scoreBatch);
 	}
 	std::cout << "  Scoring (" << nThreads << " threads, "
 			  << batchesScored << " HDF5 batches, "
@@ -2921,6 +3143,9 @@ int processOneFt2(const Args &args, const std::string &ft2Path,
 				alignSpectra(psm.rec.fragMz, psm.rec.fragExpInt, scan->vdMZ, scan->vdIntensity,
 							 fragTol, p, q);
 				const double entropy = computeEntropy(p, q);
+				alignSpectraSparseCosine(psm.rec.fragMz, psm.rec.fragExpInt,
+										 scan->vdMZ, scan->vdIntensity,
+										 fragTol, p, q);
 				const double cosine = computeCosine(p, q);
 				const EnvCounts ec = countMatchedEnvelopes(scan, psm.rec, fragTol);
 
@@ -2933,54 +3158,91 @@ int processOneFt2(const Args &args, const std::string &ft2Path,
 			}
 		}
 	};
-	{
-		std::cout << "Timing parallel region: score retained WDP PSMs ("
-				  << retainedPsms << " PSMs)" << std::endl;
-		CLOCKSTART;
-		scoreRetained(topTarget);
-		scoreRetained(topDecoy);
-		CLOCKSTOP;
-	}
+	timing.run("Score retained PSMs", "score retained PSMs",
+			   retainedPsms, "PSMs", [&]()
+			   {
+				   scoreRetained(topTarget);
+				   scoreRetained(topDecoy);
+			   });
 
 	// -------- Materialize PIN rows --------
 	std::vector<MergedRow> kept;
-	auto flush = [&](std::vector<std::vector<ScoringPsm>> &perScan)
+	auto appendPassing = [](std::vector<const ScoringPsm *> &out,
+							const std::vector<ScoringPsm> &psms)
 	{
-		for (size_t s = 0; s < perScan.size(); ++s)
+		for (const ScoringPsm &psm : psms)
 		{
-			auto &v = perScan[s];
-			if (v.empty())
-				continue;
-			for (size_t i = 0; i < v.size(); ++i)
-			{
-				const ScoringPsm &e = v[i];
-				MergedRow m;
-				m.label = e.label;
-				m.ms2Pct = e.ms2Pct;
-				m.scanNumber = e.scanNumber;
-				m.rank = static_cast<int>(i + 1);
-				m.row = e.row;
-				kept.push_back(std::move(m));
-			}
+			if (psm.wdp >= kMinPinWdpScore)
+				out.push_back(&psm);
 		}
 	};
-	flush(topTarget);
-	flush(topDecoy);
+
+	timing.run("Materialize PIN rows", "materialize PIN rows",
+			   retainedPsms, "PSMs", [&]()
+			   {
+				   for (size_t s = 0; s < scans.size(); ++s)
+				   {
+					   std::vector<const ScoringPsm *> scanPsms;
+					   scanPsms.reserve(topTarget[s].size() + topDecoy[s].size());
+					   appendPassing(scanPsms, topTarget[s]);
+					   appendPassing(scanPsms, topDecoy[s]);
+					   if (scanPsms.empty())
+						   continue;
+
+					   std::sort(scanPsms.begin(), scanPsms.end(),
+								 [](const ScoringPsm *a, const ScoringPsm *b)
+								 {
+									 if (a->wdp != b->wdp)
+										 return a->wdp > b->wdp;
+									 if (a->label != b->label)
+										 return a->label > b->label;
+									 return a->nakedPeptide < b->nakedPeptide;
+								 });
+
+					   for (size_t i = 0; i < scanPsms.size(); ++i)
+					   {
+						   const ScoringPsm &e = *scanPsms[i];
+						   MergedRow m;
+						   m.label = e.label;
+						   m.ms2Pct = e.ms2Pct;
+						   m.scanNumber = e.scanNumber;
+						   m.rank = static_cast<int>(i + 1);
+						   m.row = e.row;
+						   kept.push_back(std::move(m));
+					   }
+				   }
+			   });
 
 	fs::path pinPath = fs::path(args.outputDir) / (ft2Basename + ".pin");
-	writePinFileWithDiff(pinPath.string(), ft2Basename, kept);
-	std::cout << "Wrote " << pinPath << " (" << kept.size() << " rows)\n";
+	size_t writtenRows = 0;
+	timing.run("Write PIN", "write PIN file",
+			   kept.size(), "rows", [&]()
+			   {
+				   writtenRows = writePinFileWithDiff(pinPath.string(), ft2Basename, kept);
+			   });
+	std::cout << "Wrote " << pinPath << " (" << writtenRows << " rows, WDP >= "
+			  << std::fixed << std::setprecision(1) << kMinPinWdpScore << ")\n";
 
 	// Cleanup
-	for (auto *s : scans)
-	{
-		if (s->pQuery)
-		{
-			delete s->pQuery;
-			s->pQuery = nullptr;
-		}
-		delete s;
-	}
+	timing.run("Cleanup", "cleanup scans",
+			   scans.size(), "scans", [&]()
+			   {
+				   for (auto *s : scans)
+				   {
+					   if (s->pQuery)
+					   {
+						   delete s->pQuery;
+						   s->pQuery = nullptr;
+					   }
+					   delete s;
+				   }
+			   });
+
+	const double processWallSeconds = omp_get_wtime() - processWallStart;
+	const double processCpuSeconds = processTreeCpuSeconds() - processCpuStart;
+	timing.printSummary(processWallSeconds, processCpuSeconds,
+						totalRecordsScored, totalAssignedCandidates,
+						retainedPsms, writtenRows);
 	return hdf5LoadFailures == 0 ? 0 : 1;
 }
 

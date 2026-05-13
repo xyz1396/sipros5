@@ -23,6 +23,7 @@ class SpectraRecord:
     retention: str
     charge: int
     peptide: str
+    proteins: str
     precursor_mz: np.ndarray
     precursor_intensity: np.ndarray
     fragment_mz: np.ndarray
@@ -173,6 +174,17 @@ def _read_hdf5_metadata(handle):
     }
 
 
+def _read_optional_string_dataset(group, name, count, default=""):
+    if name not in group:
+        return [default] * count
+    values = _decode_hdf5_strings(group[name][:])
+    if len(values) != count:
+        raise ValueError(
+            f"{group.name}/{name}: expected {count} entries, found {len(values)}"
+        )
+    return values
+
+
 def load_hdf5_records(path):
     records = []
     with h5py.File(path, "r") as handle:
@@ -181,6 +193,7 @@ def load_hdf5_records(path):
         retentions = _decode_hdf5_strings(handle["records/retention"][:])
         charges = handle["records/charge"][:].astype(int)
         peptides = _decode_hdf5_strings(handle["records/peptide"][:])
+        proteins = _read_optional_string_dataset(handle["records"], "proteins", len(psm_ids))
 
         precursor_mz = handle["precursor/mz"][:]
         precursor_intensity = handle["precursor/intensity"][:]
@@ -200,6 +213,7 @@ def load_hdf5_records(path):
             len(retentions)
             == len(charges)
             == len(peptides)
+            == len(proteins)
             == len(precursor_offset)
             == len(precursor_count)
             == len(fragment_offset)
@@ -223,6 +237,7 @@ def load_hdf5_records(path):
                     retention=retentions[index],
                     charge=int(charges[index]),
                     peptide=peptides[index],
+                    proteins=proteins[index],
                     precursor_mz=np.asarray(precursor_mz[p_start:p_stop], dtype=float),
                     precursor_intensity=np.asarray(precursor_intensity[p_start:p_stop], dtype=float),
                     fragment_mz=np.asarray(fragment_mz[f_start:f_stop], dtype=float),
@@ -486,6 +501,7 @@ def _write_selected_tsv(records, output_path):
         "retention",
         "charge",
         "peptide",
+        "proteins",
         "matched_envelopes",
         "retained_envelopes",
         "matched_peaks",
@@ -513,6 +529,7 @@ def _write_selected_tsv(records, output_path):
                 "retention": record.retention,
                 "charge": record.charge,
                 "peptide": record.peptide,
+                "proteins": record.proteins,
                 "matched_envelopes": matched_envelope_count(record),
                 "retained_envelopes": retained_envelope_count(record),
                 "matched_peaks": matched_peak_count(record),
@@ -587,7 +604,8 @@ def _plot_records(records, input_path, output_path, args):
             f"{_truncate_text(record.psm_id)} | RT={rt_text} | z={record.charge} | "
             f"matched envelopes={matched_envelope_count(record)}/{retained_envelope_count(record)} | "
             f"matched peaks={matched_peak_count(record)}\n"
-            f"Peptide={_truncate_text(record.peptide, 72)}"
+            f"Peptide={_truncate_text(record.peptide, 72)} | "
+            f"Proteins={_truncate_text(record.proteins or 'NA', 86)}"
         )
         axes[idx][0].text(0.0, 1.1, title, transform=axes[idx][0].transAxes, fontsize=10, va="bottom")
 
@@ -655,6 +673,7 @@ def main():
             f"plotted_psm={record.psm_id}\t"
             f"RT={record.retention or 'NA'}\t"
             f"Charge={record.charge}\t"
+            f"Proteins={record.proteins or 'NA'}\t"
             f"matched_envelopes={matched_envelope_count(record)}\t"
             f"retained_envelopes={retained_envelope_count(record)}\t"
             f"matched_peaks={matched_peak_count(record)}"
