@@ -24,6 +24,7 @@
 #include <ctime>
 #include <filesystem>
 #include <chrono>
+#include <iterator>
 #include <memory>
 #include <stdexcept>
 #include <numeric>
@@ -74,6 +75,7 @@ struct Args
 	bool toleranceMs1Ppm = true;
 	double toleranceMs2 = 10.0;
 	bool toleranceMs2Ppm = true;
+	int isotopeShiftWindow = 3;
 	int scoreEnvelopeTopN = 2;
 	int topPsmsPerScan = 10;
 };
@@ -257,6 +259,7 @@ void printUsage(const char *prog)
 		<< "    [--tolerance-ms1 <N>] [--tolerance-ms1-unit ppm|da]   (default: 10 ppm)\n"
 		<< "    [--tolerance-ms2 <N>] [--tolerance-ms2-unit ppm|da]   (default: 10 ppm)\n"
 		<< "    [--tolerance <N>] [--tolerance-unit ppm|da]            shortcut: set BOTH MS1 and MS2\n"
+		<< "    [--isotope-shift-window <N>]                           precursor isotope shifts +/-N (default: 3)\n"
 		<< "    [--score-envelope-top-n <N>]                           Xcorr/MVH envelope peaks (default: 2)\n"
 		<< "    [--top-psms-per-scan <N>]                              WDP winners per scan/label (default: 10)\n";
 }
@@ -353,6 +356,8 @@ Args parseArgs(int argc, char **argv)
 				std::exit(1);
 			}
 		}
+		else if (k == "--isotope-shift-window")
+			a.isotopeShiftWindow = std::atoi(next().c_str());
 		else if (k == "--score-envelope-top-n")
 			a.scoreEnvelopeTopN = std::atoi(next().c_str());
 		else if (k == "--top-psms-per-scan")
@@ -391,6 +396,11 @@ Args parseArgs(int argc, char **argv)
 	if (a.topPsmsPerScan <= 0)
 	{
 		std::cerr << "--top-psms-per-scan must be > 0\n";
+		std::exit(1);
+	}
+	if (a.isotopeShiftWindow < 0)
+	{
+		std::cerr << "--isotope-shift-window must be >= 0\n";
 		std::exit(1);
 	}
 	return a;
@@ -1336,7 +1346,8 @@ std::vector<ScanPrecursor> scanPrecursors(const MS2Scan *scan)
 PrecursorMatch matchPrecursor(const MS2Scan *scan,
 							  const SipRecord &rec,
 							  const MassTolerance &mzTol,
-							  double rtTolMin)
+							  double rtTolMin,
+							  int isotopeShiftWindow)
 {
 	PrecursorMatch best;
 	double bestErr = std::numeric_limits<double>::infinity();
@@ -1362,7 +1373,7 @@ PrecursorMatch matchPrecursor(const MS2Scan *scan,
 		double dm = realMz - rec.topPrecursorMz;
 		double dmNeutral = dm * realCharge;
 		int shift = static_cast<int>(std::round(dmNeutral / neutron));
-		if (std::abs(shift) > 3)
+		if (std::abs(shift) > isotopeShiftWindow)
 			continue;
 		double resid = dmNeutral - shift * neutron;
 		if (std::fabs(resid) > tolNeutralDa)
@@ -2136,21 +2147,29 @@ int createAnonymousMemfd(const char *name)
 #endif
 }
 
-struct FlatWriter
+struct FlatMappedWriter
 {
-	std::vector<unsigned char> data;
+	unsigned char *data = nullptr;
+	size_t size = 0;
+	size_t pos = 0;
+	bool ok = true;
 
 	template <typename T>
 	void pod(const T &x)
 	{
-		const unsigned char *p = reinterpret_cast<const unsigned char *>(&x);
-		data.insert(data.end(), p, p + sizeof(T));
+		bytes(&x, sizeof(T));
 	}
 
 	void bytes(const void *p, size_t n)
 	{
-		const unsigned char *b = static_cast<const unsigned char *>(p);
-		data.insert(data.end(), b, b + n);
+		if (!ok || n > size - pos)
+		{
+			ok = false;
+			return;
+		}
+		if (n > 0)
+			std::memcpy(data + pos, p, n);
+		pos += n;
 	}
 
 	void str(const std::string &s)
@@ -2237,7 +2256,65 @@ struct FlatReader
 	}
 };
 
-void writeFlatSipRecord(FlatWriter &w, const SipRecord &r)
+size_t flatStringSize(const std::string &s)
+{
+	return sizeof(uint64_t) + s.size();
+}
+
+size_t flatDoublesSize(const std::vector<double> &v)
+{
+	return sizeof(uint64_t) + v.size() * sizeof(double);
+}
+
+size_t flatRowsSize(const std::vector<std::vector<double>> &v)
+{
+	size_t n = sizeof(uint64_t);
+	for (const auto &row : v)
+		n += flatDoublesSize(row);
+	return n;
+}
+
+size_t flatSipRecordSize(const SipRecord &r)
+{
+	size_t n = 0;
+	n += flatStringSize(r.psmId);
+	n += flatStringSize(r.retention);
+	n += flatStringSize(r.peptide);
+	n += flatStringSize(r.nakedPeptide);
+	n += flatStringSize(r.proteins);
+	n += sizeof(r.charge);
+	n += sizeof(r.rtMinutes);
+	n += sizeof(r.topPrecursorMz);
+	n += sizeof(r.topPrecursorIntensity);
+	n += sizeof(r.sumPrecursorIntensity);
+	n += flatDoublesSize(r.precursorMz);
+	n += flatDoublesSize(r.precursorIntensity);
+	n += flatRowsSize(r.vvdYionMass);
+	n += flatRowsSize(r.vvdYionProb);
+	n += flatRowsSize(r.vvdBionMass);
+	n += flatRowsSize(r.vvdBionProb);
+	n += flatDoublesSize(r.fragMz);
+	n += flatDoublesSize(r.fragExpInt);
+	n += sizeof(uint64_t);
+	n += sizeof(uint64_t);
+	return n;
+}
+
+size_t flatHdf5BlobSize(const std::vector<SipRecord> &records,
+						const Hdf5FileMeta &meta)
+{
+	size_t n = 0;
+	n += sizeof(meta.targetSipAbundancePct);
+	n += flatStringSize(meta.sipAtom);
+	n += sizeof(meta.sipIsotopeMassNumber);
+	n += sizeof(uint64_t);
+	for (const auto &record : records)
+		n += flatSipRecordSize(record);
+	return n;
+}
+
+template <typename Writer>
+void writeFlatSipRecord(Writer &w, const SipRecord &r)
 {
 	const uint64_t nY = static_cast<uint64_t>(r.nYpositions);
 	const uint64_t nB = static_cast<uint64_t>(r.nBpositions);
@@ -2261,6 +2338,20 @@ void writeFlatSipRecord(FlatWriter &w, const SipRecord &r)
 	w.doubles(r.fragExpInt);
 	w.pod(nY);
 	w.pod(nB);
+}
+
+template <typename Writer>
+void writeFlatHdf5Blob(Writer &w,
+					   const std::vector<SipRecord> &records,
+					   const Hdf5FileMeta &meta)
+{
+	w.pod(meta.targetSipAbundancePct);
+	w.str(meta.sipAtom);
+	w.pod(meta.sipIsotopeMassNumber);
+	const uint64_t n = static_cast<uint64_t>(records.size());
+	w.pod(n);
+	for (const auto &record : records)
+		writeFlatSipRecord(w, record);
 }
 
 bool readFlatSipRecord(FlatReader &r, SipRecord &out)
@@ -2293,20 +2384,6 @@ bool readFlatSipRecord(FlatReader &r, SipRecord &out)
 	return true;
 }
 
-std::vector<unsigned char> makeFlatHdf5Blob(const std::vector<SipRecord> &records,
-											const Hdf5FileMeta &meta)
-{
-	FlatWriter w;
-	w.pod(meta.targetSipAbundancePct);
-	w.str(meta.sipAtom);
-	w.pod(meta.sipIsotopeMassNumber);
-	const uint64_t n = static_cast<uint64_t>(records.size());
-	w.pod(n);
-	for (const auto &record : records)
-		writeFlatSipRecord(w, record);
-	return std::move(w.data);
-}
-
 bool readFlatHdf5Blob(const void *data,
 					  size_t size,
 					  std::vector<SipRecord> &records,
@@ -2331,11 +2408,14 @@ bool readFlatHdf5Blob(const void *data,
 	return r.pos == r.size;
 }
 
-bool copyBlobToSharedMemory(int fd,
-							const std::vector<unsigned char> &blob,
-							std::string &err)
+bool writeFlatHdf5BlobToSharedMemory(int fd,
+									 const std::vector<SipRecord> &records,
+									 const Hdf5FileMeta &meta,
+									 uint64_t &blobSize,
+									 std::string &err)
 {
-	const size_t n = blob.size();
+	const size_t n = flatHdf5BlobSize(records, meta);
+	blobSize = static_cast<uint64_t>(n);
 	if (::ftruncate(fd, static_cast<off_t>(n)) != 0)
 	{
 		err = std::string("ftruncate failed: ") + std::strerror(errno);
@@ -2349,8 +2429,15 @@ bool copyBlobToSharedMemory(int fd,
 		err = std::string("mmap write failed: ") + std::strerror(errno);
 		return false;
 	}
-	std::memcpy(p, blob.data(), n);
+	FlatMappedWriter w{static_cast<unsigned char *>(p), n, 0, true};
+	writeFlatHdf5Blob(w, records, meta);
+	const bool ok = w.ok && w.pos == n;
 	::munmap(p, n);
+	if (!ok)
+	{
+		err = "flat HDF5 shared-memory write overflow";
+		return false;
+	}
 	return true;
 }
 
@@ -2378,7 +2465,10 @@ bool readBlobFromSharedMemory(int fd,
 	return ok;
 }
 
-bool writeChildStatus(int fd, bool ok, uint64_t blobSize, const std::string &err)
+bool writeChildStatus(int fd,
+					  bool ok,
+					  uint64_t blobSize,
+					  const std::string &err)
 {
 	const int32_t status = ok ? 0 : 1;
 	return writePod(fd, status) &&
@@ -2386,10 +2476,14 @@ bool writeChildStatus(int fd, bool ok, uint64_t blobSize, const std::string &err
 		   (!ok ? writeString(fd, err) : true);
 }
 
-bool readChildStatus(int fd, bool &ok, uint64_t &blobSize, std::string &err)
+bool readChildStatus(int fd,
+					 bool &ok,
+					 uint64_t &blobSize,
+					 std::string &err)
 {
 	int32_t status = 1;
-	if (!readPod(fd, status) || !readPod(fd, blobSize))
+	if (!readPod(fd, status) ||
+		!readPod(fd, blobSize))
 		return false;
 	ok = status == 0;
 	if (!ok && !readString(fd, err))
@@ -2422,6 +2516,20 @@ struct Hdf5LoadChild
 	pid_t pid = -1;
 	int readFd = -1;
 	int shmFd = -1;
+};
+
+struct Hdf5ReadyBlob
+{
+	std::string path;
+	int shmFd = -1;
+	uint64_t blobSize = 0;
+};
+
+struct Hdf5DeserializeResult
+{
+	bool ok = false;
+	std::string error;
+	std::vector<LabeledRecord> records;
 };
 
 // Load a bounded set of HDF5 files directly into RAM. Nothing is written to
@@ -2480,9 +2588,8 @@ int loadHdf5Batch(const std::vector<std::string> &hdf5Files,
 			bool copied = false;
 			if (ok)
 			{
-				std::vector<unsigned char> blob = makeFlatHdf5Blob(records, meta);
-				blobSize = static_cast<uint64_t>(blob.size());
-				copied = copyBlobToSharedMemory(shmFd, blob, err);
+				copied = writeFlatHdf5BlobToSharedMemory(shmFd, records, meta,
+														 blobSize, err);
 			}
 			const bool wrote = writeChildStatus(fds[1], ok && copied, blobSize, err);
 			::close(fds[1]);
@@ -2499,10 +2606,10 @@ int loadHdf5Batch(const std::vector<std::string> &hdf5Files,
 		children.push_back(child);
 	}
 
+	std::vector<Hdf5ReadyBlob> readyBlobs;
+	readyBlobs.reserve(children.size());
 	for (const Hdf5LoadChild &child : children)
 	{
-		std::vector<SipRecord> records;
-		Hdf5FileMeta meta;
 		std::string err;
 		bool childOk = false;
 		uint64_t blobSize = 0;
@@ -2538,17 +2645,61 @@ int loadHdf5Batch(const std::vector<std::string> &hdf5Files,
 			++failures;
 			continue;
 		}
-		if (!readBlobFromSharedMemory(child.shmFd, static_cast<size_t>(blobSize),
-									  records, meta, err))
-		{
-			std::cerr << "Cannot load " << path << ": " << err << "\n";
-			::close(child.shmFd);
-			++failures;
-			continue;
-		}
-		::close(child.shmFd);
 
-		appendLabeledRecords(path, records, meta, out);
+		Hdf5ReadyBlob ready;
+		ready.path = path;
+		ready.shmFd = child.shmFd;
+		ready.blobSize = blobSize;
+		readyBlobs.push_back(std::move(ready));
+	}
+
+	if (!readyBlobs.empty())
+	{
+		std::vector<Hdf5DeserializeResult> results(readyBlobs.size());
+#pragma omp parallel for schedule(dynamic, 1)
+		for (size_t i = 0; i < readyBlobs.size(); ++i)
+		{
+			const Hdf5ReadyBlob &ready = readyBlobs[i];
+			Hdf5DeserializeResult result;
+
+			std::vector<SipRecord> records;
+			Hdf5FileMeta meta;
+			std::string err;
+			if (readBlobFromSharedMemory(ready.shmFd, static_cast<size_t>(ready.blobSize),
+										 records, meta, err))
+			{
+				appendLabeledRecords(ready.path, records, meta, result.records);
+				result.ok = true;
+			}
+			else
+			{
+				result.error = "Cannot load " + ready.path + ": " + err;
+			}
+			::close(ready.shmFd);
+			results[i] = std::move(result);
+		}
+
+		size_t recordsToAppend = 0;
+		for (const Hdf5DeserializeResult &result : results)
+		{
+			if (!result.ok)
+			{
+				std::cerr << result.error << "\n";
+				++failures;
+				continue;
+			}
+			recordsToAppend += result.records.size();
+		}
+
+		out.reserve(out.size() + recordsToAppend);
+		for (Hdf5DeserializeResult &result : results)
+		{
+			if (!result.ok)
+				continue;
+			out.insert(out.end(),
+					   std::make_move_iterator(result.records.begin()),
+					   std::make_move_iterator(result.records.end()));
+		}
 	}
 	return failures;
 }
@@ -2650,6 +2801,7 @@ size_t assignCandidatesToScans(const std::vector<MS2Scan *> &scans,
 							   const std::vector<MzIndexedRecord> &mzIndex,
 							   const MassTolerance &mzTol,
 							   double rtTol,
+							   int isotopeShiftWindow,
 							   std::vector<std::vector<CandidateMatch>> &out)
 {
 	out.clear();
@@ -2669,7 +2821,7 @@ size_t assignCandidatesToScans(const std::vector<MS2Scan *> &scans,
 			if (precursor.charge <= 0)
 				continue;
 			const double tolMzDa = mzTol.daAt(precursor.mz);
-			for (int shift = -3; shift <= 3; ++shift)
+			for (int shift = -isotopeShiftWindow; shift <= isotopeShiftWindow; ++shift)
 			{
 				const double center = precursor.mz - shift * neutron / precursor.charge;
 				const double lo = center - tolMzDa;
@@ -2696,7 +2848,8 @@ size_t assignCandidatesToScans(const std::vector<MS2Scan *> &scans,
 		assigned.reserve(candidateIdx.size());
 		for (size_t r : candidateIdx)
 		{
-			PrecursorMatch match = matchPrecursor(scan, records[r].rec, mzTol, rtTol);
+			PrecursorMatch match = matchPrecursor(scan, records[r].rec, mzTol, rtTol,
+												  isotopeShiftWindow);
 			if (match.ok)
 				assigned.push_back({r, match});
 		}
@@ -2898,6 +3051,8 @@ int processOneFt2(const Args &args, const std::string &ft2Path,
 			  << args.scoreEnvelopeTopN << "\n";
 	std::cout << "  WDP top PSMs per scan/label: "
 			  << args.topPsmsPerScan << "\n";
+	std::cout << "  Precursor isotope shift window: +/-"
+			  << args.isotopeShiftWindow << "\n";
 
 	// -------- Read FT2 and score assigned SIP spectra --------
 	const int nThreads = std::max(1, args.threads);
@@ -3014,7 +3169,8 @@ int processOneFt2(const Args &args, const std::string &ft2Path,
 		++batchesScored;
 		auto loadBatch = [&]()
 		{
-			hdf5LoadFailures += loadHdf5Batch(hdf5Files, batchBegin, batchEnd, batchRecords);
+			hdf5LoadFailures += loadHdf5Batch(hdf5Files, batchBegin, batchEnd,
+											  batchRecords);
 		};
 		const size_t totalBatches = (hdf5Files.size() + cacheBatchSize - 1) / cacheBatchSize;
 		std::ostringstream loadLabel;
@@ -3034,6 +3190,7 @@ int processOneFt2(const Args &args, const std::string &ft2Path,
 		{
 			assignedCandidates = assignCandidatesToScans(scans, batchRecords,
 														 mzIndex, mzTol, rtTol,
+														 args.isotopeShiftWindow,
 														 scanCandidates);
 		};
 		std::ostringstream assignLabel;
