@@ -3,17 +3,17 @@ import multiprocessing
 from multiprocessing import Manager
 from multiprocessing.managers import DictProxy
 import os
-import subprocess
 import concurrent.futures
 import pandas as pd
 from lxml import etree
 import re
 import shutil
 import tempfile
+from command_runner import run_logged_command
 
 class assembly:
     def __init__(self, baseNames: list[str], philosopherPath:str, percolatorPath:str, fastaPath:str, decoyPath:str, outputPath: str,
-                threadNumber: int, logger: Logger, element:str, negative_control = "", label_threshold = 2.0) -> None:
+                threadNumber: int, logger: Logger, element:str, negative_control = "", label_threshold = 2.0, decoyPrefix: str = "Decoy_") -> None:
         self.philosopherPath = philosopherPath
         self.percolatorPath = percolatorPath
         self.fastaPath = fastaPath
@@ -28,22 +28,56 @@ class assembly:
         self.threadNumber = threadNumber
         self.core_count: int = multiprocessing.cpu_count()
         self.element = element
+        self.decoyPrefix = decoyPrefix
         
+    def sanitize_protein_id(self, protein_id: str) -> str:
+        protein_id = str(protein_id).strip()
+        active_prefix = ""
+        core = protein_id
+        for prefix in (self.decoyPrefix, "DECOY_", "Decoy_"):
+            if core.startswith(prefix):
+                active_prefix = self.decoyPrefix
+                core = core[len(prefix):]
+                break
+        if "|" not in core:
+            safe = re.sub(r"\s+", "_", core)
+            core = f"sp|{safe}|{safe}"
+        return active_prefix + core
+
+    def sanitize_fasta_header(self, line: str) -> str:
+        header = line[1:].strip()
+        if not header:
+            return ">sp|UNKNOWN|UNKNOWN\n"
+        parts = header.split(None, 1)
+        protein_id = self.sanitize_protein_id(parts[0])
+        suffix = f" {parts[1]}" if len(parts) > 1 else ""
+        if " OS=" not in suffix:
+            core = protein_id
+            for prefix in (self.decoyPrefix, "DECOY_", "Decoy_"):
+                if core.startswith(prefix):
+                    core = core[len(prefix):]
+                    break
+            desc_parts = core.split("|")
+            gene = desc_parts[2] if len(desc_parts) > 2 else desc_parts[-1]
+            suffix += f" OS=Unknown OX=0 GN={gene} PE=4 SV=1"
+        return f">{protein_id}{suffix}\n"
+
+    def write_sanitized_fasta(self, source: str, output) -> bool:
+        last_ends_with_newline = True
+        with open(source, "r") as fasta:
+            for line in fasta:
+                out_line = self.sanitize_fasta_header(line) if line.startswith(">") else line
+                output.write(out_line)
+                last_ends_with_newline = out_line.endswith("\n")
+        return last_ends_with_newline
+
     def combine_fasta_files(self, fastaPath: str, decoyPath: str) -> None:
-        self.logger.info(f'Combining target and decoy fasta files to {self.targetDecoyPath}')
-        with open(self.targetDecoyPath, 'w') as output:
-            has_target_content = False
-            target_ends_with_newline = False
-            with open(fastaPath, 'r') as fasta:
-                for line in fasta:
-                    output.write(line)
-                    has_target_content = True
-                    target_ends_with_newline = line.endswith('\n')
-                if has_target_content and not target_ends_with_newline:
-                    output.write('\n')
-            with open(decoyPath, 'r') as decoy:
-                for line in decoy:
-                    output.write(line)
+        self.logger.info(f"Combining target and decoy fasta files to {self.targetDecoyPath}")
+        with open(self.targetDecoyPath, "w") as output:
+            target_ends_with_newline = self.write_sanitized_fasta(fastaPath, output)
+            if not target_ends_with_newline:
+                output.write("\n")
+            self.write_sanitized_fasta(decoyPath, output)
         
     def intergrate_filtered_psms_with_feature(self, baseName: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         self.logger.info(f'Intergrating filtered psms with feature for {baseName}')
@@ -62,7 +96,10 @@ class assembly:
         psm.to_csv(f'{self.outputPath}/{baseName}/{baseName}_filtered_psms.tsv', sep='\t', index=False)
         # for philosopher input
         filtered_target = target[target['posterior_error_prob'] < 0.5]
-        filtered_decoy = decoy[decoy['posterior_error_prob'] < 0.5]
+        if self.decoyPrefix == 'DECOY_':
+            filtered_decoy = decoy.iloc[0:0]
+        else:
+            filtered_decoy = decoy[decoy['posterior_error_prob'] < 0.5]
         psm_phi = pd.concat([filtered_target, filtered_decoy], ignore_index=True)
         psm_phi = psm_phi[['PSMId', 'score', 'q-value', 'posterior_error_prob']]
         psm_phi = pd.merge(psm_phi, pin, left_on='PSMId', right_on='SpecId', how='left')
@@ -102,7 +139,9 @@ class assembly:
             seq = seqs[1]
             # remove PTM in the pep seq
             seq = re.sub(r'[^a-zA-Z]', '', seq)
-            pros = row['Proteins'][1:-1].split(",")
+            pros = [self.sanitize_protein_id(pro.strip()) for pro in row['Proteins'][1:-1].split(",") if pro.strip()]
+            if not pros:
+                continue
             search_hit = etree.SubElement(search_result, "search_hit", 
                                         peptide=seq, 
                                         massdiff=str(row['massErrors']), 
@@ -230,7 +269,7 @@ class assembly:
                 # Explode proteins
                 psm_df['Proteins'] = psm_df['Proteins'].str.strip('{}')
                 psm_df = psm_df.assign(Protein=psm_df['Proteins'].str.split(',')).explode('Protein')
-                psm_df['Protein'] = psm_df['Protein'].str.strip()
+                psm_df['Protein'] = psm_df['Protein'].str.strip().map(self.sanitize_protein_id)
                 # Group by protein
                 agg_df = psm_df.groupby('Protein').agg({
                     'PeptideSequence': lambda x: ','.join(x.astype(str)),
@@ -269,7 +308,7 @@ class assembly:
             SIPfilteredPSM['PeptideSequence'] = SIPfilteredPSM['Peptide'].str.extract(r'\[([^\]]+)\]')
             SIPfilteredPSM['Proteins'] = SIPfilteredPSM['Proteins'].str.strip('{}')
             SIPfilteredPSM = SIPfilteredPSM.assign(Protein=SIPfilteredPSM['Proteins'].str.split(',')).explode('Protein')
-            SIPfilteredPSM['Protein'] = SIPfilteredPSM['Protein'].str.strip()
+            SIPfilteredPSM['Protein'] = SIPfilteredPSM['Protein'].str.strip().map(self.sanitize_protein_id)
             sip_samples = SIPfilteredPSM['SampleName'].unique()
             # Check if SIP samples are in baseNames
             if not all(sample in self.baseNames for sample in sip_samples):
@@ -300,20 +339,7 @@ class assembly:
         self.logger.info(f'Updated protein information with SIP filtered PSM saved to {output_path}')    
 
     def run_command(self, cmd:str, path:str = "") -> None:
-        self.logger.info(f"Running command: {cmd}")
-        original_cwd = os.getcwd()
-        try:
-            if path != "":
-                os.chdir(path)
-            output = subprocess.check_output(
-                cmd, shell=True, stderr=subprocess.STDOUT)
-            self.logger.info(output.decode())
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"Command execution failed: {e.output.decode()}")
-            exit(1)
-        finally:
-            if path != None:
-                os.chdir(original_cwd)  # Restore the original working directory
+        run_logged_command(cmd, self.logger, cwd=path or None)
 
     def run(self) -> None:
         
@@ -335,6 +361,9 @@ class assembly:
         SIPfilteredPSMs = pd.DataFrame()
         if (self.element != None and self.element != ""):
             SIPfilteredPSMs = self.filterSIPlabeledPSMs(filteredPSMsDict)
+        if all(psm_df.empty for psm_df in filteredPSMsDict.values()):
+            self.logger.warning("No filtered PSMs found after Percolator; skipping protein inference")
+            return
         
         pepxmls_dir = os.path.join(self.outputPath, 'pepxmls')
         if not os.path.exists(pepxmls_dir):
@@ -357,8 +386,8 @@ class assembly:
             f'{self.philosopherPath} workspace --clean --nocheck && '
             f'{self.philosopherPath} workspace --init --nocheck --temp {tmpdir} && '
             f'{self.philosopherPath} proteinprophet --maxppmdiff 2000000 --output combined {pepxml_files} && '
-            f'{self.philosopherPath} database --annotate targetDecoy.faa --prefix Decoy_ && '
-            f'{self.philosopherPath} filter --sequential --prot 0.01 --picked --tag Decoy_ --pepxml pepxmls --protxml combined.prot.xml --razor && '
+            f'{self.philosopherPath} database --annotate targetDecoy.faa --prefix {self.decoyPrefix} && '
+            f'{self.philosopherPath} filter --sequential --prot 0.01 --picked --tag {self.decoyPrefix} --pepxml pepxmls --protxml combined.prot.xml --razor && '
             f'{self.philosopherPath} report'
         )
         self.run_command(cmd, self.outputPath)
@@ -381,7 +410,7 @@ class assembly:
             cmd = (
                 f'{self.philosopherPath} workspace --clean --nocheck && '
                 f'{self.philosopherPath} workspace --init --nocheck --temp {tmp_subdir} && '
-                f'{self.philosopherPath} filter --sequential --prot 0.01 --picked --tag Decoy_ --dbbin .. --pepxml {baseName}.pep.xml --protxml ../combined.prot.xml --razor && '
+                f'{self.philosopherPath} filter --sequential --prot 0.01 --picked --tag {self.decoyPrefix} --dbbin .. --pepxml {baseName}.pep.xml --protxml ../combined.prot.xml --razor && '
                 f'{self.philosopherPath} report'
             )
             commands.append(cmd)

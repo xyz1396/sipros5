@@ -1,9 +1,9 @@
 from logging import Logger
 import multiprocessing
 import os
-import subprocess
 import concurrent.futures
 import pandas as pd
+from command_runner import run_logged_command
 
 class filter:
     def __init__(self, baseNames: list[str], outputPath: str, percolatorPath: str,
@@ -22,22 +22,17 @@ class filter:
         pass
 
     def run_command(self, cmd):
-        self.logger.info(f"Running command: {cmd}")
-        try:
-            env = os.environ.copy()
-            env["OMP_NUM_THREADS"] = str(self.OMP_NUM_THREADS)
-            self.logger.info(f"Set OMP_NUM_THREADS to {env['OMP_NUM_THREADS']}")
-            output = subprocess.check_output(
-                cmd, shell=True, stderr=subprocess.STDOUT, env=env)
-            self.logger.info(output.decode())
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"Command execution failed: {e.output.decode()}")
-            exit(1)
+        run_logged_command(
+            cmd,
+            self.logger,
+            env_updates={"OMP_NUM_THREADS": str(self.OMP_NUM_THREADS)},
+        )
             
     def ignore_pct_in_pin(self, baseName) -> None:
-        self.logger.info(f'Ignoring MS1IsotopicAbundances MS2IsotopicAbundances in {baseName}_NoPCT.pin')
+        pct_columns = ['MS1IsotopicAbundances', 'MS2IsotopicAbundances', 'isotopicAbundanceDiffs']
+        self.logger.info(f'Ignoring {", ".join(pct_columns)} in {baseName}_NoPCT.pin')
         pin = pd.read_csv(f'{self.outPutPath}/{baseName}/{baseName}.pin', sep='\t')
-        pin.drop(columns=['MS1IsotopicAbundances', 'MS2IsotopicAbundances'], inplace=True)
+        pin.drop(columns=pct_columns, inplace=True, errors='ignore')
         pin.to_csv(f'{self.outPutPath}/{baseName}/{baseName}_NoPCT.pin', sep='\t', index=False)
 
     def run(self) -> None:

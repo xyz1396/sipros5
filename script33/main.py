@@ -7,7 +7,6 @@ from logging import Logger
 import time
 from argparse import Namespace
 from search import search
-from feature import feature
 from filter import filter
 from assembly import assembly
 import warnings
@@ -21,10 +20,8 @@ class SIPROSWorkflow:
         # Default paths for tools
         self.defaultToolsPaths: dict[str, str] = {
             'configTemplates': f'{upper_path}/configTemplates',
-            'configGenerator': f'{upper_path}/tools/configGenerator',
-            'raxport': f'{upper_path}/tools/raxport',
+            'raxport': f'{upper_path}/tools/Raxport-linux-x64',
             'sipros': f'{upper_path}/tools/sipros',
-            'feature_extractor': f'{upper_path}/tools/aerithFeatureExtractor',
             'filter': f'{upper_path}/tools/percolator',
             'deepfilter': f'{upper_path}/tools/deepfilter',
             'assembly': f'{upper_path}/tools/philosopher-v5.1.2',
@@ -71,7 +68,7 @@ citation:
             description="sipros Workflow", prog="siproswf", epilog=epilog,
             formatter_class=argparse.RawTextHelpFormatter)
         parser.add_argument('-i', '--input', required=True,
-                            help="Input raw/mzml file path or directory, e.g., 'data/raw', 'A.raw,B.raw,C.raw'")
+                            help="Input raw/.d/.d.zip/HDF5 file path or directory, e.g., 'data/raw', 'A.raw,B.h5,C.raw'")
         parser.add_argument('--sPTM', required=False, type=str, help=(
             "Static PTM for regular search. Example: 'C|5,8,2,2,0,1'\n"
             "This means a static modification (e.g., alkylation) on residue C, "
@@ -93,19 +90,24 @@ citation:
                             help="SIP label range, e.g., 0-100. Don't provide this flag for regular search")
         parser.add_argument('-p', '--precision', required=False,
                             help="SIP label precision in percentage, e.g., 1. Don't provide this flag for regular search")
+        parser.add_argument('--psm-tsv', required=False,
+                            help="PSM TSV used to generate search-spectra HDF5 spectra libraries")
+        parser.add_argument('--unlabeled-input', required=False,
+                            help="Unlabeled raw/.d/.d.zip/HDF5 input used to generate search-spectra spectra libraries")
+        parser.add_argument('--spectra-dir', required=False,
+                            help="Reuse an existing HDF5 spectra-library directory instead of generating one")
         parser.add_argument('-f', '--fasta', required=True,
                             help="Fasta file path")
-        parser.add_argument('-s', '--split_FT2_file', required=False,
-                            type=int, nargs='?', const=20000,
-                            help="Scans number in splitted FT2 file, no split in default")
         parser.add_argument('-n', '--nPrecursor', required=False,
                             type=int, default=6,
                             help="Max precursor number in isolation window when converting raw file, recommend 6 in DDA (default) 15 in DIA")
         parser.add_argument('-t', '--thread', required=False, type=int, default=0,
                             help="Thread number to be limited, all threads in default")
+        parser.add_argument('--topN', '--top-psms-per-scan', dest='topN', required=False, type=int, default=8,
+                            help="Top PSM rows retained per scan for target and decoy searches before merge (default: 8)")
         parser.add_argument('-o', '--output', required=True, help="Output directory path")
         parser.add_argument('--ignorePCT', action='store_true', 
-                            help='Ignore isotopic percentage of MS1 and MS2 when filtering few SIP labeled PSMs')
+                            help='Ignore SIP abundance features when filtering')
         parser.add_argument('--negative_control', required=False, type=str,
                             help="Negative control file name without extension, e.g., 'A' for 'A.raw', 'A,B' for 'A.raw,B.raw'.\n"
                                  "These files will be used to filter out false positive SIP-labeled PSMs")
@@ -120,10 +122,14 @@ citation:
             parser.error("Thread number must be non-negative (0 for all threads, or a positive integer)")
         if args.thread == 0:
             args.thread = os.cpu_count() or 1  # Use all available CPUs
+        if args.topN <= 0:
+            parser.error('--topN must be a positive integer')
         
-        # if -e is not provided, set it to "R" for regular search
+        spectra_mode = bool(args.psm_tsv or args.unlabeled_input or args.spectra_dir)
         if not args.element:
-            args.element = "R"
+            args.element = "C13" if spectra_mode else "R"
+        if spectra_mode and not args.spectra_dir and (not args.psm_tsv or not args.unlabeled_input):
+            parser.error("search-spectra mode requires --psm-tsv and --unlabeled-input unless --spectra-dir is provided")
         return args
 
     def initLogger(self, outputPath: str) -> Logger:
@@ -143,17 +149,15 @@ citation:
 
     def run(self) -> None:
         start_time: float = time.time()
+        spectra_mode = bool(self.args.psm_tsv or self.args.unlabeled_input or self.args.spectra_dir)
 
-        # run SIPROS search
         sipros_search = search(element=self.args.element,
                                toleranceMS1=self.args.toleranceMS1,
                                toleranceMS2=self.args.toleranceMS2,
                                sipRange=self.args.range,
                                step=self.args.precision,
                                configTemplatePath=self.toolsPaths['configTemplates'],
-                               configGeneratorPath=self.toolsPaths['configGenerator'],
                                raxportPath=self.toolsPaths['raxport'],
-                               scansPerFT2=self.args.split_FT2_file,
                                siprosPath=self.toolsPaths['sipros'],
                                fastaPath=self.args.fasta,
                                inputPath=self.args.input,
@@ -162,21 +166,16 @@ citation:
                                threadNumber=int(self.args.thread),
                                logger=self.logger,
                                nPrecursor=self.args.nPrecursor,
-                               dryrun=self.args.dryrun)
-        sipros_search.run()
+                               dryrun=self.args.dryrun,
+                               psmTsv=self.args.psm_tsv,
+                               unlabeledInput=self.args.unlabeled_input,
+                               spectraDir=self.args.spectra_dir,
+                               topPsmsPerScan=self.args.topN)
+        if spectra_mode:
+            sipros_search.run_search_spectra()
+        else:
+            sipros_search.run()
 
-        # run Aerith feature extraction
-        sipros_feature = feature(baseNames=sipros_search.base_names,
-                                 outputPath=self.args.output,
-                                 scansPerFT=sipros_search.scansPerFT2,
-                                 aerithFeatureExtractorPath=self.toolsPaths['feature_extractor'],
-                                 configTemplatePath=f"{self.toolsPaths['configTemplates']}/SIP.cfg",
-                                 threadNumber=sipros_search.threadNumber,
-                                 logger=self.logger,
-                                 dryrun=self.args.dryrun)
-        sipros_feature.run()
-
-        # Call the filter tools
         sipros_filter = filter(baseNames=sipros_search.base_names,
                                outputPath=self.args.output,
                                percolatorPath=self.toolsPaths['filter'],
@@ -186,8 +185,6 @@ citation:
                                dryrun=self.args.dryrun)
         sipros_filter.run()
 
-        # Call the assembly tools
-        
         sipros_assembly = assembly(baseNames=sipros_search.base_names,
                                    philosopherPath=self.toolsPaths['assembly'],
                                    percolatorPath=self.toolsPaths['filter'],
@@ -198,12 +195,10 @@ citation:
                                    negative_control=self.args.negative_control,
                                    element=self.args.element,
                                    label_threshold=self.args.label_threshold,
-                                   logger=self.logger)
+                                   logger=self.logger,
+                                   decoyPrefix=sipros_search.decoyPrefix)
         sipros_assembly.run()
 
-        # Call the quantification tool
-
-        # Output paths
         end_time = time.time()
         running_time = end_time - start_time
         self.logger.info(f'All job done. Results are in {self.args.output}.')

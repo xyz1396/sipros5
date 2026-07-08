@@ -50,6 +50,25 @@ run_sipros5() {
     "$MAMBA_EXE" run -n sipros5 "$@"
 }
 
+stage_publish_tools() {
+    mkdir -p tools
+    rm -f bin/sipros_theoretical_spectra bin/sipros_experimental_spectra bin/sipros_search_spectra
+    rm -f tools/sipros_theoretical_spectra tools/sipros_experimental_spectra tools/sipros_search_spectra
+    local tmpdir
+    tmpdir=$(mktemp -d tools/.tmp.XXXXXX)
+    for binary in sipros siprosMPI; do
+        if [ -f "bin/$binary" ]; then
+            cp "bin/$binary" "$tmpdir/$binary"
+        else
+            echo "Missing built binary: bin/$binary" >&2
+            rm -rf "$tmpdir"
+            exit 1
+        fi
+    done
+    mv "$tmpdir"/* tools/
+    rmdir "$tmpdir"
+}
+
 cmake_args=()
 if [ -n "${CMAKE_ARGS:-}" ]; then
     cmake_args=(${CMAKE_ARGS})
@@ -76,11 +95,8 @@ case $1 in
     # mkdir bin/libSiprosMPI
     # cp -L -n $deplist bin/libSiprosMPI
     
-    # copy file atomic when running
-    tmpdir=$(mktemp -d tools/.tmp.XXXXXX)
-    cp bin/* "$tmpdir"
-    mv "$tmpdir"/* tools/
-    rmdir "$tmpdir"
+    # copy repo-built runtime commands atomically for publish/workflow use
+    stage_publish_tools
     ;;
 "buildConda")
     export MAMBA_ROOT_PREFIX=~/micromamba
@@ -97,11 +113,8 @@ case $1 in
     # mkdir bin/libSiprosMPI
     # cp -L -n $deplist bin/libSiprosMPI
 
-    # copy file atomic when running
-    tmpdir=$(mktemp -d tools/.tmp.XXXXXX)
-    cp bin/* "$tmpdir"
-    mv "$tmpdir"/* tools/
-    rmdir "$tmpdir"
+    # copy repo-built runtime commands atomically for publish/workflow use
+    stage_publish_tools
     ;;
 "buildTick")
     cd build
@@ -140,15 +153,8 @@ case $1 in
     echo "Package created: siprosRelease.zip"
     ;;
 "run")
-    cd timeCompare
-    starttime=$(date +'%Y-%m-%d %H:%M:%S')
-    ../bin/SiprosV3omp -c ../../data/SiproConfig.N15_0Pct.cfg \
-        -f ../../data/AMD_DynamicSIP_SampleD_TimePoint0_BRmixed_WC_Velos_OrbiMS2_Run2_020210_09.FT2 \
-        -o . -s
-    endtime=$(date +'%Y-%m-%d %H:%M:%S')
-    start_seconds=$(date --date="$starttime" +%s)
-    end_seconds=$(date --date="$endtime" +%s)
-    echo "running time： "$((end_seconds - start_seconds))"s"
+    echo "Use the HDF5 workflow entrypoint, for example:"
+    echo "  python script33/main.py -i data/pct1/raw/Pan_062822_X1iso5.raw -f data/EcoliWithCrapNodup.fasta -o data/tmp/raxport_hdf5_workflow_test/direct_fasta -t 4"
     ;;
 *)
     ./make "build"
