@@ -28,7 +28,6 @@
 #include <H5Cpp.h>
 #include "SiprosWorkflows.h"
 #include "SiprosSearchRunner.h"
-#include "averagine.h"
 #include "proNovoConfig.h"
 #include "RaxportHdf5Reader.h"
 #include "ms2scan.h"
@@ -392,7 +391,6 @@ struct ProcessingStats
 	std::atomic<size_t> decoyComputeFailed{0};
 };
 
-int atomIndex(char sipAtom);
 std::string peptideMassClassKey(const std::string &peptide);
 
 void printUsage(const char *prog)
@@ -1449,37 +1447,6 @@ std::vector<Hdf5SampleTask> buildHdf5SampleTasks(const std::vector<PsmRow> &rows
 	return tasks;
 }
 
-int atomIndex(char sipAtom)
-{
-	switch (sipAtom)
-	{
-	case 'C':
-		return 0;
-	case 'H':
-		return 1;
-	case 'O':
-		return 2;
-	case 'N':
-		return 3;
-	case 'P':
-		return 4;
-	case 'S':
-		return 5;
-	default:
-		return -1;
-	}
-}
-
-void refreshResidueDistributions(Isotopologue &iso)
-{
-	for (const auto &kv : iso.mResidueAtomicComposition)
-	{
-		IsotopeDistribution dist;
-		iso.computeIsotopicDistribution(kv.second, dist);
-		iso.vResidueIsotopicDistribution[kv.first] = dist;
-	}
-}
-
 void ensureDefaultNTermAcetylation(Isotopologue &iso)
 {
 	if (iso.mResidueAtomicComposition.find("%") != iso.mResidueAtomicComposition.end())
@@ -1490,79 +1457,6 @@ void ensureDefaultNTermAcetylation(Isotopologue &iso)
 	iso.mResidueAtomicComposition["%"] = {2, 2, 1, 0, 0, 0};
 }
 
-int resolveSipIsotopeIndex(const Isotopologue &iso, char sipAtom, int isotopeMassNumber)
-{
-	const int ix = atomIndex(sipAtom);
-	if (ix < 0)
-	{
-		throw std::runtime_error("Unsupported SIP atom. Use one of C,H,O,N,P,S.");
-	}
-	if (ix >= static_cast<int>(iso.vAtomIsotopicDistribution.size()) ||
-		iso.vAtomIsotopicDistribution[ix].vProb.size() < 2 ||
-		iso.vAtomIsotopicDistribution[ix].vMass.size() < 2)
-	{
-		throw std::runtime_error("Configured isotopic distribution for SIP atom is not usable.");
-	}
-
-	const int requestedMass = isotopeMassNumber > 0 ? isotopeMassNumber : 0;
-	if (requestedMass <= 0)
-	{
-		return 1;
-	}
-
-	const auto &masses = iso.vAtomIsotopicDistribution[ix].vMass;
-	for (size_t i = 1; i < masses.size(); ++i)
-	{
-		const int massInt = static_cast<int>(std::lround(masses[i]));
-		if (massInt == requestedMass)
-		{
-			return static_cast<int>(i);
-		}
-	}
-	throw std::runtime_error("Requested SIP isotope mass is not available for atom " + std::string(1, sipAtom));
-}
-
-void setSipAbundance(Isotopologue &iso, char sipAtom, int isotopeIndex, double sipPct)
-{
-	const int ix = atomIndex(sipAtom);
-	if (ix < 0)
-	{
-		throw std::runtime_error("Unsupported SIP atom. Use one of C,H,O,N,P,S.");
-	}
-	if (ix >= static_cast<int>(iso.vAtomIsotopicDistribution.size()) ||
-		isotopeIndex < 1 ||
-		isotopeIndex >= static_cast<int>(iso.vAtomIsotopicDistribution[ix].vProb.size()))
-	{
-		throw std::runtime_error("Configured isotopic distribution for SIP atom/isotope is not usable.");
-	}
-
-	const int expectedIsotopeIndex = (sipAtom == 'O' || sipAtom == 'S') ? 2 : 1;
-	if (isotopeIndex != expectedIsotopeIndex)
-	{
-		throw std::runtime_error("Requested SIP isotope is inconsistent with atom-specific SIP rule.");
-	}
-
-	auto &probs = iso.vAtomIsotopicDistribution[ix].vProb;
-	if (!averagine::changeAtomProbability(probs, sipAtom, sipPct / 100.0))
-	{
-		throw std::runtime_error("Configured isotopic distribution for SIP atom/isotope is not usable.");
-	}
-	refreshResidueDistributions(iso);
-}
-
-double configuredIsotopeAbundancePct(const Isotopologue &iso, char sipAtom, int isotopeIndex)
-{
-	const int ix = atomIndex(sipAtom);
-	if (ix < 0 ||
-		ix >= static_cast<int>(iso.vAtomIsotopicDistribution.size()) ||
-		isotopeIndex < 0 ||
-		isotopeIndex >= static_cast<int>(iso.vAtomIsotopicDistribution[ix].vProb.size()))
-	{
-		throw std::runtime_error("Configured isotope abundance is not available.");
-	}
-	return iso.vAtomIsotopicDistribution[ix].vProb[isotopeIndex] * 100.0;
-}
-
 double effectiveTargetSipAbundancePct(const Isotopologue &iso,
 									  char sipAtom,
 									  int isotopeIndex,
@@ -1571,7 +1465,7 @@ double effectiveTargetSipAbundancePct(const Isotopologue &iso,
 	const char atom = static_cast<char>(std::toupper(static_cast<unsigned char>(sipAtom)));
 	if (atom == 'C' && isotopeIndex == 1 && std::abs(requestedPct - 1.0) <= 1e-9)
 	{
-		return configuredIsotopeAbundancePct(iso, atom, isotopeIndex);
+		return ProNovoConfig::getIsotopeAbundancePct(iso, atom, isotopeIndex);
 	}
 	return requestedPct;
 }
@@ -2676,7 +2570,7 @@ bool generateAndWriteOutputFileJob(OutputFileJob &job,
 	try
 	{
 		Isotopologue localIso = pristineIso;
-		setSipAbundance(localIso, sipAtom, targetSipIsotopeIndex, job.metadata.targetSipAbundancePct);
+		ProNovoConfig::setSipAbundance(localIso, sipAtom, targetSipIsotopeIndex, job.metadata.targetSipAbundancePct);
 
 		std::vector<SpectrumOutputRecord> records(rows.size());
 		std::vector<char> ok(rows.size(), 0);
@@ -3123,7 +3017,7 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 	int targetSipIsotopeIndex = 1;
 	try
 	{
-		targetSipIsotopeIndex = resolveSipIsotopeIndex(ProNovoConfig::configIsotopologue, sipAtom, sipIsotopeMassNumber);
+		targetSipIsotopeIndex = ProNovoConfig::resolveSipIsotopeIndex(ProNovoConfig::configIsotopologue, sipAtom, sipIsotopeMassNumber);
 	}
 	catch (const std::exception &ex)
 	{
@@ -3134,7 +3028,7 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 	int baselineSipIsotopeIndex = 1;
 	try
 	{
-		baselineSipIsotopeIndex = resolveSipIsotopeIndex(ProNovoConfig::configIsotopologue, 'C', 13);
+		baselineSipIsotopeIndex = ProNovoConfig::resolveSipIsotopeIndex(ProNovoConfig::configIsotopologue, 'C', 13);
 	}
 	catch (const std::exception &ex)
 	{
@@ -3156,9 +3050,9 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 	Isotopologue baselineIso = pristineIso;
 	try
 	{
-		const double baselineC13Pct = configuredIsotopeAbundancePct(
+		const double baselineC13Pct = ProNovoConfig::getIsotopeAbundancePct(
 			pristineIso, 'C', baselineSipIsotopeIndex);
-		setSipAbundance(baselineIso, 'C', baselineSipIsotopeIndex, baselineC13Pct);
+		ProNovoConfig::setSipAbundance(baselineIso, 'C', baselineSipIsotopeIndex, baselineC13Pct);
 	}
 	catch (const std::exception &ex)
 	{

@@ -9,7 +9,6 @@
 #include <filesystem>
 
 #include "ms2scan.h"
-#include "tokenvector.h"
 #include "proNovoConfig.h"
 #include "proteindatabase.h"
 #include "MVH.h"
@@ -34,6 +33,7 @@ struct ScoredPsmRow
 	double calculatedParentMass = 0.0;
 	string scanType;
 	string searchName;
+	double ms2IsotopicAbundancePct = 1.07;
 	float retentionTime = 0.0f;
 	float mvhScore = 0.0f;
 	float xcorrScore = 0.0f;
@@ -65,7 +65,6 @@ class MS2ScanVector {
 	map<char, double> mapResidueMass; // mass except N and C termini;
 
 	bool loadRaxportHdf5File();
-	bool bScreenOutput; // if true, allows standard output
 	static bool mygreater(double i, double j);
 	static bool myless(MS2Scan * pMS2Scan1, MS2Scan * pMS2Scan2);
 	static bool mylessScanId(MS2Scan * pMS2Scan1, MS2Scan * pMS2Scan2);
@@ -98,8 +97,7 @@ class MS2ScanVector {
 	string ParsePath(string sPath);
 
 public:
-	MS2ScanVector(const string & sScanFilenameInput, const string & sOutputDirectory, const string & sConfigFilename,
-			bool bScreenOutput);
+	MS2ScanVector(const string & sScanFilenameInput, const string & sOutputDirectory, const string & sConfigFilename);
 	~MS2ScanVector();
 
 	// Populate vpAllMS2Scans from a Raxport schema v5 HDF5 file.
@@ -111,7 +109,7 @@ public:
 	void startProcessingMvhTask(); // start functions to process the loaded HDF5 file using mvh as the prime score, task mode
 	void startProcessingWdpSip(); // start functions to process the loaded HDF5 file with WDP as prime score without tasking
 	void clearSearchResults();
-	void appendScoredPsmRows(vector<ScoredPsmRow> &rows, bool isDecoy, int topKeep) const;
+	void appendScoredPsmRows(vector<ScoredPsmRow> &rows, bool isDecoy, int topKeep, double ms2IsotopicAbundancePct = 1.07) const;
 
 	// variables for the MVH thread
 	vector<vector<double> *> _ppdAAforward;

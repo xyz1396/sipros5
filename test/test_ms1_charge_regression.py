@@ -143,6 +143,7 @@ def run_sipros(scan_file: Path, out_dir: Path) -> subprocess.CompletedProcess[st
     return subprocess.run(
         [
             str(SIPROS),
+            "search-fasta",
             "-f", str(scan_file),
             "-c", str(CFG),
             "-fasta", str(FASTA),
@@ -163,9 +164,9 @@ def main() -> None:
         shutil.rmtree(TMP)
     TMP.mkdir(parents=True)
 
-    bad_ft2 = TMP / "bad.FT2"
-    bad_ft2.write_text("S\t1\t500.0\n", encoding="utf-8")
-    bad = run_sipros(bad_ft2, TMP / "bad_out")
+    bad_input = TMP / "bad.scan"
+    bad_input.write_text("S\t1\t500.0\n", encoding="utf-8")
+    bad = run_sipros(bad_input, TMP / "bad_out")
     assert bad.returncode != 0
     assert "Raxport HDF5 scan input required" in bad.stdout
 
@@ -173,7 +174,7 @@ def main() -> None:
     create_raxport_hdf5(mixed, [1, 2, 3])
     result = run_sipros(mixed, TMP / "mixed_out")
     assert result.returncode == 0, result.stdout
-    assert "Preprocessing 1 scans" in result.stdout, result.stdout
+    assert "Preprocessing scans: 1" in result.stdout, result.stdout
 
     ms3_only = TMP / "ms3_only.h5"
     create_raxport_hdf5(ms3_only, [1, 3])
@@ -181,7 +182,7 @@ def main() -> None:
     assert result.returncode != 0, result.stdout
     assert "No ms_order == 2 scans found" in result.stdout, result.stdout
 
-    print("ok: Raxport HDF5-only input rejects FT2, loads ms_order 2, and ignores ms_order > 2")
+    print("ok: Raxport HDF5-only input rejects non-HDF5 input, loads ms_order 2, and ignores ms_order > 2")
 
 
 if __name__ == "__main__":

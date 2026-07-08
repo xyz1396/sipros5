@@ -7,7 +7,7 @@
 #include <utility>
 
 MS2ScanVector::MS2ScanVector(const string &sScanFilenameInput, const string &sOutputDirectory,
-							 const string &sConfigFilename, bool bScreenOutput)
+							 const string &sConfigFilename)
 {
 	unsigned int n;
 	vector<string> vsSingleResidueNames = ProNovoConfig::vsSingleResidueNames;
@@ -16,7 +16,6 @@ MS2ScanVector::MS2ScanVector(const string &sScanFilenameInput, const string &sOu
 	sConfigFile = sConfigFilename;
 	// mass_w = ProNovoConfig::getParentMassWindows();
 	setOutputFile(sScanFilenameInput, sOutputDirectory);
-	this->bScreenOutput = bScreenOutput;
 	for (n = 0; n < vsSingleResidueNames.size(); ++n)
 		mapResidueMass[vsSingleResidueNames[n][0]] = vdSingleResidueMasses[n];
 
@@ -181,7 +180,7 @@ bool MS2ScanVector::loadMassData()
 	}
 	if (bReVal)
 	{
-		std::cout << "\nload Raxport HDF5 mass data done.\n" << std::endl;
+		std::cout << "  Loaded Raxport HDF5 mass data" << std::endl;
 	}
 	CLOCKSTOP;
 	return bReVal;
@@ -203,8 +202,7 @@ void MS2ScanVector::preProcessAllMs2Mvh()
 
 	int i, iScanSize;
 	iScanSize = (int)vpAllMS2Scans.size();
-	if (bScreenOutput)
-		cout << "Preprocessing " << vpAllMS2Scans.size() << " scans " << endl;
+	cout << "  Preprocessing scans: " << vpAllMS2Scans.size() << endl;
 
 	int num_threads = omp_get_max_threads();
 	vector<multimap<double, double> *> vpIntenSortedPeakPreData;
@@ -249,10 +247,7 @@ void MS2ScanVector::preProcessAllMs2Mvh()
 		}
 	}
 
-	if (bScreenOutput)
-	{
-		cout << "Preprocessing Done." << endl;
-	}
+	cout << "  Preprocessing done" << endl;
 
 	CLOCKSTOP;
 }
@@ -261,8 +256,7 @@ void MS2ScanVector::preProcessAllMs2WdpSip()
 {
 	int i, iScanSize;
 	iScanSize = (int)vpAllMS2Scans.size();
-	if (bScreenOutput)
-		cout << "Preprocessing " << vpAllMS2Scans.size() << " scans " << endl;
+	cout << "  Preprocessing scans: " << vpAllMS2Scans.size() << endl;
 
 #pragma omp parallel for schedule(guided)
 	for (i = 0; i < iScanSize; i++)
@@ -562,7 +556,7 @@ void MS2ScanVector::searchDatabaseMvh()
 {
 	CLOCKSTART;
 
-	ProteinDatabase myProteinDatabase(bScreenOutput);
+	ProteinDatabase myProteinDatabase;
 	vector<Peptide *> vpPeptideArray;
 	Peptide *currentPeptide;
 	myProteinDatabase.loadDatabase();
@@ -607,14 +601,13 @@ void MS2ScanVector::searchDatabaseMvh()
 	this->postMvh();
 	MVH::destroyLnTable();
 	PeptideUnit::iNumScores = 1;
-	cout << "MVH search done.\n"
-		 << endl;
+	cout << "  MVH search done" << endl;
 }
 
 void MS2ScanVector::searchDatabaseWdpSip()
 {
 	CLOCKSTART;
-	ProteinDatabase myProteinDatabase(bScreenOutput);
+	ProteinDatabase myProteinDatabase;
 	vector<Peptide *> vpPeptideArray;
 	Peptide *currentPeptide;
 	myProteinDatabase.loadDatabase();
@@ -657,14 +650,13 @@ void MS2ScanVector::searchDatabaseWdpSip()
 
 		PeptideUnit::iNumScores = 1;
 	}
-	cout << "\nWDP search done.\n"
-		 << endl;
+	cout << "  WDP search done" << endl;
 	CLOCKSTOP;
 }
 
 void MS2ScanVector::searchDatabaseMvhTask()
 {
-	ProteinDatabase myProteinDatabase(bScreenOutput);
+	ProteinDatabase myProteinDatabase;
 	vector<Peptide *> vpPeptideArray;
 	Peptide *currentPeptide;
 	myProteinDatabase.loadDatabase();
@@ -742,8 +734,7 @@ void MS2ScanVector::searchDatabaseMvhTask()
 	this->postMvh();
 	MVH::destroyLnTable();
 	PeptideUnit::iNumScores = 1;
-	cout << "MVH search done.\n"
-		 << endl;
+	cout << "  MVH search done" << endl;
 }
 
 void MS2ScanVector::startProcessingMvh()
@@ -793,11 +784,10 @@ void MS2ScanVector::postProcessAllMs2WdpXcorr()
 	iScanSize = (int)vpAllMS2Scans.size();
 
 	postProcessAllMs2Xcorr();
-	cout << "\nXcorr search done." << endl;
+	cout << "  Xcorr search done" << endl;
 
 	postProcessAllMs2Wdp();
-	cout << "\nWDP search done.\n"
-		 << endl;
+	cout << "  WDP search done" << endl;
 
 #pragma omp parallel for schedule(guided)
 	for (i = 0; i < iScanSize; i++)
@@ -814,10 +804,10 @@ void MS2ScanVector::postProcessAllMs2MvhXcorr()
 	iScanSize = (int)vpAllMS2Scans.size();
 
 	postProcessAllMs2XcorrSip();
-	cout << "\nXcorr search done.\n" << endl;
+	cout << "  Xcorr search done" << endl;
 
 	postProcessAllMs2MvhSip();
-	cout << "MVH search done.\n" << endl;
+	cout << "  MVH search done" << endl;
 
 #pragma omp parallel for schedule(guided)
 	for (i = 0; i < iScanSize; i++)
@@ -1252,7 +1242,7 @@ static string stripPeptideForFeatures(const string &peptide)
 	return stripped;
 }
 
-void MS2ScanVector::appendScoredPsmRows(vector<ScoredPsmRow> &rows, bool isDecoy, int topKeep) const
+void MS2ScanVector::appendScoredPsmRows(vector<ScoredPsmRow> &rows, bool isDecoy, int topKeep, double ms2IsotopicAbundancePct) const
 {
 	vector<MS2Scan *> orderedScans = vpAllMS2Scans;
 	sort(orderedScans.begin(), orderedScans.end(), mylessScanId);
@@ -1283,6 +1273,7 @@ void MS2ScanVector::appendScoredPsmRows(vector<ScoredPsmRow> &rows, bool isDecoy
 			row.calculatedParentMass = peptide->dPepNeutralMass;
 			row.scanType = scan->getScanType();
 			row.searchName = ProNovoConfig::getSearchName();
+			row.ms2IsotopicAbundancePct = ms2IsotopicAbundancePct;
 			row.retentionTime = static_cast<float>(std::atof(scan->getRTime().c_str()));
 			row.wdpScore = static_cast<float>(peptide->vdScores[0]);
 			row.xcorrScore = static_cast<float>(peptide->vdScores[1]);

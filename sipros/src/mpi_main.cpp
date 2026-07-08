@@ -25,6 +25,13 @@ struct UnitOfWork
 	std::string scanFile;
 };
 
+void printUsage(const char *prog)
+{
+	std::cerr << "Usage:\n"
+			  << "  " << prog << " search-fasta [options]\n\n"
+			  << "Run the search-fasta subcommand with --help for command-specific options.\n";
+}
+
 std::vector<UnitOfWork> buildWorkload(const sipros::DatabaseSearchArguments &args)
 {
 	std::vector<UnitOfWork> workload;
@@ -35,7 +42,7 @@ std::vector<UnitOfWork> buildWorkload(const sipros::DatabaseSearchArguments &arg
 	return workload;
 }
 
-void masterProcess(const std::vector<UnitOfWork> &workload, bool screenOutput)
+void masterProcess(const std::vector<UnitOfWork> &workload)
 {
 	size_t i = 0;
 	int currentWorkId = 0;
@@ -67,13 +74,10 @@ void masterProcess(const std::vector<UnitOfWork> &workload, bool screenOutput)
 	{
 		MPI_Send(nullptr, 0, MPI_INT, static_cast<int>(i), DIETAG, MPI_COMM_WORLD);
 	}
-	if (screenOutput)
-	{
-		std::cout << "Master process is done." << std::endl;
-	}
+	std::cout << "Master process done" << std::endl;
 }
 
-void slaveProcess(const std::vector<UnitOfWork> &workload, const sipros::DatabaseSearchArguments &args, bool screenOutput)
+void slaveProcess(const std::vector<UnitOfWork> &workload, const sipros::DatabaseSearchArguments &args)
 {
 	MPI_Status status;
 	int currentWorkId = 0;
@@ -87,22 +91,15 @@ void slaveProcess(const std::vector<UnitOfWork> &workload, const sipros::Databas
 			break;
 		}
 		const UnitOfWork &work = workload.at(static_cast<size_t>(currentWorkId));
-		std::cout << "slave Rank:\t" << rank << "\tscan:\t" << work.scanFile
-				  << "\tCfg:\t" << args.configFile << std::endl;
+		std::cout << "Slave process " << rank << " started " << work.scanFile
+				  << " (config: " << args.configFile << ")" << std::endl;
 		ProNovoConfig::iRank = rank;
 		sipros::SiprosSearchRunner runner;
 		const int result = runner.runScan(work.scanFile, args);
-		if (screenOutput)
-		{
-			std::cout << work.scanFile << " and " << args.configFile
-					  << " is done by Slave process " << rank << std::endl;
-		}
+		std::cout << "Slave process " << rank << " finished " << work.scanFile << std::endl;
 		MPI_Send(&result, 1, MPI_INT, 0, 0, MPI_COMM_WORLD);
 	}
-	if (screenOutput)
-	{
-		std::cout << "Slave process " << rank << " is done." << std::endl;
-	}
+	std::cout << "Slave process " << rank << " done" << std::endl;
 }
 
 } // namespace
@@ -118,8 +115,46 @@ int main(int argc, char **argv)
 
 	sipros::SiprosSearchRunner runner;
 	sipros::DatabaseSearchArguments args;
+
+	if (argc <= 1)
+	{
+		if (rank == 0)
+		{
+			printUsage(argv[0]);
+		}
+		MPI_Finalize();
+		return 1;
+	}
+	const std::string command = argv[1];
+	if (command == "-h" || command == "--help")
+	{
+		if (rank == 0)
+		{
+			printUsage(argv[0]);
+		}
+		MPI_Finalize();
+		return 0;
+	}
+	if (command != "search-fasta")
+	{
+		if (rank == 0)
+		{
+			std::cerr << "Unknown siprosMPI subcommand: " << command << "\n\n";
+			printUsage(argv[0]);
+		}
+		MPI_Finalize();
+		return 1;
+	}
+
+	std::vector<char *> shifted;
+	std::string programName = std::string(argv[0]) + " search-fasta";
+	shifted.push_back(programName.data());
+	for (int i = 2; i < argc; ++i)
+	{
+		shifted.push_back(argv[i]);
+	}
 	const bool parsed = runner.initializeArguments(
-		argc, argv, args, rank == 0 ? std::cout : nullStream, rank == 0 ? std::cerr : nullStream);
+		static_cast<int>(shifted.size()), shifted.data(), args, rank == 0 ? std::cout : nullStream, rank == 0 ? std::cerr : nullStream);
 	if (!parsed || args.showHelp)
 	{
 		MPI_Finalize();
@@ -129,11 +164,11 @@ int main(int argc, char **argv)
 	const std::vector<UnitOfWork> workload = buildWorkload(args);
 	if (rank == 0)
 	{
-		masterProcess(workload, args.screenOutput);
+		masterProcess(workload);
 	}
 	else
 	{
-		slaveProcess(workload, args, args.screenOutput);
+		slaveProcess(workload, args);
 	}
 	MPI_Finalize();
 	return 0;

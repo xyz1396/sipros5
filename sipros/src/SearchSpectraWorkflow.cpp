@@ -53,6 +53,8 @@
 #include "SiprosWorkflows.h"
 #include "averagine.h"
 #include "RaxportHdf5Reader.h"
+#include "PinWriter.h"
+#include "PSMfeatureExtractor.h"
 
 namespace fs = std::filesystem;
 
@@ -487,19 +489,6 @@ std::string nakedPeptideOf(const std::string &decorated)
 	for (char c : decorated)
 	{
 		if (std::isalpha(static_cast<unsigned char>(c)))
-			out.push_back(c);
-	}
-	return out;
-}
-
-// Remove only terminus brackets so averagine can still see PTM symbols.
-std::string peptideBodyWithPtms(const std::string &decorated)
-{
-	std::string out;
-	out.reserve(decorated.size());
-	for (char c : decorated)
-	{
-		if (c != '[' && c != ']')
 			out.push_back(c);
 	}
 	return out;
@@ -1199,76 +1188,6 @@ double computeEntropy(const std::vector<double> &p, const std::vector<double> &q
 
 // -------------------- Per-peptide feature helpers --------------------
 
-int sipAtomIndex(const std::string &sipAtom)
-{
-	if (sipAtom.empty())
-		return 0;
-	const char atom = static_cast<char>(std::toupper(static_cast<unsigned char>(sipAtom.front())));
-	if (atom == 'H')
-		return 1;
-	if (atom == 'O')
-		return 2;
-	if (atom == 'N')
-		return 3;
-	if (atom == 'S')
-		return 5;
-	return 0;
-}
-
-int sipNominalShiftPerAtom(const std::string &sipAtom)
-{
-	if (sipAtom.empty())
-		return 1;
-	const char atom = static_cast<char>(std::toupper(static_cast<unsigned char>(sipAtom.front())));
-	return (atom == 'O' || atom == 'S') ? 2 : 1;
-}
-
-double expectedNaturalNominalShiftExceptTarget(const std::array<int, 6> &atomCounts,
-											   int targetAtomIndex,
-											   int targetIsotopeIndex)
-{
-	double expectedShift = 0.0;
-	const auto &atomDistributions = ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution;
-	const size_t atomCount = std::min(atomCounts.size(), atomDistributions.size());
-	for (size_t atomIdx = 0; atomIdx < atomCount; ++atomIdx)
-	{
-		if (atomCounts[atomIdx] <= 0)
-			continue;
-		const auto &probs = atomDistributions[atomIdx].vProb;
-		for (size_t isotopeIdx = 1; isotopeIdx < probs.size(); ++isotopeIdx)
-		{
-			if (static_cast<int>(atomIdx) == targetAtomIndex &&
-				static_cast<int>(isotopeIdx) == targetIsotopeIndex)
-			{
-				continue;
-			}
-			expectedShift += static_cast<double>(atomCounts[atomIdx]) *
-							 static_cast<double>(isotopeIdx) * probs[isotopeIdx];
-		}
-	}
-	return expectedShift;
-}
-
-int countMissCleavage(const std::string &naked)
-{
-	if (naked.size() <= 1)
-		return 0;
-	int n = 0;
-	for (size_t i = 0; i + 1 < naked.size(); ++i)
-		if (naked[i] == 'K' || naked[i] == 'R')
-			++n;
-	return n;
-}
-
-int countPTM(const std::string &decorated)
-{
-	int n = 0;
-	for (char c : decorated)
-		if (!std::isalpha(static_cast<unsigned char>(c)) && c != '[' && c != ']')
-			++n;
-	return n;
-}
-
 int nearestPrecursorPeakIndex(const SipRecord &rec, double mz)
 {
 	if (rec.precursorMz.empty())
@@ -1294,243 +1213,6 @@ int topPrecursorPeakIndex(const SipRecord &rec)
 	return static_cast<int>(std::distance(
 		rec.precursorIntensity.begin(),
 		std::max_element(rec.precursorIntensity.begin(), rec.precursorIntensity.end())));
-}
-
-struct IsotopicPeak
-{
-	double mz = 0.0;
-	int charge = 0;
-	double intensity = 0.0;
-	int isotopeIndex = -1;
-};
-
-int ms1PeakCharge(const sipros::RaxportMs1Scan &scan, size_t idx)
-{
-	if (idx < scan.charge.size())
-		return scan.charge[idx];
-	return 0;
-}
-
-size_t findMs1Peak(const sipros::RaxportMs1Scan &scan,
-				   double targetMz,
-				   const MassTolerance &mzTol,
-				   int requiredCharge = -1)
-{
-	if (scan.mz.empty())
-		return std::numeric_limits<size_t>::max();
-
-	size_t best = std::numeric_limits<size_t>::max();
-	double bestIntensity = 0.0;
-	const double mzTolerance = mzTol.daAt(targetMz);
-	auto first = std::lower_bound(scan.mz.begin(), scan.mz.end(), targetMz - mzTolerance);
-	for (auto it = first; it != scan.mz.end() && *it <= targetMz + mzTolerance; ++it)
-	{
-		const size_t idx = static_cast<size_t>(it - scan.mz.begin());
-		if (requiredCharge >= 0 && ms1PeakCharge(scan, idx) != requiredCharge)
-		{
-			continue;
-		}
-		if (std::fabs(scan.mz[idx] - targetMz) <= mzTolerance &&
-			scan.intensity[idx] > bestIntensity)
-		{
-			bestIntensity = scan.intensity[idx];
-			best = idx;
-		}
-	}
-	return best;
-}
-
-std::vector<IsotopicPeak> findMs1IsotopicPeaks(const sipros::RaxportMs1Data *ms1Data,
-											   int &ms1ScanNumber,
-											   int precursorCharge,
-											   double monoPrecursorMz,
-											   double matchedPrecursorMz,
-											   int maxNominalShift,
-											   const MassTolerance &mzTol)
-{
-	std::vector<IsotopicPeak> peaks;
-	if (!ms1Data || precursorCharge <= 0)
-		return peaks;
-	auto scanIt = ms1Data->scanNumberToIndex.find(ms1ScanNumber);
-	if (scanIt == ms1Data->scanNumberToIndex.end())
-		return peaks;
-
-	const double neutronMz = ProNovoConfig::getNeutronMass() / precursorCharge;
-	constexpr int kMs1QuantWindowNeutrons = 10;
-	constexpr int kMs1AssignmentIndexTolerance = 1;
-	const int assignedIndex = static_cast<int>(std::round(
-		(matchedPrecursorMz - monoPrecursorMz) / neutronMz));
-	if (assignedIndex < 0 || assignedIndex > maxNominalShift)
-		return peaks;
-
-	size_t scanIdx = scanIt->second;
-	for (int attempt = 0; attempt < 3; ++attempt)
-	{
-		const sipros::RaxportMs1Scan &scan = ms1Data->scans[scanIdx];
-		peaks.clear();
-		for (int isotopeIndex = 0; isotopeIndex <= maxNominalShift; ++isotopeIndex)
-		{
-			const double expectedMz = monoPrecursorMz + isotopeIndex * neutronMz;
-			if (std::fabs(expectedMz - matchedPrecursorMz) >
-				kMs1QuantWindowNeutrons * neutronMz)
-			{
-				continue;
-			}
-
-			size_t idx = findMs1Peak(scan, expectedMz, mzTol, precursorCharge);
-			if (idx == std::numeric_limits<size_t>::max())
-			{
-				idx = findMs1Peak(scan, expectedMz, mzTol);
-			}
-			if (idx != std::numeric_limits<size_t>::max())
-			{
-				peaks.push_back({scan.mz[idx],
-								 ms1PeakCharge(scan, idx),
-								 scan.intensity[idx],
-								 isotopeIndex});
-			}
-		}
-		bool hasAssignmentAnchor = false;
-		bool hasExactAssignmentAnchor = false;
-		for (const IsotopicPeak &peak : peaks)
-		{
-			const int indexDelta = std::abs(peak.isotopeIndex - assignedIndex);
-			if (indexDelta <= kMs1AssignmentIndexTolerance)
-				hasAssignmentAnchor = true;
-			if (indexDelta == 0)
-				hasExactAssignmentAnchor = true;
-		}
-		if (!peaks.empty() && hasAssignmentAnchor &&
-			(peaks.size() > 1 || hasExactAssignmentAnchor))
-		{
-			ms1ScanNumber = scan.scanNumber;
-			break;
-		}
-		peaks.clear();
-		if (scanIdx == 0)
-			break;
-		--scanIdx;
-	}
-	if (peaks.empty())
-		return peaks;
-
-	std::sort(peaks.begin(), peaks.end(),
-			  [](const IsotopicPeak &a, const IsotopicPeak &b)
-			  { return a.mz < b.mz; });
-	peaks.erase(std::unique(peaks.begin(), peaks.end(),
-							[](const IsotopicPeak &a, const IsotopicPeak &b)
-							{
-								return std::fabs(a.mz - b.mz) <= 1e-12;
-							}),
-				peaks.end());
-	return peaks;
-}
-
-std::vector<IsotopicPeak> ms1IsotopicPeaksForMatch(const sipros::RaxportMs1Data *ms1Data,
-												   const MS2Scan *scan,
-												   const SipRecord &rec,
-												   const PrecursorMatch &match,
-												   const MassTolerance &mzTol,
-												   const std::string &sipAtom,
-												   double &baseMass)
-{
-	baseMass = 0.0;
-	if (!ms1Data || !scan || scan->iParentScanID <= 0)
-		return {};
-
-	averagine avg;
-	baseMass = avg.calPrecursorBaseMass(peptideBodyWithPtms(rec.peptide));
-	int ms1ScanNumber = scan->iParentScanID;
-	const int precursorCharge = rec.charge > 0 ? rec.charge : match.matchedCharge;
-	avg.calPepAtomCounts(peptideBodyWithPtms(rec.peptide));
-	const int atomIndex = sipAtomIndex(sipAtom);
-	const int targetNominalShift = sipNominalShiftPerAtom(sipAtom);
-	const double maxTargetShift = atomIndex < static_cast<int>(avg.pepAtomCounts.size())
-									  ? avg.pepAtomCounts[atomIndex] * targetNominalShift
-									  : 0.0;
-	const int maxNominalShift = std::min(512, std::max(20, static_cast<int>(std::ceil(maxTargetShift)) + 20));
-	const double monoPrecursorMz = baseMass / precursorCharge + ProNovoConfig::getProtonMass();
-	return findMs1IsotopicPeaks(
-		ms1Data, ms1ScanNumber, precursorCharge, monoPrecursorMz,
-		match.matchedMz, maxNominalShift, mzTol);
-}
-
-struct Ms1AbundanceResult
-{
-	double abundancePct = 0.0;
-	int isotopicPeakCount = 0;
-};
-
-Ms1AbundanceResult ms1AbundanceFromMs1Peaks(const std::vector<IsotopicPeak> &peaks,
-											double baseMass,
-											const SipRecord &rec,
-											const PrecursorMatch &match,
-											const std::string &sipAtom)
-{
-	if (peaks.empty())
-	{
-		return {};
-	}
-	const int precursorCharge = rec.charge > 0 ? rec.charge : match.matchedCharge;
-	if (precursorCharge <= 0)
-	{
-		return {};
-	}
-
-	averagine avg;
-	const char atom = sipAtom.empty()
-						  ? 'C'
-						  : static_cast<char>(std::toupper(static_cast<unsigned char>(sipAtom.front())));
-	const int targetIsotopeIndex = sipNominalShiftPerAtom(std::string(1, atom));
-	avg.calPepAtomCounts(peptideBodyWithPtms(rec.peptide));
-	const int atomIndex = sipAtomIndex(sipAtom);
-	const double atomNumber = avg.pepAtomCounts[atomIndex];
-	if (atomNumber <= 0.0)
-	{
-		return {};
-	}
-
-	const double maxIsotopeIndex = atomNumber * targetIsotopeIndex;
-	const double baseMz = baseMass / precursorCharge + ProNovoConfig::getProtonMass();
-
-	double sumIntensity = 0.0;
-	double weightedIsotopeIndex = 0.0;
-	int validPeakCount = 0;
-	for (size_t i = 0; i < peaks.size(); ++i)
-	{
-		const IsotopicPeak &peak = peaks[i];
-		if (peak.intensity <= 0.0)
-		{
-			continue;
-		}
-		const int isotopeIndex = peak.isotopeIndex >= 0
-									 ? peak.isotopeIndex
-									 : static_cast<int>(std::round(
-										   (peak.mz - baseMz) /
-										   ProNovoConfig::getNeutronMass() * precursorCharge));
-		if (isotopeIndex < 0)
-		{
-			continue;
-		}
-		sumIntensity += peak.intensity;
-		weightedIsotopeIndex += peak.intensity * std::min(static_cast<double>(isotopeIndex), maxIsotopeIndex);
-		++validPeakCount;
-	}
-	if (validPeakCount == 0 || sumIntensity <= 0.0)
-	{
-		return {};
-	}
-
-	const double meanIsotopeIndex = weightedIsotopeIndex / sumIntensity;
-	const double naturalOtherShift = expectedNaturalNominalShiftExceptTarget(
-		avg.pepAtomCounts, atomIndex, targetIsotopeIndex);
-	double pct = (meanIsotopeIndex - naturalOtherShift) / maxIsotopeIndex * 100.0;
-	if (!std::isfinite(pct))
-	{
-		return {};
-	}
-	pct = std::min(100.0, std::max(0.0, pct));
-	return {pct, validPeakCount};
 }
 
 struct ShardPsmRow
@@ -1565,16 +1247,7 @@ struct ShardPsmRow
 	std::string sipAtom;
 };
 
-// -------------------- Parent: PIN writer --------------------
-
-const char *kPinHeader =
-	"SpecId\tLabel\tScanNr\tExpMass\tretentiontime\tranks\tparentCharges\t"
-	"massErrors\tisotopicMassWindowShifts\tmzShiftFromisolationWindowCenters\t"
-	"peptideLengths\tmissCleavageSiteNumbers\tPTMnumbers\tisotopicPeakNumbers\t"
-	"MS1IsotopicAbundances\tMS2IsotopicAbundances\tisotopicAbundanceDiffs\t"
-	"WDPscores\tXcorrScores\tMVHscores\tentropyScores\tcosineScores\t"
-	"matchedYenvelopes\tmatchedBenvelopes\tdeltaRT\t"
-	"diffScores\tlog10_precursorIntensities\tPeptide\tProteins\n";
+// -------------------- Parent: PIN rows --------------------
 
 constexpr double kMinPinWdpScore = 0.5;
 
@@ -1587,79 +1260,43 @@ struct MergedRow
 	int rank = 0;
 };
 
-size_t writePinFileWithDiff(const std::string &path,
-							const std::string &sampleBasename,
-							const std::vector<MergedRow> &rows)
+std::vector<PinWriter::SearchSpectraPinRow> makeSearchSpectraPinRows(const std::vector<MergedRow> &rows)
 {
-	std::vector<const MergedRow *> outputRows;
-	outputRows.reserve(rows.size());
-	for (const auto &m : rows)
-		outputRows.push_back(&m);
-
-	// Target and decoy rows are ranked together per scan, so diffScores use
-	// the best WDP among both labels for that scan.
-	std::map<int, double> topByScan;
-	for (const MergedRow *m : outputRows)
+	std::vector<PinWriter::SearchSpectraPinRow> pinRows;
+	pinRows.reserve(rows.size());
+	for (const MergedRow &m : rows)
 	{
-		auto it = topByScan.find(m->scanNumber);
-		if (it == topByScan.end() || m->row.wdp > it->second)
-			topByScan[m->scanNumber] = m->row.wdp;
+		const ShardPsmRow &r = m.row;
+		PinWriter::SearchSpectraPinRow row;
+		row.label = m.label;
+		row.scanNumber = m.scanNumber;
+		row.rank = m.rank;
+		row.parentCharge = r.parentCharge;
+		row.isotopicMassWindowShift = r.isotopicShift;
+		row.peptideLength = r.peptideLength;
+		row.missCleavageSiteNumber = r.missCleavage;
+		row.ptmNumber = r.ptmCount;
+		row.isotopicPeakNumber = r.isotopicPeakNumbers;
+		row.matchedYEnvelope = r.matchedY;
+		row.matchedBEnvelope = r.matchedB;
+		row.expMass = r.calcMassNeutral;
+		row.retentionTime = r.rtScan;
+		row.massError = r.mzAbsErrPpm;
+		row.mzShiftFromIsolationWindowCenter = r.mzShiftDa;
+		row.ms1IsotopicAbundance = r.ms1IsotopicAbundancePct;
+		row.ms2IsotopicAbundance = m.ms2Pct;
+		row.wdpScore = r.wdp;
+		row.xcorrScore = r.xcorr;
+		row.mvhScore = r.mvh;
+		row.entropyScore = r.entropy;
+		row.cosineScore = r.cosine;
+		row.deltaRT = r.deltaRT;
+		row.log10PrecursorIntensity = r.log10PrecursorIntensity;
+		row.peptide = r.peptide;
+		row.proteins = r.proteins;
+		pinRows.push_back(std::move(row));
 	}
-
-	std::ostringstream pin;
-	pin.imbue(std::locale::classic());
-	pin << kPinHeader;
-	pin << std::fixed << std::setprecision(6);
-	for (const MergedRow *m : outputRows)
-	{
-		const auto &r = m->row;
-		double top = topByScan[m->scanNumber];
-		double diff = top - r.wdp;
-		pin << sampleBasename << "." << m->scanNumber << "." << m->rank << '\t';
-		pin << m->label << '\t';
-		pin << m->scanNumber << '\t';
-		pin << r.calcMassNeutral << '\t';
-		pin << r.rtScan << '\t';
-		pin << m->rank << '\t';
-		pin << r.parentCharge << '\t';
-		pin << r.mzAbsErrPpm << '\t';
-		pin << r.isotopicShift << '\t';
-		pin << r.mzShiftDa << '\t';
-		pin << r.peptideLength << '\t';
-		pin << r.missCleavage << '\t';
-		pin << r.ptmCount << '\t';
-		pin << r.isotopicPeakNumbers << '\t';
-		pin << r.ms1IsotopicAbundancePct << '\t';
-		pin << m->ms2Pct << '\t';
-		pin << (r.ms1IsotopicAbundancePct - m->ms2Pct) << '\t';
-		pin << r.wdp << '\t';
-		pin << r.xcorr << '\t';
-		pin << r.mvh << '\t';
-		pin << r.entropy << '\t';
-		pin << r.cosine << '\t';
-		pin << r.matchedY << '\t';
-		pin << r.matchedB << '\t';
-		pin << r.deltaRT << '\t';
-		pin << diff << '\t';
-		pin << r.log10PrecursorIntensity << '\t';
-		pin << r.peptide << '\t';
-		pin << r.proteins << '\n';
-	}
-
-	const std::string pinText = pin.str();
-	std::ofstream os(path);
-	if (!os)
-	{
-		std::cerr << "Cannot write " << path << "\n";
-		return 0;
-	}
-	os.write(pinText.data(), static_cast<std::streamsize>(pinText.size()));
-	if (!os)
-	{
-		std::cerr << "Failed while writing " << path << "\n";
-		return 0;
-	}
-	return outputRows.size();
+	return pinRows;
 }
 
 // -------------------- Parent: per-HDF5 sample driver --------------------
@@ -2560,56 +2197,71 @@ void trimIonVectorsForXcorr(const MS2Scan *scan,
 }
 
 ShardPsmRow makeScoringRow(size_t scanIdx,
-						   const MS2Scan *scan,
-						   const SipRecord &rec,
-						   const LabeledRecord &labeledRecord,
-						   const PrecursorMatch &match,
-						   const EnvCounts &envCounts,
-						   const sipros::RaxportMs1Data *ms1Data,
-						   const MassTolerance &mzTol,
-						   double wdp,
-						   double xcorr,
-						   double mvh,
-						   double entropy,
-						   double cosine)
+                           const MS2Scan *scan,
+                           const SipRecord &rec,
+                           const LabeledRecord &labeledRecord,
+                           const PrecursorMatch &match,
+                           const EnvCounts &envCounts,
+                           const sipros::RaxportMs1Data *ms1Data,
+                           const MassTolerance &mzTol,
+                           double wdp,
+                           double xcorr,
+                           double mvh,
+                           double entropy,
+                           double cosine)
 {
-	double baseMass = 0.0;
-	const std::vector<IsotopicPeak> ms1Peaks = ms1IsotopicPeaksForMatch(
-		ms1Data, scan, rec, match, mzTol, labeledRecord.sipAtom, baseMass);
-	const Ms1AbundanceResult ms1Abundance = ms1AbundanceFromMs1Peaks(
-		ms1Peaks, baseMass, rec, match, labeledRecord.sipAtom);
+    double baseMass = 0.0;
+    const int precursorCharge = rec.charge > 0 ? rec.charge : match.matchedCharge;
+    std::vector<isotopicPeak> ms1Peaks;
+    if (ms1Data && scan && scan->iParentScanID > 0 && precursorCharge > 0)
+    {
+        averagine avg;
+        const std::string peptideForComposition = PSMfeatureExtractor::peptideBodyWithPtms(rec.peptide);
+        baseMass = avg.calPrecursorBaseMass(peptideForComposition);
+        const int targetNominalShift = PSMfeatureExtractor::sipNominalShiftPerAtom(labeledRecord.sipAtom);
+        const double monoPrecursorMz = baseMass / precursorCharge + ProNovoConfig::getProtonMass();
+        int ms1ScanNumber = scan->iParentScanID;
+        const auto mzToleranceDaAt = [&](double mz)
+        { return mzTol.daAt(mz); };
+        ms1Peaks = PSMfeatureExtractor::findMs1IsotopicPeaks(
+            ms1Data, ms1ScanNumber, precursorCharge, monoPrecursorMz,
+            match.matchedMz, targetNominalShift, mzToleranceDaAt);
+    }
+    const PSMfeatureExtractor::Ms1AbundanceResult ms1Abundance =
+        PSMfeatureExtractor::getSIPelementAbundanceFromMS1Peaks(
+            ms1Peaks, baseMass, rec.peptide, precursorCharge, labeledRecord.sipAtom);
 
-	ShardPsmRow row;
-	row.scanIdx = static_cast<int32_t>(scanIdx);
-	row.parentCharge = rec.charge > 0 ? rec.charge : match.matchedCharge;
-	row.isotopicShift = match.isotopicShift;
-	row.matchedY = envCounts.matchedY;
-	row.matchedB = envCounts.matchedB;
-	row.peptideLength = static_cast<int>(rec.nakedPeptide.size());
-	row.missCleavage = countMissCleavage(rec.nakedPeptide);
-	row.ptmCount = countPTM(rec.peptide);
-	row.isotopicPeakNumbers = ms1Abundance.isotopicPeakCount;
-	row.wdp = wdp;
-	row.xcorr = xcorr;
-	row.mvh = mvh;
-	row.entropy = entropy;
-	row.cosine = cosine;
-	row.deltaRT = match.deltaRT;
-	row.mzShiftDa = match.mzShift;
-	row.mzAbsErrPpm = match.mzAbsErrPpm;
-	row.expMassNeutral = match.matchedMz * match.matchedCharge - match.matchedCharge * ProNovoConfig::getProtonMass();
-	row.calcMassNeutral = rec.topPrecursorMz * rec.charge - rec.charge * ProNovoConfig::getProtonMass();
-	row.rtScan = scanRtMinutes(scan);
-	row.ms1IsotopicAbundancePct = ms1Abundance.abundancePct;
-	row.log10PrecursorIntensity = (rec.sumPrecursorIntensity > 0.0)
-									  ? std::log10(rec.sumPrecursorIntensity)
-									  : 0.0;
-	row.matchedMz = match.matchedMz;
-	row.psmId = rec.psmId;
-	row.peptide = rec.peptide;
-	row.proteins = rec.proteins;
-	row.sipAtom = labeledRecord.sipAtom;
-	return row;
+    ShardPsmRow row;
+    row.scanIdx = static_cast<int32_t>(scanIdx);
+    row.parentCharge = rec.charge > 0 ? rec.charge : match.matchedCharge;
+    row.isotopicShift = match.isotopicShift;
+    row.matchedY = envCounts.matchedY;
+    row.matchedB = envCounts.matchedB;
+    row.peptideLength = static_cast<int>(rec.nakedPeptide.size());
+    row.missCleavage = PSMfeatureExtractor::countMissCleavage(rec.nakedPeptide);
+    row.ptmCount = PSMfeatureExtractor::countPTM(rec.peptide);
+    row.isotopicPeakNumbers = ms1Abundance.isotopicPeakCount;
+    row.wdp = wdp;
+    row.xcorr = xcorr;
+    row.mvh = mvh;
+    row.entropy = entropy;
+    row.cosine = cosine;
+    row.deltaRT = match.deltaRT;
+    row.mzShiftDa = match.mzShift;
+    row.mzAbsErrPpm = match.mzAbsErrPpm;
+    row.expMassNeutral = match.matchedMz * match.matchedCharge - match.matchedCharge * ProNovoConfig::getProtonMass();
+    row.calcMassNeutral = rec.topPrecursorMz * rec.charge - rec.charge * ProNovoConfig::getProtonMass();
+    row.rtScan = scanRtMinutes(scan);
+    row.ms1IsotopicAbundancePct = ms1Abundance.abundancePct;
+    row.log10PrecursorIntensity = (rec.sumPrecursorIntensity > 0.0)
+                                      ? std::log10(rec.sumPrecursorIntensity)
+                                      : 0.0;
+    row.matchedMz = match.matchedMz;
+    row.psmId = rec.psmId;
+    row.peptide = rec.peptide;
+    row.proteins = rec.proteins;
+    row.sipAtom = labeledRecord.sipAtom;
+    return row;
 }
 
 int processOneHdf5(const Args &args, const std::string &scanPath,
@@ -3012,7 +2664,8 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 	timing.run("Write PIN", "write PIN file",
 			   kept.size(), "rows", [&]()
 			   {
-				   writtenRows = writePinFileWithDiff(pinPath.string(), sampleBasename, kept);
+				   const std::vector<PinWriter::SearchSpectraPinRow> pinRows = makeSearchSpectraPinRows(kept);
+				   writtenRows = PinWriter::writeSearchSpectraPin(pinPath.string(), sampleBasename, pinRows);
 			   });
 	std::cout << "Wrote " << pinPath << " (" << writtenRows << " rows, WDP >= "
 			  << std::fixed << std::setprecision(1) << kMinPinWdpScore << ")\n";

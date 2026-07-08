@@ -9,16 +9,6 @@
 
 int DatabaseSearchWorkflow::run(int argc, char **argv)
 {
-#pragma omp parallel
-	{
-		const int tid = omp_get_thread_num();
-		if (tid == 0)
-		{
-			std::cout << "Number of threads: " << omp_get_num_threads() << std::endl;
-		}
-	}
-
-	const double begin = omp_get_wtime();
 	sipros::SiprosSearchRunner runner;
 	sipros::DatabaseSearchArguments args;
 	if (!runner.initializeArguments(argc, argv, args, std::cout, std::cerr))
@@ -29,6 +19,17 @@ int DatabaseSearchWorkflow::run(int argc, char **argv)
 	{
 		return 0;
 	}
+
+#pragma omp parallel
+	{
+		const int tid = omp_get_thread_num();
+		if (tid == 0)
+		{
+			std::cout << "Number of threads: " << omp_get_num_threads() << std::endl;
+		}
+	}
+
+	const double begin = omp_get_wtime();
 
 	int result = 0;
 	for (const std::string &scanFile : args.scanFiles)

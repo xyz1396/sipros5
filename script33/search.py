@@ -236,10 +236,6 @@ class search:
             if not os.path.exists(real_file):
                 self.logger.error(f'{real_file} does not exist')
                 raise SystemExit(1)
-            lower = real_file.lower()
-            if lower.endswith(('.ft1', '.ft2', '.mzml')):
-                self.logger.error(f'Unsupported scan input {real_file}; use Raxport HDF5 (.h5/.hdf5) or raw/.d/.d.zip for conversion')
-                raise SystemExit(1)
             base = self.sample_base_name(real_file)
             if self.is_raw_input(real_file):
                 self.raw_files.append(real_file)
@@ -401,13 +397,13 @@ class search:
             decoy_pin = f'{decoy_dir}/{Path(hdf5_path).stem}.pin'
             final_pin = f'{self.outPutPath}/{base_name}/{base_name}.pin'
             commands.append((
-                f'{self.q(self.siprosPath)} -c {self.q(config)} -fasta {self.q(self.fastaPath)} '
+                f'{self.q(self.siprosPath)} search-fasta -c {self.q(config)} -fasta {self.q(self.fastaPath)} '
                 f'-f {self.q(hdf5_path)} -o {self.q(target_dir)}{sip_args} '
                 f'--pin-label 1 --top-psms-per-scan {direct_top_psms_per_scan}',
                 target_pin,
             ))
             commands.append((
-                f'{self.q(self.siprosPath)} -c {self.q(config)} -fasta {self.q(self.decoyPath)} '
+                f'{self.q(self.siprosPath)} search-fasta -c {self.q(config)} -fasta {self.q(self.decoyPath)} '
                 f'-f {self.q(hdf5_path)} -o {self.q(decoy_dir)}{sip_args} '
                 f'--pin-label -1 --top-psms-per-scan {direct_top_psms_per_scan}',
                 decoy_pin,

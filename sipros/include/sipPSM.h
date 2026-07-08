@@ -1,7 +1,14 @@
 #pragma once
-#include "isotopicPeak.h"
 #include <string>
 #include <vector>
+
+struct isotopicPeak
+{
+    double mz = 0.0;
+    int charge = 0;
+    double intensity = 0.0;
+    int isotopeIndex = -1;
+};
 
 class alignas(64) sipPSM
 {
@@ -16,10 +23,6 @@ public:
     std::vector<double> measuredParentMasses;
     std::vector<double> calculatedParentMasses;
     std::string scanType;
-    std::string searchName;
-
-    // One SearchName per PSM row, including SIP percentage names.
-    std::vector<std::string> searchNames;
 
     std::string scoringFunction;
     std::vector<int> ranks;

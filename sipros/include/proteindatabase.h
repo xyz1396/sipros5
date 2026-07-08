@@ -60,7 +60,6 @@ class ProteinDatabase
     char cLeftSubPeptideSuffix;
     char cRightSubPeptidePrefix;
     string sNonAfterCleavage;
-    bool bScreenOutput; // if true, allows standard output
 
     bool getNextPeptidePTM(Peptide *currentPeptide); // return false if there is no more peptide from this protein
     bool getNextProtein();                           // return false if no new protein
@@ -98,7 +97,7 @@ class ProteinDatabase
     void subPeptide(const string &sMutatedPeptide);
 
 public:
-    ProteinDatabase(bool bScreenOutput);
+    ProteinDatabase();
     //    ProteinDatabase(const ProteinDatabase& other);
     ~ProteinDatabase();
 

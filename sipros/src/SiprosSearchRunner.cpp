@@ -14,17 +14,25 @@
 #include <string>
 #include <utility>
 
-#include "averagine.h"
 #include "CometSearchMod.h"
 #include "MVH.h"
 #include "ms2scanvector.h"
 #include "proNovoConfig.h"
 #include "PSMfeatureExtractor.h"
+#include "PinWriter.h"
 
 namespace fs = std::filesystem;
 
 namespace sipros
 {
+
+static std::string formatElapsedSeconds(double seconds)
+{
+	std::ostringstream out;
+	out << std::fixed << std::setprecision(1) << seconds << "s";
+	return out.str();
+}
+
 
 std::string TextUtils::toLower(std::string value)
 {
@@ -94,13 +102,6 @@ std::vector<std::string> SiprosSearchRunner::listFilesWithExtensions(const std::
 	return files;
 }
 
-static int atomIndex(char atom)
-{
-	const std::string atoms = "CHONPS";
-	const size_t pos = atoms.find(static_cast<char>(std::toupper(static_cast<unsigned char>(atom))));
-	return pos == std::string::npos ? -1 : static_cast<int>(pos);
-}
-
 bool TextUtils::parseSipAtomSpec(const std::string &spec, char &sipAtom, int &sipIsotopeMassNumber)
 {
 	const std::string value = TextUtils::trim(spec);
@@ -109,7 +110,7 @@ bool TextUtils::parseSipAtomSpec(const std::string &spec, char &sipAtom, int &si
 		return false;
 	}
 	const char atom = static_cast<char>(std::toupper(static_cast<unsigned char>(value[0])));
-	if (atomIndex(atom) < 0)
+	if (ProNovoConfig::atomIndex(atom) < 0)
 	{
 		return false;
 	}
@@ -240,22 +241,9 @@ static std::vector<double> parsePctRange(const std::string &rangeSpec, double st
 	return values;
 }
 
-static bool applySipAbundance(char sipAtom, double fraction)
+static std::string uniquePeptideKey(const ScoredPsmRow &row)
 {
-	const int index = atomIndex(sipAtom);
-	if (index < 0 || index >= static_cast<int>(ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution.size()))
-	{
-		return false;
-	}
-	ProNovoConfig::getSetSIPelement() = std::string(1, sipAtom);
-	const bool updated = averagine::changeAtomProbability(
-		ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[index].vProb, sipAtom, fraction);
-	if (updated)
-	{
-		ProNovoConfig::setDeductionCoefficient();
-		ProNovoConfig::getSetSIPelement() = std::string(1, sipAtom);
-	}
-	return updated;
+	return row.nakedPeptide.empty() ? row.identifiedPeptide : row.nakedPeptide;
 }
 
 static std::string fileNameForSpecId(const std::string &sampleName, const std::string &searchName, bool isDecoy)
@@ -316,7 +304,7 @@ static void pruneScoredRowsByScan(std::vector<ScoredPsmRow> &rows, int topPsmsPe
 		int rank = 1;
 		for (ScoredPsmRow &row : scanRows)
 		{
-			if (!selectedPeptides.insert(row.identifiedPeptide).second)
+			if (!selectedPeptides.insert(uniquePeptideKey(row)).second)
 			{
 				continue;
 			}
@@ -349,7 +337,7 @@ static sipPSM buildSipPsm(const std::string &sampleName,
 		psm.isolationWindowCenterMZs.push_back(row.isolationWindowCenterMZ);
 		psm.measuredParentMasses.push_back(row.measuredParentMass);
 		psm.calculatedParentMasses.push_back(row.calculatedParentMass);
-		psm.searchNames.push_back(row.searchName);
+		psm.MS2IsotopicAbundances.push_back(row.ms2IsotopicAbundancePct);
 		psm.ranks.push_back(row.rank);
 		psm.scores.push_back(row.wdpScore);
 		psm.identifiedPeptides.push_back(row.identifiedPeptide);
@@ -365,12 +353,12 @@ static sipPSM buildSipPsm(const std::string &sampleName,
 	return psm;
 }
 
-void SiprosSearchRunner::printUsage(std::ostream &out)
+void SiprosSearchRunner::printUsage(std::ostream &out, const std::string &prog)
 {
 	out << "Usage:\n";
-	out << "  sipros -f sample.h5 -c config.cfg -fasta proteins.fasta -o out "
+	out << "  " << prog << " -f sample.h5 -c config.cfg -fasta proteins.fasta -o out "
 		<< "[-a C13 -b 1-5 -s 1] [--pin-label 1|-1]\n";
-	out << "  sipros -w hdf5_directory -c config.cfg -fasta proteins.fasta -o out "
+	out << "  " << prog << " -w hdf5_directory -c config.cfg -fasta proteins.fasta -o out "
 		<< "[-a C13 -b 1-5 -s 1] [--pin-label 1|-1]\n\n";
 	out << "Parameters:\n";
 	out << "  -c <config.cfg>             one base configuration file\n";
@@ -383,8 +371,6 @@ void SiprosSearchRunner::printUsage(std::ostream &out)
 	out << "  -s, --step <pct>            SIP percentage step\n";
 	out << "  --pin-label <1|-1>          label written to PIN rows; default: 1\n";
 	out << "  --top-psms-per-scan <N>     final WDP-ranked PSMs retained per scan across SIP pct\n";
-	out << "  --silent                    silence most standard output\n";
-	out << "Unsupported legacy scan inputs (.FT1/.FT2/.mzML) and -g config directories are rejected.\n";
 }
 
 bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
@@ -467,10 +453,6 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 				return false;
 			}
 		}
-		else if (option == "--silent" || option == "-q")
-		{
-			args.screenOutput = false;
-		}
 		else if (option == "-g")
 		{
 			err << "-g config-directory input was removed; use -c plus -a/-b/-s for SIP percentage search\n";
@@ -479,7 +461,7 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 		else if ((option == "-h") || (option == "--help"))
 		{
 			args.showHelp = true;
-			printUsage(out);
+			printUsage(out, values.empty() ? "sipros search-fasta" : values[0]);
 			return true;
 		}
 		else if (option == "-p")
@@ -554,25 +536,37 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 		ProNovoConfig::setFASTAfilename(args.fastaFile);
 	}
 	const int topKeep = args.topPsmsPerScan > 0 ? args.topPsmsPerScan : ProNovoConfig::INTTOPKEEP;
+	const bool configIsSip = ProNovoConfig::getSearchType() == "SIP";
+	const bool hasSipControls = !args.sipElementSpec.empty();
+	const bool directSipMode = hasSipControls || configIsSip;
+	const bool isDecoyLabel = args.pinLabel < 0;
 	fs::create_directories(args.outputDirectory);
 
-	MS2ScanVector scanVector(scanFile, args.outputDirectory, args.configFile, args.screenOutput);
-	if (args.screenOutput)
+	MS2ScanVector scanVector(scanFile, args.outputDirectory, args.configFile);
+	if (directSipMode)
+	{
+		std::cout << "\nSipros FASTA SIP search\n";
+		std::cout << "  Scan file : " << scanFile << "\n";
+		std::cout << "  FASTA     : " << ProNovoConfig::getFASTAfilename() << (isDecoyLabel ? " (decoy)" : " (target)") << "\n";
+		std::cout << "  Config    : " << args.configFile << "\n";
+		std::cout << "  SIP       : " << args.sipElementSpec << " " << args.sipRangeSpec << " step " << args.sipStepPct << "\n";
+		std::cout << "  TopN      : " << topKeep << " unique peptides per scan across SIP pct\n";
+	}
+	else
 	{
 		std::cout << "Reading Raxport HDF5 scan file: " << scanFile << "\n";
 		std::cout << "Using fasta file: " << ProNovoConfig::getFASTAfilename() << "\n";
 		std::cout << "Using Configuration file: " << args.configFile << "\n";
 	}
-	if (!scanVector.loadMassData())
+
+	bool loadedScans = scanVector.loadMassData();
+	if (!loadedScans)
 	{
 		std::cerr << "Error: Failed to load file: " << scanFile << "\n";
 		return 1;
 	}
 
 	std::vector<ScoredPsmRow> scoredRows;
-	const bool configIsSip = ProNovoConfig::getSearchType() == "SIP";
-	const bool hasSipControls = !args.sipElementSpec.empty();
-	const bool isDecoyLabel = args.pinLabel < 0;
 	if (hasSipControls || configIsSip)
 	{
 		if (!hasSipControls)
@@ -603,22 +597,24 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 			return 1;
 		}
 		const std::string sipSpec = normalizeSipSpec(args.sipElementSpec, sipAtom, sipIsotopeMassNumber);
-		for (double pct : pctValues)
+		for (size_t pctIndex = 0; pctIndex < pctValues.size(); ++pctIndex)
 		{
+			const double pct = pctValues[pctIndex];
 			scanVector.clearSearchResults();
-			if (!applySipAbundance(sipAtom, pct / 100.0))
+			if (!ProNovoConfig::applySipAbundance(sipAtom, pct / 100.0))
 			{
 				std::cerr << "Could not apply SIP abundance for " << args.sipElementSpec << " at " << pct << " percent\n";
 				return 1;
 			}
 			ProNovoConfig::setSearchName(formatSipSearchName(sipSpec, pct));
-			if (args.screenOutput)
-			{
-				std::cout << "Searching " << scanFile << " at " << ProNovoConfig::getSearchName() << "\n";
-			}
+			std::cout << "  [" << (pctIndex + 1) << "/" << pctValues.size() << "] "
+					  << ProNovoConfig::getSearchName() << "\n";
+			const double pctBegin = omp_get_wtime();
 			scanVector.startProcessingWdpSip();
-			scanVector.appendScoredPsmRows(scoredRows, isDecoyLabel, topKeep);
+			scanVector.appendScoredPsmRows(scoredRows, isDecoyLabel, topKeep, pct);
 			pruneScoredRowsByScan(scoredRows, topKeep);
+			std::cout << "  Result: done in " << formatElapsedSeconds(omp_get_wtime() - pctBegin)
+					  << ", cumulative retained rows: " << scoredRows.size() << "\n";
 		}
 	}
 	else
@@ -630,7 +626,7 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 			ProNovoConfig::setSearchName("SE");
 		}
 		scanVector.startProcessingMvh();
-		scanVector.appendScoredPsmRows(scoredRows, isDecoyLabel, topKeep);
+		scanVector.appendScoredPsmRows(scoredRows, isDecoyLabel, topKeep, 1.07);
 		pruneScoredRowsByScan(scoredRows, topKeep);
 	}
 
@@ -643,11 +639,8 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 		extractor.extractFeaturesForPsm(scanFile, extractor.sipPSMs.front());
 	}
 	const fs::path pinPath = fs::path(args.outputDirectory) / (sampleName + ".pin");
-	extractor.writePecorlatorPin(pinPath.string(), false);
-	if (args.screenOutput)
-	{
-		std::cout << "Wrote PIN: " << pinPath.string() << " (" << scoredRows.size() << " scored rows retained after top-N pruning)\n";
-	}
+	PinWriter::writePecorlatorPin(pinPath.string(), extractor.sipPSMs, false);
+	std::cout << "Wrote PIN: " << pinPath.string() << " (" << scoredRows.size() << " scored rows retained after top-N pruning)\n";
 	return 0;
 }
 

@@ -30,14 +30,13 @@ struct DatabaseSearchArguments
 	double sipStepPct = 1.0;
 	int pinLabel = 1;
 	int topPsmsPerScan = 0;
-	bool screenOutput = true;
 	bool showHelp = false;
 };
 
 class SiprosSearchRunner
 {
 public:
-	static void printUsage(std::ostream &out);
+	static void printUsage(std::ostream &out, const std::string &prog = "sipros search-fasta");
 
 	bool initializeArguments(int argc, char **argv,
 						 DatabaseSearchArguments &args,

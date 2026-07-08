@@ -400,7 +400,6 @@ bool readRaxportHdf5Scans(const std::string &path,
             }
 
             std::unique_ptr<MS2Scan> scan(new MS2Scan);
-            scan->sFT2Filename = path;
             scan->iScanId = scanNumber[i];
             scan->iParentScanID = parentScanNumber[i];
             scan->setRTime(formatRt(retentionTime[i]));

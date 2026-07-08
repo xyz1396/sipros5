@@ -232,7 +232,6 @@ public:
 	//    MS2Scan(const MS2Scan *& cMS2Scan);
 	~MS2Scan();
 
-	string sFT2Filename;	   // FT2file name
 	int iParentChargeState;	   // Parent ion charge state
 	double dParentMZ;		   // Parent ion M/Z
 	double dParentNeutralMass; // Parent neutral mass

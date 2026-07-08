@@ -11,7 +11,7 @@ namespace
 void printUsage(const char *prog)
 {
 	std::cerr << "Usage:\n"
-			  << "  " << prog << " [database-search options]\n"
+			  << "  " << prog << " search-fasta [options]\n"
 			  << "  " << prog << " theoretical-spectra [options]\n"
 			  << "  " << prog << " experimental-spectra [options]\n"
 			  << "  " << prog << " search-spectra [options]\n\n"
@@ -31,10 +31,6 @@ int runShifted(int argc, char **argv, int skip, const std::string &displayName, 
 	return workflow.run(static_cast<int>(shifted.size()), shifted.data());
 }
 
-bool isDatabaseOption(const char *value)
-{
-	return value != nullptr && value[0] == '-';
-}
 
 } // namespace
 
@@ -42,8 +38,8 @@ int main(int argc, char **argv)
 {
 	if (argc <= 1)
 	{
-		DatabaseSearchWorkflow workflow;
-		return workflow.run(argc, argv);
+		printUsage(argv[0]);
+		return 1;
 	}
 
 	const std::string command = argv[1];
@@ -51,6 +47,11 @@ int main(int argc, char **argv)
 	{
 		printUsage(argv[0]);
 		return 0;
+	}
+	if (command == "search-fasta")
+	{
+		DatabaseSearchWorkflow workflow;
+		return runShifted(argc, argv, 2, std::string(argv[0]) + " search-fasta", workflow);
 	}
 	if (command == "theoretical-spectra")
 	{
@@ -67,12 +68,6 @@ int main(int argc, char **argv)
 		SearchSpectraWorkflow workflow;
 		return runShifted(argc, argv, 2, std::string(argv[0]) + " search-spectra", workflow);
 	}
-	if (isDatabaseOption(argv[1]))
-	{
-		DatabaseSearchWorkflow workflow;
-		return workflow.run(argc, argv);
-	}
-
 	std::cerr << "Unknown sipros subcommand: " << command << "\n\n";
 	printUsage(argv[0]);
 	return 1;

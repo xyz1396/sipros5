@@ -22,13 +22,17 @@ typedef long long INT64;
 #define CLOCKSTART                        \
 	INT64 mem_start = checkMemoryUsage(); \
 	double begin = omp_get_wtime();       \
-	cout << "Currently in file: " << __FILE__ << " Function: " << __FUNCTION__ << "()" << endl;
-#define CLOCKSTOP                                                                                              \
-	INT64 mem_end = checkMemoryUsage();                                                                        \
-	double end = omp_get_wtime();                                                                              \
-	cout << "Function " << __FUNCTION__ << "() finished in " << (end - begin) << " Seconds." << endl           \
-		 << "Memory used: " << mem_end << " - " << mem_start << " = " << mem_end - mem_start << " MB." << endl \
-		 << endl;
+	cout << "  " << __FUNCTION__ << " started" << endl
+#define CLOCKSTOP                                      \
+	INT64 mem_end = checkMemoryUsage();                 \
+	double end = omp_get_wtime();                       \
+	cout << "  " << __FUNCTION__ << " finished in " << (end - begin) << "s"; \
+	INT64 mem_delta = mem_end - mem_start;              \
+	if (mem_delta != 0)                                 \
+	{                                                   \
+		cout << ", memory delta " << mem_delta << " MB"; \
+	}                                                   \
+	cout << endl
 
 // Get the memory usage with a Linux kernel.
 inline unsigned int checkMemoryUsage()
@@ -342,6 +346,12 @@ public:
 	// compute deduction coefficient in score function
 	// only suitbale for carbon and nitrogen SIP now
 	static void setDeductionCoefficient();
+	static int atomIndex(char sipAtom);
+	static bool refreshResidueDistributions(Isotopologue &iso);
+	static int resolveSipIsotopeIndex(const Isotopologue &iso, char sipAtom, int isotopeMassNumber);
+	static void setSipAbundance(Isotopologue &iso, char sipAtom, int isotopeIndex, double sipPct);
+	static double getIsotopeAbundancePct(const Isotopologue &iso, char sipAtom, int isotopeIndex);
+	static bool applySipAbundance(char sipAtom, double fraction);
 	// get deduction coefficient in score function
 	static double getDeductionCoefficient() { return deductionCoefficient; }
 

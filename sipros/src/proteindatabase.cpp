@@ -1,6 +1,6 @@
 #include "proteindatabase.h"
 
-ProteinDatabase::ProteinDatabase(bool bScreenOutput)
+ProteinDatabase::ProteinDatabase()
 {
 	int i;
 	vector<string> vsallNames = ProNovoConfig::vsSingleResidueNames;
@@ -18,7 +18,6 @@ ProteinDatabase::ProteinDatabase(bool bScreenOutput)
 			orderstring += ProNovoConfig::vsSingleResidueNames[i];
 	// cout<<orderstring<<endl;
 	// orderstring = ORDERSTRING;
-	this->bScreenOutput = bScreenOutput;
 	for (i = 0; i < (int)vsallNames.size(); i++)
 		if (isalpha(vsallNames.at(i).at(0)))
 			slegalChar = slegalChar + vsallNames.at(i);
@@ -215,10 +214,6 @@ void ProteinDatabase::RemoveIllegalResidue(string &seq)
 	found = seq.find_first_not_of(legalstr);
 	while (found != string::npos)
 	{
-		if (bScreenOutput)
-		{
-			// cout << "Remove illegal character " << seq.substr(found, 1) << " of " << seq << endl;
-		}
 		seq.erase(found, 1);
 		// cout<<seq<<endl;
 		found = seq.find_first_not_of(legalstr);
@@ -285,12 +280,9 @@ bool ProteinDatabase::getNextProtein()
 		snextProteinName = "";
 		scurrentProtein = "";
 		iclCheck = 0;
-		if (bScreenOutput)
+		if (iProteinId % 1000 == 0)
 		{
-			if (iProteinId % 1000 == 0)
-			{
-				cout << "Processing protein #" << iProteinId << "\t" << scurrentProteinName << endl;
-			}
+			cout << "  Protein progress: " << iProteinId << " " << scurrentProteinName << endl;
 		}
 		while (!db_stream.eof())
 		{

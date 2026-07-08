@@ -1,13 +1,14 @@
 #pragma once
-#include "Scan.h"
+#include "RaxportHdf5Reader.h"
 #include "averagine.h"
-#include "isotopicPeak.h"
 #include "sipPSM.h"
 #include <array>
+#include <functional>
 #include <omp.h>
 #include <string>
-#include <unordered_map>
+#include <utility>
 #include <vector>
+
 
 class PSMfeatureExtractor
 {
@@ -15,36 +16,51 @@ public:
     PSMfeatureExtractor();
 
     averagine mAveragine;
-    std::vector<Scan> MS1Scans;
+    sipros::RaxportMs1Data ms1Data;
     std::vector<sipPSM> sipPSMs;
     sipPSM *mSipPSM;
-    std::unordered_map<size_t, Scan *> scanNumberMS1ScanMap;
-    // N isotopic peaks on each side to consider
-    const static int NisotopicPeak = 20;
-    std::vector<int> vertexIXs;
     std::array<char, 2> cleavageSites = {'K', 'R'};
+    static constexpr int Ms1IsotopeWindow = 10;
 
     void loadHdf5Ms1(const std::string &hdf5BasePath);
     void initializeFeatureVectors(sipPSM &psm);
     void extractFeaturesForPsm(const std::string &hdf5Path, sipPSM &psm);
 
-    size_t binarySearchPeak(const Scan *mScan, double Mz, int charge);
-    // filter isotopic peaks by isotopic envelope shape
-    void filterIsotopicPeaks(std::vector<isotopicPeak> &isotopicPeaks, const double calculatedPrecursorMZ);
-    void filterIsotopicPeaksTopN(std::vector<isotopicPeak> &isotopicPeaks, const double observedPrecursorMZ,
-                                 const size_t topN);
-    // return precursor scan number and isotopic peaks
-    std::vector<isotopicPeak> findIsotopicPeaks(int &MS1ScanNumber,
-                                                const int precursorCharge,
-                                                const double observedPrecursorMass,
-                                                const double calculatedPrecursorMass);
-    double getSIPelementAbundanceFromMS1(const std::string &peptideSeq,
-                                         const std::vector<isotopicPeak> &isotopicPeaks, const int precursorCharge);
     std::pair<int, int> getSeqLengthAndMissCleavageSiteNumber(const std::string &peptideSeq);
     int getPTMnumber(const std::string &peptideSeq);
     std::pair<int, double> getMassWindowShiftAndError(const double observedPrecursorMass,
                                                       const double calculatedPrecursorMass);
-    double getMS2IsotopicAbundance(const std::string &searchName);
+    struct Ms1AbundanceResult
+    {
+        double abundancePct = 0.0;
+        int isotopicPeakCount = 0;
+    };
+
+    static std::string peptideBodyWithPtms(const std::string &decorated);
+    static int countMissCleavage(const std::string &naked);
+    static int countPTM(const std::string &decorated);
+    static int sipAtomIndex(const std::string &sipAtom);
+    static int sipNominalShiftPerAtom(const std::string &sipAtom);
+    static double expectedNaturalNominalShiftExceptTarget(const std::array<int, 6> &atomCounts,
+                                                          int targetAtomIndex,
+                                                          int targetIsotopeIndex);
+    static int ms1PeakCharge(const sipros::RaxportMs1Scan &scan, size_t idx);
+    static size_t findMs1Peak(const sipros::RaxportMs1Scan &scan,
+                              double targetMz,
+                              const std::function<double(double)> &mzToleranceDaAt,
+                              int requiredCharge = -1);
+    static std::vector<isotopicPeak> findMs1IsotopicPeaks(const sipros::RaxportMs1Data *ms1Data,
+                                                          int &ms1ScanNumber,
+                                                          int precursorCharge,
+                                                          double monoPrecursorMz,
+                                                          double matchedPrecursorMz,
+                                                          int targetNominalShift,
+                                                          const std::function<double(double)> &mzToleranceDaAt);
+    static Ms1AbundanceResult getSIPelementAbundanceFromMS1Peaks(const std::vector<isotopicPeak> &peaks,
+                                                                 double baseMass,
+                                                                 const std::string &peptide,
+                                                                 int precursorCharge,
+                                                                 const std::string &sipAtom);
+
     void extractFeaturesOfEachPSM();
-    void writePecorlatorPin(const std::string &fileName, bool doProteinInference);
 };
