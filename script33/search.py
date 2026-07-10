@@ -1,11 +1,18 @@
 from logging import Logger
-import multiprocessing
 import os
 import concurrent.futures
 import shutil
 import shlex
 from pathlib import Path
 from command_runner import run_logged_command
+from thread_allocation import (
+    MIN_SIPROS_OR_PERCOLATOR_THREADS,
+    ThreadAllocation,
+    allocate_threads,
+    available_cpu_count,
+    effective_thread_count,
+    thread_env_updates,
+)
 
 
 class search:
@@ -18,7 +25,7 @@ class search:
                  nPrecursor=6, dryrun=False, psmTsv: str | None = None,
                  unlabeledInput: str | None = None, spectraDir: str | None = None,
                  topPsmsPerScan: int = 8) -> None:
-        self.core_count: int = multiprocessing.cpu_count()
+        self.core_count = available_cpu_count()
         self.element = element
         self.toleranceMS1 = toleranceMS1
         self.toleranceMS2 = toleranceMS2
@@ -33,8 +40,7 @@ class search:
         self.inputPath = inputPath
         self.outPutPath = outputPath
         self.negative_control = negative_control
-        self.threadNumber = threadNumber
-        self.OMP_NUM_THREADS = min(10, self.core_count, threadNumber)
+        self.threadNumber = effective_thread_count(threadNumber, self.core_count)
         self.logger = logger
         self.raw_files: list[str] = []
         self.hdf5_input_files: list[str] = []
@@ -54,12 +60,27 @@ class search:
     def q(self, value: str | Path) -> str:
         return shlex.quote(str(value))
 
-    def run_command(self, cmd: str, env: dict[str, str] | None = None):
+    def run_command(self, cmd: str, env: dict[str, str] | None = None,
+                    threads: int | None = None):
+        thread_count = self.threadNumber if threads is None else threads
         run_logged_command(
             cmd,
             self.logger,
             env=env,
-            env_updates={"OMP_NUM_THREADS": str(self.OMP_NUM_THREADS)},
+            env_updates=thread_env_updates(thread_count),
+        )
+
+    def log_thread_allocation(self, phase: str, allocation: ThreadAllocation) -> None:
+        if allocation.worker_count == 0:
+            self.logger.info(f'{phase}: no jobs')
+            return
+        minimum = min(allocation.task_threads)
+        maximum = max(allocation.task_threads)
+        per_job = str(minimum) if minimum == maximum else f'{minimum}-{maximum}'
+        self.logger.info(
+            f'{phase}: up to {allocation.worker_count} concurrent jobs, '
+            f'{per_job} threads per job, {allocation.peak_threads}/{self.threadNumber} '
+            f'threads in the first wave'
         )
 
     def sample_base_name(self, path: str) -> str:
@@ -80,11 +101,21 @@ class search:
     def expected_hdf5_path(self, base_name: str) -> str:
         return f'{self.outPutPath}/{base_name}/{base_name}.h5'
 
-    def run_command_raxport(self, raw_file: str, hdf5_dir: str, expected_hdf5: str):
-        min_complete_hdf5_size = 1024 * 1024
+    def complete_hdf5_exists(self, path: str) -> bool:
+        return os.path.exists(path) and os.path.getsize(path) >= 1024 * 1024
+
+    def complete_search_output_exists(self, path: str | None) -> bool:
+        return bool(
+            path
+            and os.path.exists(path)
+            and os.path.getsize(path) > 500 * 1024
+        )
+
+    def run_command_raxport(self, raw_file: str, hdf5_dir: str,
+                            expected_hdf5: str, threads: int):
         if os.path.exists(expected_hdf5):
             hdf5_size = os.path.getsize(expected_hdf5)
-            if hdf5_size >= min_complete_hdf5_size:
+            if self.complete_hdf5_exists(expected_hdf5):
                 self.logger.info(f'HDF5 file already exists, skipping conversion: {expected_hdf5}')
                 return
             self.logger.warning(f'Removing incomplete HDF5 conversion output: {expected_hdf5} ({hdf5_size} bytes)')
@@ -99,16 +130,17 @@ class search:
         env["DOTNET_GCHeapHardLimit"] = raxport_heap_limit
         self.logger.info(f"Set DOTNET_GCHeapHardLimit to {raxport_heap_limit} bytes")
         cmd = (f'{self.q(self.raxportPath)} -f {self.q(raw_file)} -o {self.q(hdf5_dir)} '
-               f'--format hdf5 -j {min(10, self.threadNumber, self.core_count)} -n {self.nPrecursor}')
-        self.run_command(cmd, env)
+               f'--format hdf5 -n {self.nPrecursor}')
+        self.run_command(cmd, env, threads)
         if not os.path.exists(expected_hdf5):
             raise FileNotFoundError(f'Raxport did not create expected HDF5 file: {expected_hdf5}')
 
-    def run_command_sipros(self, cmd: str, output_file: str | None = None):
-        if output_file and os.path.exists(output_file) and os.path.getsize(output_file) > 500 * 1024:
+    def run_command_sipros(self, cmd: str, output_file: str | None = None,
+                           threads: int | None = None):
+        if self.complete_search_output_exists(output_file):
             self.logger.info(f'the output file {output_file} existed, skip this search')
             return
-        self.run_command(cmd)
+        self.run_command(cmd, threads=threads)
 
     def reverse_fasta_sequences(self):
         self.logger.info(f'Reversing fasta sequences to {self.decoyPath}')
@@ -275,19 +307,32 @@ class search:
                         shutil.copy2(hdf5_file, expected)
             self.hdf5_paths[base] = expected
         if self.raw_files:
-            max_workers = min(10, self.threadNumber, self.core_count)
             jobs = []
             for raw_file, base in zip(self.raw_files, self.base_names_of_raw):
                 expected = self.expected_hdf5_path(base)
                 hdf5_dir = os.path.dirname(expected)
+                if self.complete_hdf5_exists(expected):
+                    self.logger.info(
+                        f'HDF5 file already exists, skipping conversion: {expected}'
+                    )
+                    self.hdf5_paths[base] = expected
+                    continue
                 jobs.append((raw_file, hdf5_dir, expected, base))
+            allocation = allocate_threads(self.threadNumber, len(jobs))
+            self.log_thread_allocation('Raxport conversion', allocation)
             if self.dryrun:
                 for _, _, expected, base in jobs:
                     self.hdf5_paths[base] = expected
-            else:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = [executor.submit(self.run_command_raxport, raw, outdir, expected)
-                               for raw, outdir, expected, _ in jobs]
+            elif allocation.worker_count > 0:
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=allocation.worker_count) as executor:
+                    futures = [
+                        executor.submit(
+                            self.run_command_raxport, raw, outdir, expected, threads
+                        )
+                        for (raw, outdir, expected, _), threads
+                        in zip(jobs, allocation.task_threads)
+                    ]
                     for future in concurrent.futures.as_completed(futures):
                         future.result()
                 for _, _, expected, base in jobs:
@@ -385,7 +430,7 @@ class search:
             for row in merged_rows:
                 merged.write("\t".join(row) + "\n")
 
-    def sipros_search(self, raw_file_parallel: int):
+    def sipros_search(self):
         config = self.get_workflow_config()
         sip_args = self.direct_sip_args()
         direct_top_psms_per_scan = self.topPsmsPerScan
@@ -412,10 +457,33 @@ class search:
                 decoy_pin,
             ))
             merge_jobs.append((target_pin, decoy_pin, final_pin))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, raw_file_parallel)) as executor:
-            futures = [executor.submit(self.run_command_sipros, cmd, output) for cmd, output in commands]
-            for future in concurrent.futures.as_completed(futures):
-                future.result()
+        pending_commands = []
+        for command, output in commands:
+            if self.complete_search_output_exists(output):
+                self.logger.info(
+                    f'the output file {output} existed, skip this search'
+                )
+            else:
+                pending_commands.append((command, output))
+        commands = pending_commands
+        allocation = allocate_threads(
+            self.threadNumber,
+            len(commands),
+            minimum_threads_per_task=MIN_SIPROS_OR_PERCOLATOR_THREADS,
+        )
+        self.log_thread_allocation('Sipros FASTA search', allocation)
+        if allocation.worker_count > 0:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=allocation.worker_count) as executor:
+                futures = [
+                    executor.submit(
+                        self.run_command_sipros, cmd, output, threads
+                    )
+                    for (cmd, output), threads
+                    in zip(commands, allocation.task_threads)
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
         for target_pin, decoy_pin, final_pin in merge_jobs:
             self.merge_pin_files(target_pin, decoy_pin, final_pin)
 
@@ -437,7 +505,9 @@ class search:
         out_dir = f'{self.outPutPath}/unlabeled_hdf5'
         expected = f'{out_dir}/{base}.h5'
         if not self.dryrun:
-            self.run_command_raxport(real_entry, out_dir, expected)
+            self.run_command_raxport(
+                real_entry, out_dir, expected, self.threadNumber
+            )
         return expected
 
     def generate_or_reuse_spectra_library(self, config: str) -> str:
@@ -464,7 +534,7 @@ class search:
                f'-o {self.q(self.generatedSpectraDir)} -a {self.element} '
                f'-b {sip_range} -s {sip_step} --decoy -t {self.threadNumber}')
         if not self.dryrun:
-            self.run_command(cmd)
+            self.run_command(cmd, threads=self.threadNumber)
             spectra_files = list(Path(self.generatedSpectraDir).glob('*.h5')) + list(Path(self.generatedSpectraDir).glob('*.hdf5'))
             if not spectra_files:
                 self.logger.error(f'experimental-spectra did not create HDF5 spectra files in {self.generatedSpectraDir}')
@@ -477,20 +547,42 @@ class search:
         return self.generatedSpectraDir
 
     def search_spectra_samples(self, config: str, spectra_dir: str):
-        commands: list[tuple[str, str]] = []
+        commands: list[tuple[str, str, int]] = []
+        pending_samples: list[tuple[str, str, str, str]] = []
         for base_name in self.base_names:
             hdf5_path = self.hdf5_paths[base_name]
             sample_dir = f'{self.outPutPath}/{base_name}'
             os.makedirs(sample_dir, exist_ok=True)
             pin_path = f'{sample_dir}/{base_name}.pin'
+            if self.complete_search_output_exists(pin_path):
+                self.logger.info(
+                    f'the output file {pin_path} existed, skip this search'
+                )
+                continue
+            pending_samples.append(
+                (base_name, hdf5_path, sample_dir, pin_path)
+            )
+        allocation = allocate_threads(
+            self.threadNumber,
+            len(pending_samples),
+            minimum_threads_per_task=MIN_SIPROS_OR_PERCOLATOR_THREADS,
+        )
+        self.log_thread_allocation('Sipros spectra search', allocation)
+        if allocation.worker_count == 0:
+            return
+        for (_, hdf5_path, sample_dir, pin_path), threads in zip(
+                pending_samples, allocation.task_threads):
             cmd = (f'{self.q(self.siprosPath)} search-spectra -f {self.q(hdf5_path)} '
                    f'-c {self.q(config)} -h5 {self.q(spectra_dir)} -o {self.q(sample_dir)} '
-                   f'-t {self.threadNumber} --tolerance-ms1 {self.toleranceMS1} --tolerance-ms1-unit da '
+                   f'-t {threads} --tolerance-ms1 {self.toleranceMS1} --tolerance-ms1-unit da '
                    f'--tolerance-ms2 {self.toleranceMS2} --tolerance-ms2-unit da --top-psms-per-scan {self.topPsmsPerScan}')
-            commands.append((cmd, pin_path))
-        raw_file_parallel = max(1, int(self.threadNumber // self.OMP_NUM_THREADS))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=raw_file_parallel) as executor:
-            futures = [executor.submit(self.run_command_sipros, cmd, output) for cmd, output in commands]
+            commands.append((cmd, pin_path, threads))
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=allocation.worker_count) as executor:
+            futures = [
+                executor.submit(self.run_command_sipros, cmd, output, threads)
+                for cmd, output, threads in commands
+            ]
             for future in concurrent.futures.as_completed(futures):
                 future.result()
 
@@ -501,7 +593,7 @@ class search:
         self.reverse_fasta_sequences()
         self.write_workflow_config()
         self.logger.info(f'Number of CPU cores: {self.core_count}')
-        self.logger.info(f'Setted max thread numbers: {self.threadNumber}')
+        self.logger.info(f'Maximum workflow thread budget: {self.threadNumber}')
         self.getInputFiles()
         self.validate_negative_controls()
         self.create_sample_directories()
@@ -515,11 +607,10 @@ class search:
         self.reverse_fasta_sequences()
         self.write_workflow_config()
         self.logger.info(f'Number of CPU cores: {self.core_count}')
-        self.logger.info(f'Setted max thread numbers: {self.threadNumber}')
-        raw_file_parallel = max(1, int(self.threadNumber // self.OMP_NUM_THREADS))
+        self.logger.info(f'Maximum workflow thread budget: {self.threadNumber}')
         self.getInputFiles()
         self.validate_negative_controls()
         self.create_sample_directories()
         if not self.dryrun:
             self.prepare_hdf5_inputs()
-            self.sipros_search(raw_file_parallel)
+            self.sipros_search()

@@ -9,6 +9,11 @@ from argparse import Namespace
 from search import search
 from filter import filter
 from assembly import assembly
+from thread_allocation import (
+    MIN_SIPROS_OR_PERCOLATOR_THREADS,
+    available_cpu_count,
+    effective_thread_count,
+)
 import warnings
 
 
@@ -103,7 +108,10 @@ citation:
                             help=("Raxport isotope-envelope apex m/z values selected per MSn scan "
                                   "before charge expansion (default: 6; consider 15 for DIA)"))
         parser.add_argument('-t', '--thread', required=False, type=int, default=0,
-                            help="Thread number to be limited, all threads in default")
+                            help=("Total CPU-thread budget for the whole workflow "
+                                  "(default: all CPUs available to this process). "
+                                  "Sipros and Percolator jobs receive at least 8 "
+                                  "threads when the budget permits"))
         parser.add_argument('--topN', '--top-psms-per-scan', dest='topN', required=False, type=int, default=8,
                             help="Top PSM rows retained per scan for target and decoy searches before merge (default: 8)")
         parser.add_argument('-o', '--output', required=True, help="Output directory path")
@@ -121,8 +129,19 @@ citation:
         # Validate thread number
         if args.thread < 0:
             parser.error("Thread number must be non-negative (0 for all threads, or a positive integer)")
-        if args.thread == 0:
-            args.thread = os.cpu_count() or 1  # Use all available CPUs
+        available_threads = available_cpu_count()
+        if args.thread > available_threads:
+            warnings.warn(
+                f"Requested {args.thread} threads, but only {available_threads} CPUs are available; "
+                f"using {available_threads} threads"
+            )
+        args.thread = effective_thread_count(args.thread, available_threads)
+        if args.thread < MIN_SIPROS_OR_PERCOLATOR_THREADS:
+            warnings.warn(
+                f"The {MIN_SIPROS_OR_PERCOLATOR_THREADS}-thread minimum for "
+                f"Sipros and Percolator cannot fit within a {args.thread}-thread "
+                "workflow budget; those jobs will run serially using the full budget"
+            )
         if args.topN <= 0:
             parser.error('--topN must be a positive integer')
         if args.nPrecursor <= 0:

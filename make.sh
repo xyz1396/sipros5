@@ -1,14 +1,28 @@
 #!/bin/bash
 set -e
-## install compile dependencies with apt
-# sudo apt install python openmpi-bin libopenmpi-dev build-essential cmake ninja-build gdb google-perftools libgoogle-perftools-dev
-## install compile dependencies from micromamba 
-# micromamba create -n sipros5 -c conda-forge openmpi gxx_linux-64 gcc_linux-64 cmake ninja gdb gperftools python=3.12 lxml pandas
-## compiler name x86_64-conda_cos6-linux-gnu-g++
-# micromamba activate sipros5
-## run follows to load dynamic libs when running bin/SiprosV3omp bin/SiprosV3mpi bin/SiprosV3test
-# micromamba activate sipros5
-# export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${CONDA_PREFIX}/lib
+
+# Build dependency setup
+#
+# System tools used by both build modes:
+#   sudo apt update
+#   sudo apt install build-essential git curl cmake ninja-build openmpi-bin libopenmpi-dev
+#
+# Micromamba/Conda build (./make.sh buildConda):
+#   micromamba create -n sipros5 -c conda-forge \
+#     hdf5 h5py openmpi cmake ninja gcc_linux-64 gxx_linux-64 gdb gperftools \
+#     python=3.12 lxml pandas
+#
+# Add the compile dependencies to an existing environment:
+#   micromamba install -n sipros5 -c conda-forge hdf5 openmpi cmake ninja
+#
+# vcpkg build (./make.sh build):
+#   git clone --depth 1 https://github.com/microsoft/vcpkg.git vcpkg
+#   ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+#   ./vcpkg/vcpkg install "hdf5[cpp]:x64-linux"
+#
+# Activate the environment before running Conda-built binaries so their
+# HDF5 and MPI shared libraries are available:
+#   micromamba activate sipros5
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MAMBA_EXE="${MAMBA_EXE:-micromamba}"
 if ! command -v "$MAMBA_EXE" >/dev/null 2>&1 && [ -x "$HOME/.local/bin/micromamba" ]; then

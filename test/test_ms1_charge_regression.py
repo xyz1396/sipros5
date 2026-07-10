@@ -202,7 +202,7 @@ def run_flat_fasta_layout(scan_file: Path) -> None:
         inputPath=str(scan_file),
         outputPath=str(output),
         negative_control="",
-        threadNumber=2,
+        threadNumber=8,
         logger=logger,
         element="R",
         topPsmsPerScan=2,
@@ -212,7 +212,7 @@ def run_flat_fasta_layout(scan_file: Path) -> None:
     workflow.getInputFiles()
     workflow.create_sample_directories()
     workflow.prepare_hdf5_inputs()
-    workflow.sipros_search(raw_file_parallel=2)
+    workflow.sipros_search()
 
     base = scan_file.stem
     sample_dir = output / base

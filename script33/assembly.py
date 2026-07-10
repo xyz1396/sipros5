@@ -1,15 +1,26 @@
 from logging import Logger
-import multiprocessing
-from multiprocessing import Manager
-from multiprocessing.managers import DictProxy
 import os
 import concurrent.futures
-import pandas as pd
-from lxml import etree
 import re
 import shutil
 import tempfile
 from command_runner import run_logged_command
+from thread_allocation import (
+    ThreadAllocation,
+    allocate_threads,
+    available_cpu_count,
+    configure_process_worker,
+    effective_thread_count,
+    thread_env_updates,
+)
+
+# This must run before pandas loads NumPy/OpenBLAS.  The Python process-pool
+# phase is file-parallel, while external commands get explicit larger quotas.
+configure_process_worker(1)
+
+import pandas as pd
+from lxml import etree
+
 
 class assembly:
     def __init__(self, baseNames: list[str], philosopherPath:str, percolatorPath:str, fastaPath:str, decoyPath:str, outputPath: str,
@@ -25,8 +36,8 @@ class assembly:
         self.logger = logger
         self.negative_control = negative_control
         self.label_threshold = label_threshold
-        self.threadNumber = threadNumber
-        self.core_count: int = multiprocessing.cpu_count()
+        self.core_count = available_cpu_count()
+        self.threadNumber = effective_thread_count(threadNumber, self.core_count)
         self.element = element
         self.decoyPrefix = decoyPrefix
         
@@ -227,7 +238,7 @@ class assembly:
         else:
             self.logger.warning('No SIP labeled PSMs found that meet the filtering criteria')
             return pd.DataFrame()
-        cmd = f'{self.percolatorPath} --only-psms --no-terminate -Y --num-threads {min(10, self.core_count)} \
+        cmd = f'{self.percolatorPath} --only-psms --no-terminate -Y --num-threads {self.threadNumber} \
                     --results-psms {self.outputPath}/SIP_target_psms.tsv \
                     --decoy-results-psms {self.outputPath}/SIP_decoy_psms.tsv \
                     {self.outputPath}/SIP.pin'
@@ -338,21 +349,57 @@ class assembly:
         protein_df.to_csv(output_path, sep='\t', index=False)
         self.logger.info(f'Updated protein information with SIP filtered PSM saved to {output_path}')    
 
-    def run_command(self, cmd:str, path:str = "") -> None:
-        run_logged_command(cmd, self.logger, cwd=path or None)
+    def run_command(self, cmd: str, path: str = "",
+                    threads: int | None = None) -> None:
+        thread_count = self.threadNumber if threads is None else threads
+        run_logged_command(
+            cmd,
+            self.logger,
+            cwd=path or None,
+            env_updates=thread_env_updates(thread_count),
+        )
+
+    def run_parallel_commands(self, commands: list[str], paths: list[str],
+                              phase: str) -> ThreadAllocation:
+        if len(commands) != len(paths):
+            raise ValueError('commands and paths must have the same length')
+        allocation = allocate_threads(self.threadNumber, len(commands))
+        if allocation.worker_count == 0:
+            self.logger.info(f'{phase}: no jobs')
+            return allocation
+        minimum = min(allocation.task_threads)
+        maximum = max(allocation.task_threads)
+        per_job = str(minimum) if minimum == maximum else f'{minimum}-{maximum}'
+        self.logger.info(
+            f'{phase}: up to {allocation.worker_count} concurrent jobs, '
+            f'{per_job} threads per job, {allocation.peak_threads}/{self.threadNumber} '
+            f'threads in the first wave'
+        )
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=allocation.worker_count) as executor:
+            list(executor.map(
+                self.run_command, commands, paths, allocation.task_threads
+            ))
+        return allocation
 
     def run(self) -> None:
-        
         self.combine_fasta_files(self.fastaPath, self.decoyPath)
-        
-        threadNumber = self.core_count
-        if self.threadNumber > 0:
-            threadNumber = self.threadNumber
-        raw_file_parallel = min(10, threadNumber)
-        
-        filteredPSMsDict = {}       
-        self.logger.info(f'convert PSM tsv to pepXML with {raw_file_parallel} processes')
-        with concurrent.futures.ProcessPoolExecutor(max_workers=raw_file_parallel) as executor:
+
+        conversion_allocation = allocate_threads(
+            self.threadNumber, len(self.baseNames)
+        )
+        filteredPSMsDict = {}
+        if conversion_allocation.worker_count == 0:
+            self.logger.warning('No samples available for protein assembly')
+            return
+        self.logger.info(
+            f'Convert PSM TSV to pepXML with up to '
+            f'{conversion_allocation.worker_count} single-threaded processes'
+        )
+        with concurrent.futures.ProcessPoolExecutor(
+                max_workers=conversion_allocation.worker_count,
+                initializer=configure_process_worker,
+                initargs=(1,)) as executor:
             future_to_baseName = {executor.submit(self.intergrate_and_convert, baseName): baseName for baseName in self.baseNames}
             for future in concurrent.futures.as_completed(future_to_baseName):
                 baseName, psm_df = future.result()
@@ -390,7 +437,7 @@ class assembly:
             f'{self.philosopherPath} filter --sequential --prot 0.01 --picked --tag {self.decoyPrefix} --pepxml pepxmls --protxml combined.prot.xml --razor && '
             f'{self.philosopherPath} report'
         )
-        self.run_command(cmd, self.outputPath)
+        self.run_command(cmd, self.outputPath, self.threadNumber)
         
         # match decoy filtered PSMs to proteins
         self.match_PSMs_to_proteins(filteredPSMsDict)
@@ -416,7 +463,8 @@ class assembly:
             commands.append(cmd)
             path=os.path.join(self.outputPath, baseName)
             paths.append(path)
-        with concurrent.futures.ProcessPoolExecutor(max_workers=raw_file_parallel) as executor:
-            list(executor.map(self.run_command, commands, paths))
+        self.run_parallel_commands(
+            commands, paths, 'Per-sample Philosopher report'
+        )
         # remove tmpdir
         shutil.rmtree(tmpdir, ignore_errors=True)
