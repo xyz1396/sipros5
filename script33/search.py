@@ -137,10 +137,19 @@ class search:
     def sip_isotope_number(self) -> str:
         if self.element == "R" or not self.element:
             return "13"
-        digits = "".join(ch for ch in self.element[1:] if ch.isdigit())
-        if digits:
-            return digits
-        return "18" if self.sip_element_symbol() == "O" else "34" if self.sip_element_symbol() == "S" else "13"
+        supported = {
+            "C13": "13",
+            "H2": "2",
+            "N15": "15",
+            "O18": "18",
+            "S34": "34",
+        }
+        try:
+            return supported[self.element]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unsupported SIP isotope {self.element}; "
+                "use C13, H2, N15, O18, or S34") from exc
 
     def update_config_line(self, line: str, replacements: dict[str, str]) -> str:
         stripped = line.lstrip()

@@ -284,6 +284,9 @@ public:
 										   vector<double> &vdAtomicMass, vector<double> &vdComposition);
 
 	static Isotopologue configIsotopologue;
+	static vector<vector<double>> naturalAtomIsotopeProbabilities;
+	static const vector<double> &getNaturalAtomIsotopeProbabilities(
+		size_t atomIndex);
 	static vector<string> vsSingleResidueNames;
 	static vector<double> vdSingleResidueMasses;
 
@@ -341,11 +344,15 @@ public:
 	// for MS2 file format
 	static string &getSetFileNameSuffix() { return fileNameSuffix; }
 	static string &getSetSIPelement() { return SIPelement; }
+	static int getSipIsotopeMassNumber()
+	{
+		return SIPisotopeMassNumber;
+	}
 	static double &getSetMinValue() { return minValue; }
 	static double &getSetFold() { return fold; }
 	// compute deduction coefficient in score function
 	// only suitbale for carbon and nitrogen SIP now
-	static void setDeductionCoefficient();
+	static void setDeductionCoefficient(bool readConfigElement = true);
 	static int atomIndex(char sipAtom);
 	static bool refreshResidueDistributions(Isotopologue &iso);
 	static int resolveSipIsotopeIndex(const Isotopologue &iso, char sipAtom, int isotopeMassNumber);
@@ -448,6 +455,7 @@ private:
 	static string sElementList;
 
 	static string SIPelement;
+	static int SIPisotopeMassNumber;
 	static string fileNameSuffix;
 	// for deductionCoefficient compute in SIP search
 	static double neutronMass, deductionCoefficient, minValue, fold;

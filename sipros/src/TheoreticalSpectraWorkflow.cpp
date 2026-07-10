@@ -104,7 +104,7 @@ bool parseArgs(int argc, char **argv, Args &args)
 			if (!sipros::TextUtils::parseSipAtomSpec(sipSpec, args.sipAtom, args.sipIsotopeMassNumber))
 			{
 				std::cerr << "Invalid SIP atom/isotope: " << sipSpec
-						  << ". Use C13,H2,O18,N15,S34 (or C/H/O/N/P/S).\n";
+						  << ". Use C13,H2,N15,O18,S34.\n";
 				return false;
 			}
 		}
@@ -611,15 +611,8 @@ int TheoreticalSpectraWorkflow::run(int argc, char **argv)
 			std::cerr << "Ignoring -a/--sip-atom because -b/--sip-abundance uses SIP_Element from config.cfg.\n";
 		}
 		sipAtom = static_cast<char>(std::toupper(static_cast<unsigned char>(cfgAtom[0])));
-		sipIsotopeMassNumber = -1;
-		if (sipAtom == 'O')
-		{
-			sipIsotopeMassNumber = 18;
-		}
-		else if (sipAtom == 'S')
-		{
-			sipIsotopeMassNumber = 34;
-		}
+		sipIsotopeMassNumber =
+			ProNovoConfig::getSipIsotopeMassNumber();
 	}
 	else if (sipAtom == '\0')
 	{
@@ -629,20 +622,13 @@ int TheoreticalSpectraWorkflow::run(int argc, char **argv)
 			return 1;
 		}
 		sipAtom = static_cast<char>(std::toupper(static_cast<unsigned char>(cfgAtom[0])));
-		sipIsotopeMassNumber = -1;
-		if (sipAtom == 'O')
-		{
-			sipIsotopeMassNumber = 18;
-		}
-		else if (sipAtom == 'S')
-		{
-			sipIsotopeMassNumber = 34;
-		}
+		sipIsotopeMassNumber =
+			ProNovoConfig::getSipIsotopeMassNumber();
 	}
 
 	if (ProNovoConfig::atomIndex(sipAtom) < 0)
 	{
-		std::cerr << "Invalid SIP atom '" << sipAtom << "'. Valid options: C,H,O,N,P,S\n";
+		std::cerr << "Invalid SIP atom '" << sipAtom << "'. Valid targets: C13,H2,N15,O18,S34\n";
 		return 1;
 	}
 
@@ -743,6 +729,8 @@ int TheoreticalSpectraWorkflow::run(int argc, char **argv)
 	std::vector<char> ok(rows.size(), 0);
 	size_t written = 0;
 
+	const size_t targetAtomIndex = static_cast<size_t>(
+		ProNovoConfig::atomIndex(sipAtom));
 #pragma omp parallel
 	{
 		Isotopologue localIso = baseIso;
@@ -754,6 +742,12 @@ int TheoreticalSpectraWorkflow::run(int argc, char **argv)
 			{
 				if (args.sipAbundanceMode == SipAbundanceMode::InputRow)
 				{
+					// Restore the pristine target categories before every row so
+					// endpoint O18/S34 rows cannot affect later enrichments.
+					localIso.vAtomIsotopicDistribution[
+						targetAtomIndex].vProb =
+						baseIso.vAtomIsotopicDistribution[
+							targetAtomIndex].vProb;
 					ProNovoConfig::setSipAbundance(localIso, sipAtom, sipIsotopeIndex, row.sipPct);
 				}
 				std::vector<std::vector<double>> yMass, yProb, bMass, bProb;

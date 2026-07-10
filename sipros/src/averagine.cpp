@@ -30,8 +30,8 @@ averagine::averagine(const int minPepLen, const int maxPepLen)
     S33Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vProb[1];
     S34Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vMass[2];
     S34Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vProb[2];
-    S36Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vMass[3];
-    S36Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vProb[3];
+    S36Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vMass[4];
+    S36Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vProb[4];
     adjustEstimatePrecursorMassbyNP();
 }
 
@@ -60,8 +60,8 @@ averagine::averagine()
     S33Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vProb[1];
     S34Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vMass[2];
     S34Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vProb[2];
-    S36Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vMass[3];
-    S36Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vProb[3];
+    S36Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vMass[4];
+    S36Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vProb[4];
     adjustEstimatePrecursorMassbyNP();
 }
 
@@ -130,38 +130,59 @@ void averagine::changeAtomSIPabundance(const char SIPatom, const double pct)
         averagineSIPdistribution);
 }
 
-bool averagine::changeAtomProbability(std::vector<double> &probs, char atom, const double pct)
+bool averagine::changeAtomProbability(
+    std::vector<double> &probabilities,
+    char atom,
+    const double fraction)
 {
-    const double boundedPct = std::max(0.0, std::min(1.0, pct));
-    if (boundedPct != pct)
+    const double targetFraction =
+        std::max(0.0, std::min(1.0, fraction));
+    if (targetFraction != fraction)
     {
-        cerr << "Warning: SIP abundance percentage " << pct << " is out of [0,1], clamped to "
-             << boundedPct << "." << endl;
+        cerr << "Warning: SIP abundance " << fraction
+             << " is outside [0,1], clamped to "
+             << targetFraction << "." << endl;
     }
-    const size_t isotopeIndex = (atom == 'O' || atom == 'S') ? 2u : 1u;
-    if (probs.empty() || isotopeIndex >= probs.size())
+
+    const size_t targetIsotopeIndex =
+        (atom == 'O' || atom == 'S') ? 2u : 1u;
+    if (probabilities.empty() ||
+        targetIsotopeIndex >= probabilities.size())
     {
-        cout << atom << " isotope index is not available in atom distribution!" << endl;
+        cout << atom
+             << " target isotope is unavailable in atom distribution!"
+             << endl;
         return false;
     }
-    probs[isotopeIndex] = boundedPct;
-    double sumOthers = 0.0;
-    for (size_t i = 1; i < probs.size(); ++i)
+
+    double nonTargetTotal = 0.0;
+    for (size_t isotope = 0;
+         isotope < probabilities.size();
+         ++isotope)
     {
-        sumOthers += probs[i];
+        if (isotope != targetIsotopeIndex)
+            nonTargetTotal += probabilities[isotope];
     }
-    if (sumOthers > 1.0)
+
+    if (!(nonTargetTotal > 0.0))
     {
-        cerr << "Warning: sum of non-mono isotopes exceeds 1 for atom " << atom
-             << " (sumOthers=" << sumOthers << "). Resetting to mono+target only." << endl;
-        std::fill(probs.begin(), probs.end(), 0.0);
-        probs[isotopeIndex] = boundedPct;
-        probs[0] = 1.0 - boundedPct;
+        std::fill(
+            probabilities.begin(), probabilities.end(), 0.0);
+        probabilities[0] = 1.0 - targetFraction;
     }
     else
     {
-        probs[0] = 1.0 - sumOthers;
+        const double scale =
+            (1.0 - targetFraction) / nonTargetTotal;
+        for (size_t isotope = 0;
+             isotope < probabilities.size();
+             ++isotope)
+        {
+            if (isotope != targetIsotopeIndex)
+                probabilities[isotope] *= scale;
+        }
     }
+    probabilities[targetIsotopeIndex] = targetFraction;
     return true;
 }
 

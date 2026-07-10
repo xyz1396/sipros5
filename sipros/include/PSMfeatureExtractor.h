@@ -20,8 +20,6 @@ public:
     std::vector<sipPSM> sipPSMs;
     sipPSM *mSipPSM;
     std::array<char, 2> cleavageSites = {'K', 'R'};
-    static constexpr int Ms1IsotopeWindow = 10;
-
     void loadHdf5Ms1(const std::string &hdf5BasePath);
     void initializeFeatureVectors(sipPSM &psm);
     void extractFeaturesForPsm(const std::string &hdf5Path, sipPSM &psm);
@@ -34,16 +32,21 @@ public:
     {
         double abundancePct = 0.0;
         int isotopicPeakCount = 0;
+        bool valid = false;
     };
 
     static std::string peptideBodyWithPtms(const std::string &decorated);
     static int countMissCleavage(const std::string &naked);
     static int countPTM(const std::string &decorated);
+    static std::string canonicalSipIsotope(const std::string &sipAtom,
+                                             int isotopeMassNumber = -1);
     static int sipAtomIndex(const std::string &sipAtom);
+    static int sipIsotopeIndex(const std::string &sipAtom);
     static int sipNominalShiftPerAtom(const std::string &sipAtom);
     static double expectedNaturalNominalShiftExceptTarget(const std::array<int, 6> &atomCounts,
                                                           int targetAtomIndex,
-                                                          int targetIsotopeIndex);
+                                                          int targetIsotopeIndex,
+                                                          double targetFraction);
     static int ms1PeakCharge(const sipros::RaxportMs1Scan &scan, size_t idx);
     static size_t findMs1Peak(const sipros::RaxportMs1Scan &scan,
                               double targetMz,
@@ -54,13 +57,16 @@ public:
                                                           int precursorCharge,
                                                           double monoPrecursorMz,
                                                           double matchedPrecursorMz,
-                                                          int targetNominalShift,
+                                                          const std::array<int, 6> &atomCounts,
+                                                          const std::string &sipAtom,
+                                                          double expectedEnrichmentPct,
                                                           const std::function<double(double)> &mzToleranceDaAt);
     static Ms1AbundanceResult getSIPelementAbundanceFromMS1Peaks(const std::vector<isotopicPeak> &peaks,
                                                                  double baseMass,
                                                                  const std::string &peptide,
                                                                  int precursorCharge,
-                                                                 const std::string &sipAtom);
+                                                                 const std::string &sipAtom,
+                                                                 double expectedEnrichmentPct);
 
     void extractFeaturesOfEachPSM();
 };

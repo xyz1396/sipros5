@@ -102,44 +102,45 @@ std::vector<std::string> SiprosSearchRunner::listFilesWithExtensions(const std::
 	return files;
 }
 
-bool TextUtils::parseSipAtomSpec(const std::string &spec, char &sipAtom, int &sipIsotopeMassNumber)
+bool TextUtils::parseSipAtomSpec(const std::string &spec,
+                                     char &sipAtom,
+                                     int &sipIsotopeMassNumber)
 {
-	const std::string value = TextUtils::trim(spec);
-	if (value.empty())
-	{
-		return false;
-	}
-	const char atom = static_cast<char>(std::toupper(static_cast<unsigned char>(value[0])));
-	if (ProNovoConfig::atomIndex(atom) < 0)
-	{
-		return false;
-	}
-	sipAtom = atom;
-	if (value.size() == 1)
-	{
-		sipIsotopeMassNumber = atom == 'O' ? 18 : atom == 'S' ? 34 : -1;
-		return true;
-	}
-	for (size_t i = 1; i < value.size(); ++i)
-	{
-		if (!std::isdigit(static_cast<unsigned char>(value[i])))
-		{
-			return false;
-		}
-	}
-	try
-	{
-		sipIsotopeMassNumber = std::stoi(value.substr(1));
-	}
-	catch (const std::exception &)
-	{
-		return false;
-	}
-	return (atom == 'C' && sipIsotopeMassNumber == 13) ||
-		   (atom == 'H' && sipIsotopeMassNumber == 2) ||
-		   (atom == 'N' && sipIsotopeMassNumber == 15) ||
-		   (atom == 'O' && sipIsotopeMassNumber == 18) ||
-		   (atom == 'S' && (sipIsotopeMassNumber == 33 || sipIsotopeMassNumber == 34));
+    std::string value = TextUtils::trim(spec);
+    for (char &c : value)
+        c = static_cast<char>(
+            std::toupper(static_cast<unsigned char>(c)));
+
+    if (value == "C13")
+    {
+        sipAtom = 'C';
+        sipIsotopeMassNumber = 13;
+    }
+    else if (value == "H2")
+    {
+        sipAtom = 'H';
+        sipIsotopeMassNumber = 2;
+    }
+    else if (value == "N15")
+    {
+        sipAtom = 'N';
+        sipIsotopeMassNumber = 15;
+    }
+    else if (value == "O18")
+    {
+        sipAtom = 'O';
+        sipIsotopeMassNumber = 18;
+    }
+    else if (value == "S34")
+    {
+        sipAtom = 'S';
+        sipIsotopeMassNumber = 34;
+    }
+    else
+    {
+        return false;
+    }
+    return true;
 }
 
 static bool parseDouble(const std::string &text, double &value)
@@ -201,10 +202,18 @@ static std::vector<double> parsePctRange(const std::string &rangeSpec, double st
 	{
 		throw std::runtime_error("SIP range is required; use -b <pct|lower-upper>");
 	}
-	if (stepPct <= 0.0)
+	if (!std::isfinite(stepPct) || stepPct <= 0.0)
 	{
-		throw std::runtime_error("SIP step must be positive");
+		throw std::runtime_error("SIP step must be a finite positive number");
 	}
+	const auto validatePct = [&](double value)
+	{
+		if (!std::isfinite(value) || value < 0.0 || value > 100.0)
+		{
+			throw std::runtime_error(
+				"SIP enrichment must be within [0,100]: " + rangeSpec);
+		}
+	};
 	const size_t dash = rangeSpec.find('-');
 	double lower = 0.0;
 	double upper = 0.0;
@@ -214,12 +223,15 @@ static std::vector<double> parsePctRange(const std::string &rangeSpec, double st
 		{
 			throw std::runtime_error("Invalid SIP pct value: " + rangeSpec);
 		}
+		validatePct(lower);
 		return {lower};
 	}
 	if (!parseDouble(rangeSpec.substr(0, dash), lower) || !parseDouble(rangeSpec.substr(dash + 1), upper))
 	{
 		throw std::runtime_error("Invalid SIP range: " + rangeSpec);
 	}
+	validatePct(lower);
+	validatePct(upper);
 	if (upper < lower)
 	{
 		throw std::runtime_error("SIP range upper bound is lower than the lower bound: " + rangeSpec);
@@ -367,7 +379,7 @@ void SiprosSearchRunner::printUsage(std::ostream &out, const std::string &prog)
 	out << "  -fasta <proteins.fasta>     one FASTA database; target/decoy orchestration is external\n";
 	out << "  -o <directory>              output directory, default: out\n";
 	out << "  --pin-output <name.pin>      PIN filename for a single -f input; default: <sample>.pin\n";
-	out << "  -a <SIP atom/isotope>       SIP element such as C13, H2, N15, O18, S33, S34\n";
+	out << "  -a <SIP atom/isotope>       SIP isotope: C13, H2, N15, O18, or S34\n";
 	out << "  -b <pct|lower-upper>        SIP percentage or inclusive range\n";
 	out << "  -s, --step <pct>            SIP percentage step\n";
 	out << "  --pin-label <1|-1>          label written to PIN rows; default: 1\n";

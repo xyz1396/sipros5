@@ -85,7 +85,7 @@ citation:
             help="MS2 mass tolerance in Da (default: 0.01). For ion trap MS2 data, 0.1 is recommended."
         )
         parser.add_argument('-e', '--element', required=False,
-                            help="SIP label element, e.g., C13, H2, N15, O18, S33, S34. Don't provide this flag for regular search")
+                            help="SIP isotope: C13, H2, N15, O18, or S34. Do not provide this flag for regular search")
         parser.add_argument('-r', '--range', required=False,
                             help="SIP label range, e.g., 0-100. Don't provide this flag for regular search")
         parser.add_argument('-p', '--precision', required=False,
@@ -131,6 +131,13 @@ citation:
         spectra_mode = bool(args.psm_tsv or args.unlabeled_input or args.spectra_dir)
         if not args.element:
             args.element = "C13" if spectra_mode else "R"
+        elif args.element != "R":
+            normalized_element = args.element[0].upper() + args.element[1:]
+            supported_isotopes = {"C13", "H2", "N15", "O18", "S34"}
+            if normalized_element not in supported_isotopes:
+                parser.error(
+                    "--element must be one of C13, H2, N15, O18, or S34")
+            args.element = normalized_element
         if spectra_mode and not args.spectra_dir and (not args.psm_tsv or not args.unlabeled_input):
             parser.error("search-spectra mode requires --psm-tsv and --unlabeled-input unless --spectra-dir is provided")
         return args

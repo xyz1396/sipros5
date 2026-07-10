@@ -57,6 +57,23 @@ string ProNovoConfig::sElementList = "";
 
 map<string, string> ProNovoConfig::mapConfigKeyValues;
 Isotopologue ProNovoConfig::configIsotopologue;
+vector<vector<double>>
+    ProNovoConfig::naturalAtomIsotopeProbabilities;
+
+const vector<double> &
+ProNovoConfig::getNaturalAtomIsotopeProbabilities(size_t atomIndex)
+{
+    static const vector<double> empty;
+    if (atomIndex < naturalAtomIsotopeProbabilities.size())
+        return naturalAtomIsotopeProbabilities[atomIndex];
+    if (atomIndex <
+        configIsotopologue.vAtomIsotopicDistribution.size())
+    {
+        return configIsotopologue
+            .vAtomIsotopicDistribution[atomIndex].vProb;
+    }
+    return empty;
+}
 
 vector<pair<double, double>> ProNovoConfig::vpPeptideMassWindowOffset;
 
@@ -110,6 +127,7 @@ double AminoAcidMasses::dNULL = -1;
 double AminoAcidMasses::dERROR = -2;
 
 string ProNovoConfig::SIPelement = "C";
+int ProNovoConfig::SIPisotopeMassNumber = 13;
 double ProNovoConfig::minValue = 0;
 double ProNovoConfig::fold = 0;
 double ProNovoConfig::deductionCoefficient = 0;
@@ -123,6 +141,45 @@ int ProNovoConfig::atomIndex(char sipAtom)
 	const char atom = static_cast<char>(std::toupper(static_cast<unsigned char>(sipAtom)));
 	const size_t pos = atoms.find(atom);
 	return pos == string::npos ? -1 : static_cast<int>(pos);
+}
+
+static bool supportedSipTarget(char sipAtom,
+                               int &massNumber,
+                               int &isotopeIndex,
+                               int &nominalShift)
+{
+    const char atom = static_cast<char>(
+        std::toupper(static_cast<unsigned char>(sipAtom)));
+    switch (atom)
+    {
+    case 'C':
+        massNumber = 13;
+        isotopeIndex = 1;
+        nominalShift = 1;
+        return true;
+    case 'H':
+        massNumber = 2;
+        isotopeIndex = 1;
+        nominalShift = 1;
+        return true;
+    case 'N':
+        massNumber = 15;
+        isotopeIndex = 1;
+        nominalShift = 1;
+        return true;
+    case 'O':
+        massNumber = 18;
+        isotopeIndex = 2;
+        nominalShift = 2;
+        return true;
+    case 'S':
+        massNumber = 34;
+        isotopeIndex = 2;
+        nominalShift = 2;
+        return true;
+    default:
+        return false;
+    }
 }
 
 bool ProNovoConfig::refreshResidueDistributions(Isotopologue &iso)
@@ -139,119 +196,171 @@ bool ProNovoConfig::refreshResidueDistributions(Isotopologue &iso)
 	return true;
 }
 
-int ProNovoConfig::resolveSipIsotopeIndex(const Isotopologue &iso, char sipAtom, int isotopeMassNumber)
+int ProNovoConfig::resolveSipIsotopeIndex(const Isotopologue &iso,
+                                              char sipAtom,
+                                              int isotopeMassNumber)
 {
-	const char atom = static_cast<char>(std::toupper(static_cast<unsigned char>(sipAtom)));
-	const int ix = atomIndex(atom);
-	if (ix < 0)
-	{
-		throw std::runtime_error("Unsupported SIP atom. Use one of C,H,O,N,P,S.");
-	}
-	if (ix >= static_cast<int>(iso.vAtomIsotopicDistribution.size()) ||
-		iso.vAtomIsotopicDistribution[ix].vProb.size() < 2 ||
-		iso.vAtomIsotopicDistribution[ix].vMass.size() < 2)
-	{
-		throw std::runtime_error("Configured isotopic distribution for SIP atom is not usable.");
-	}
+    const char atom = static_cast<char>(
+        std::toupper(static_cast<unsigned char>(sipAtom)));
+    int expectedMassNumber = 0;
+    int expectedIsotopeIndex = -1;
+    int nominalShift = 0;
+    if (!supportedSipTarget(
+            atom, expectedMassNumber, expectedIsotopeIndex, nominalShift) ||
+        (isotopeMassNumber > 0 &&
+         isotopeMassNumber != expectedMassNumber))
+    {
+        throw std::runtime_error(
+            "Unsupported SIP isotope. Use C13,H2,N15,O18,S34.");
+    }
 
-	const int requestedMass = isotopeMassNumber > 0 ? isotopeMassNumber : 0;
-	if (requestedMass <= 0)
-	{
-		return 1;
-	}
-
-	const auto &masses = iso.vAtomIsotopicDistribution[ix].vMass;
-	for (size_t i = 1; i < masses.size(); ++i)
-	{
-		const int massInt = static_cast<int>(std::lround(masses[i]));
-		if (massInt == requestedMass)
-		{
-			return static_cast<int>(i);
-		}
-	}
-
-	std::ostringstream supported;
-	bool first = true;
-	for (size_t i = 1; i < masses.size(); ++i)
-	{
-		if (!first)
-		{
-			supported << ",";
-		}
-		supported << static_cast<int>(std::lround(masses[i]));
-		first = false;
-	}
-	throw std::runtime_error("Requested SIP isotope mass " + std::to_string(requestedMass) +
-							 " is not available for atom " + std::string(1, atom) +
-							 ". Supported isotope masses: " + supported.str());
+    const int atomIx = atomIndex(atom);
+    if (atomIx < 0 ||
+        atomIx >= static_cast<int>(
+            iso.vAtomIsotopicDistribution.size()))
+    {
+        throw std::runtime_error(
+            "Configured SIP atom distribution is not available.");
+    }
+    const auto &distribution =
+        iso.vAtomIsotopicDistribution[static_cast<size_t>(atomIx)];
+    if (expectedIsotopeIndex >=
+            static_cast<int>(distribution.vProb.size()) ||
+        expectedIsotopeIndex >=
+            static_cast<int>(distribution.vMass.size()) ||
+        static_cast<int>(std::lround(
+            distribution.vMass[
+                static_cast<size_t>(expectedIsotopeIndex)])) !=
+            expectedMassNumber)
+    {
+        throw std::runtime_error(
+            "Configured distribution does not contain the requested "
+            "supported SIP isotope.");
+    }
+    return expectedIsotopeIndex;
 }
 
-void ProNovoConfig::setSipAbundance(Isotopologue &iso, char sipAtom, int isotopeIndex, double sipPct)
+void ProNovoConfig::setSipAbundance(Isotopologue &iso,
+                                      char sipAtom,
+                                      int isotopeIndex,
+                                      double sipPct)
 {
-	const char atom = static_cast<char>(std::toupper(static_cast<unsigned char>(sipAtom)));
-	const int ix = atomIndex(atom);
-	if (ix < 0)
-	{
-		throw std::runtime_error("Unsupported SIP atom. Use one of C,H,O,N,P,S.");
-	}
-	if (ix >= static_cast<int>(iso.vAtomIsotopicDistribution.size()) ||
-		isotopeIndex < 1 ||
-		isotopeIndex >= static_cast<int>(iso.vAtomIsotopicDistribution[ix].vProb.size()))
-	{
-		throw std::runtime_error("Configured isotopic distribution for SIP atom/isotope is not usable.");
-	}
+    const char atom = static_cast<char>(
+        std::toupper(static_cast<unsigned char>(sipAtom)));
+    int massNumber = 0;
+    int expectedIsotopeIndex = -1;
+    int nominalShift = 0;
+    if (!supportedSipTarget(
+            atom, massNumber, expectedIsotopeIndex, nominalShift) ||
+        isotopeIndex != expectedIsotopeIndex)
+    {
+        throw std::runtime_error(
+            "Unsupported SIP isotope. Use C13,H2,N15,O18,S34.");
+    }
 
-	const int expectedIsotopeIndex = (atom == "O"[0] || atom == "S"[0]) ? 2 : 1;
-	if (isotopeIndex != expectedIsotopeIndex)
-	{
-		throw std::runtime_error("Requested SIP isotope is inconsistent with atom-specific SIP rule.");
-	}
+    const int atomIx = atomIndex(atom);
+    if (atomIx < 0 ||
+        atomIx >= static_cast<int>(
+            iso.vAtomIsotopicDistribution.size()) ||
+        isotopeIndex >= static_cast<int>(
+            iso.vAtomIsotopicDistribution[
+                static_cast<size_t>(atomIx)].vProb.size()))
+    {
+        throw std::runtime_error(
+            "Configured isotopic distribution for SIP target is not usable.");
+    }
 
-	auto &probs = iso.vAtomIsotopicDistribution[ix].vProb;
-	if (!averagine::changeAtomProbability(probs, atom, sipPct / 100.0))
-	{
-		throw std::runtime_error("Configured isotopic distribution for SIP atom/isotope is not usable.");
-	}
-	if (!refreshResidueDistributions(iso))
-	{
-		throw std::runtime_error("Failed to refresh residue isotopic distributions.");
-	}
+    auto &probabilities =
+        iso.vAtomIsotopicDistribution[
+            static_cast<size_t>(atomIx)].vProb;
+    if (!averagine::changeAtomProbability(
+            probabilities, atom, sipPct / 100.0))
+    {
+        throw std::runtime_error(
+            "Configured isotopic distribution for SIP target is not usable.");
+    }
+    if (!refreshResidueDistributions(iso))
+        throw std::runtime_error(
+            "Failed to refresh residue isotopic distributions.");
 }
 
-double ProNovoConfig::getIsotopeAbundancePct(const Isotopologue &iso, char sipAtom, int isotopeIndex)
+double ProNovoConfig::getIsotopeAbundancePct(
+    const Isotopologue &iso,
+    char sipAtom,
+    int isotopeIndex)
 {
-	const int ix = atomIndex(sipAtom);
-	if (ix < 0 ||
-		ix >= static_cast<int>(iso.vAtomIsotopicDistribution.size()) ||
-		isotopeIndex < 0 ||
-		isotopeIndex >= static_cast<int>(iso.vAtomIsotopicDistribution[ix].vProb.size()))
-	{
-		throw std::runtime_error("Configured isotope abundance is not available.");
-	}
-	return iso.vAtomIsotopicDistribution[ix].vProb[isotopeIndex] * 100.0;
+    int massNumber = 0;
+    int expectedIsotopeIndex = -1;
+    int nominalShift = 0;
+    if (!supportedSipTarget(
+            sipAtom, massNumber, expectedIsotopeIndex, nominalShift) ||
+        isotopeIndex != expectedIsotopeIndex)
+    {
+        throw std::runtime_error(
+            "Unsupported SIP isotope. Use C13,H2,N15,O18,S34.");
+    }
+    const int atomIx = atomIndex(sipAtom);
+    if (atomIx < 0 ||
+        atomIx >= static_cast<int>(
+            iso.vAtomIsotopicDistribution.size()) ||
+        isotopeIndex >= static_cast<int>(
+            iso.vAtomIsotopicDistribution[
+                static_cast<size_t>(atomIx)].vProb.size()))
+    {
+        throw std::runtime_error(
+            "Configured isotope abundance is not available.");
+    }
+    return iso.vAtomIsotopicDistribution[
+               static_cast<size_t>(atomIx)]
+               .vProb[static_cast<size_t>(isotopeIndex)] *
+           100.0;
 }
 
-bool ProNovoConfig::applySipAbundance(char sipAtom, double fraction)
+bool ProNovoConfig::applySipAbundance(char sipAtom,
+                                        double fraction)
 {
-	const char atom = static_cast<char>(std::toupper(static_cast<unsigned char>(sipAtom)));
-	const int index = atomIndex(atom);
-	if (index < 0 || index >= static_cast<int>(configIsotopologue.vAtomIsotopicDistribution.size()))
-	{
-		return false;
-	}
-	getSetSIPelement() = std::string(1, atom);
-	const bool updated = averagine::changeAtomProbability(
-		configIsotopologue.vAtomIsotopicDistribution[index].vProb, atom, fraction);
-	if (updated)
-	{
-		if (!refreshResidueDistributions(configIsotopologue))
-		{
-			return false;
-		}
-		setDeductionCoefficient();
-		getSetSIPelement() = std::string(1, atom);
-	}
-	return updated;
+    const char atom = static_cast<char>(
+        std::toupper(static_cast<unsigned char>(sipAtom)));
+    int massNumber = 0;
+    int isotopeIndex = -1;
+    int nominalShift = 0;
+    if (!supportedSipTarget(
+            atom, massNumber, isotopeIndex, nominalShift))
+        return false;
+
+    const int atomIx = atomIndex(atom);
+    if (atomIx < 0 ||
+        atomIx >= static_cast<int>(
+            configIsotopologue.vAtomIsotopicDistribution.size()))
+        return false;
+
+    if (naturalAtomIsotopeProbabilities.size() ==
+        configIsotopologue.vAtomIsotopicDistribution.size())
+    {
+        for (size_t index = 0;
+             index < naturalAtomIsotopeProbabilities.size();
+             ++index)
+        {
+            configIsotopologue.vAtomIsotopicDistribution[index].vProb =
+                naturalAtomIsotopeProbabilities[index];
+        }
+    }
+
+    getSetSIPelement() = std::string(1, atom);
+    const bool updated = averagine::changeAtomProbability(
+        configIsotopologue.vAtomIsotopicDistribution[
+            static_cast<size_t>(atomIx)].vProb,
+        atom,
+        fraction);
+    if (!updated ||
+        !refreshResidueDistributions(configIsotopologue))
+        return false;
+
+    setDeductionCoefficient(false);
+    if (!calculatePeptideMassWindowOffset())
+        return false;
+    getSetSIPelement() = std::string(1, atom);
+    return true;
 }
 
 AminoAcidMasses::AminoAcidMasses()
@@ -335,12 +444,32 @@ bool ProNovoConfig::setFilename(const string &sConfigFileName)
 		return false;
 	}
 
+	naturalAtomIsotopeProbabilities.clear();
+	for (const IsotopeDistribution &distribution :
+		 configIsotopologue.vAtomIsotopicDistribution)
+	{
+		naturalAtomIsotopeProbabilities.push_back(
+			distribution.vProb);
+	}
+
 	// parse neutral loss
 	ProNovoConfigSingleton->NeutralLoss();
 
-	// compute deduction coefficient in score function
-	// only suitbale for carbon SIP now
-	ProNovoConfigSingleton->setDeductionCoefficient();
+	// Compute the target-specific score coefficient and validate the
+	// configured element/isotope pair before any workflow starts.
+	try
+	{
+		ProNovoConfigSingleton->setDeductionCoefficient();
+	}
+	catch (const std::exception &error)
+	{
+		cerr << "ERROR: " << error.what() << endl;
+		return false;
+	}
+	if (!ProNovoConfigSingleton->calculatePeptideMassWindowOffset())
+	{
+		return false;
+	}
 
 	// If everything goes fine return 0.
 	return true;
@@ -825,22 +954,103 @@ bool ProNovoConfig::getPeptideMassWindows(double dPeptideMass, vector<pair<doubl
 
 // compute deduction coefficient in score function
 // only suitbale for carbon and nitrogen SIP now
-void ProNovoConfig::setDeductionCoefficient()
+void ProNovoConfig::setDeductionCoefficient(bool readConfigElement)
 {
-	getConfigValue("[Stable_Isotope_Probing]SIP_Element", getSetSIPelement());
-	string minValueStr, foldStr;
-	getConfigValue("[Stable_Isotope_Probing]minValue", minValueStr);
-	getSetMinValue() = stod(minValueStr);
-	getConfigValue("[Stable_Isotope_Probing]fold", foldStr);
-	getSetFold() = stod(foldStr);
-	if (getSetSIPelement() == "N")
-	{
-		// average averagin delta mass in N15 labeling
-		neutronMass = 0.9991403;
-		deductionCoefficient =
-			-(getSetMinValue() + getSetFold() * std::pow((configIsotopologue.get_vAtomIsotopicDistribution()[3].vProb[1] - 0.5), 8));
-	}
-	else
-		deductionCoefficient =
-			-(getSetMinValue() + getSetFold() * std::pow((configIsotopologue.get_vAtomIsotopicDistribution()[0].vProb[1] - 0.5), 8));
+    if (readConfigElement)
+    {
+        std::string configuredAtom;
+        if (!getConfigValue(
+                "[Stable_Isotope_Probing]SIP_Element",
+                configuredAtom))
+        {
+            throw std::runtime_error(
+                "Missing SIP_Element in configuration.");
+        }
+        getSetSIPelement() = configuredAtom;
+    }
+
+    const std::string selected = getSetSIPelement();
+    if (selected.size() != 1)
+    {
+        throw std::runtime_error(
+            "Unsupported SIP isotope in configuration. "
+            "Use C13,H2,N15,O18,S34.");
+    }
+    const char atom = static_cast<char>(std::toupper(
+        static_cast<unsigned char>(selected[0])));
+    int massNumber = 0;
+    int isotopeIndex = -1;
+    int nominalShift = 0;
+    if (!supportedSipTarget(
+            atom, massNumber, isotopeIndex, nominalShift))
+    {
+        throw std::runtime_error(
+            "Unsupported SIP isotope in configuration. "
+            "Use C13,H2,N15,O18,S34.");
+    }
+
+    if (readConfigElement)
+    {
+        std::string configuredMassText;
+        if (!getConfigValue(
+                "[Stable_Isotope_Probing]SIP_Element_Isotope",
+                configuredMassText))
+        {
+            throw std::runtime_error(
+                "Missing SIP_Element_Isotope in configuration.");
+        }
+        size_t consumed = 0;
+        int configuredMassNumber = 0;
+        try
+        {
+            configuredMassNumber =
+                std::stoi(configuredMassText, &consumed);
+        }
+        catch (const std::exception &)
+        {
+            throw std::runtime_error(
+                "Invalid SIP_Element_Isotope in configuration: " +
+                configuredMassText);
+        }
+        if (consumed != configuredMassText.size() ||
+            configuredMassNumber != massNumber)
+        {
+            throw std::runtime_error(
+                "Unsupported SIP isotope in configuration: " +
+                std::string(1, atom) + configuredMassText +
+                ". Use C13,H2,N15,O18,S34.");
+        }
+        SIPisotopeMassNumber = configuredMassNumber;
+    }
+    else
+    {
+        SIPisotopeMassNumber = massNumber;
+    }
+    getSetSIPelement() = std::string(1, atom);
+
+    const int atomIx = atomIndex(atom);
+    const auto &distribution =
+        configIsotopologue.vAtomIsotopicDistribution[
+            static_cast<size_t>(atomIx)];
+    neutronMass =
+        (distribution.vMass[static_cast<size_t>(isotopeIndex)] -
+         distribution.vMass[0]) /
+        nominalShift;
+
+    string minValueStr;
+    string foldStr;
+    getConfigValue(
+        "[Stable_Isotope_Probing]minValue", minValueStr);
+    getSetMinValue() = stod(minValueStr);
+    getConfigValue(
+        "[Stable_Isotope_Probing]fold", foldStr);
+    getSetFold() = stod(foldStr);
+    deductionCoefficient =
+        -(getSetMinValue() +
+          getSetFold() *
+              std::pow(
+                  distribution.vProb[
+                      static_cast<size_t>(isotopeIndex)] -
+                      0.5,
+                  8));
 }

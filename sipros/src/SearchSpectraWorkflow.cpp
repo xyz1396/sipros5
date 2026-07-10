@@ -710,7 +710,21 @@ bool loadHdf5File(const std::string &path,
 		meta.sipAtom = readStringAttribute(f, "sip_atom");
 		if (meta.sipAtom.empty())
 			meta.sipAtom = "C";
-		meta.sipIsotopeMassNumber = readIntAttribute(f, "sip_isotope_mass_number", 13);
+		meta.sipIsotopeMassNumber =
+			readIntAttribute(f, "sip_isotope_mass_number", 13);
+		const std::string canonicalSipIsotope =
+			PSMfeatureExtractor::canonicalSipIsotope(
+				meta.sipAtom, meta.sipIsotopeMassNumber);
+		if (canonicalSipIsotope.empty())
+		{
+			throw std::runtime_error(
+				"Unsupported SIP isotope metadata in " + path +
+				": atom=" + meta.sipAtom +
+				", mass_number=" +
+				std::to_string(meta.sipIsotopeMassNumber) +
+				". Supported labels: C13,H2,N15,O18,S34.");
+		}
+		meta.sipAtom = canonicalSipIsotope;
 
 		H5::Group records = f.openGroup("records");
 		H5::Group precursor = f.openGroup("precursor");
@@ -1738,7 +1752,8 @@ void appendLabeledRecords(const std::string &path,
 {
 	out.reserve(out.size() + records.size());
 	const int label = isDecoyHdf5(path) ? -1 : +1;
-	const std::string sipAtom = meta.sipAtom.empty() ? "C" : std::string(1, meta.sipAtom[0]);
+	const std::string sipAtom =
+		meta.sipAtom.empty() ? "C13" : meta.sipAtom;
 	for (auto &record : records)
 	{
 		LabeledRecord lr;
@@ -2218,18 +2233,26 @@ ShardPsmRow makeScoringRow(size_t scanIdx,
         averagine avg;
         const std::string peptideForComposition = PSMfeatureExtractor::peptideBodyWithPtms(rec.peptide);
         baseMass = avg.calPrecursorBaseMass(peptideForComposition);
-        const int targetNominalShift = PSMfeatureExtractor::sipNominalShiftPerAtom(labeledRecord.sipAtom);
-        const double monoPrecursorMz = baseMass / precursorCharge + ProNovoConfig::getProtonMass();
+        const double monoPrecursorMz =
+            baseMass / precursorCharge + ProNovoConfig::getProtonMass();
         int ms1ScanNumber = scan->iParentScanID;
         const auto mzToleranceDaAt = [&](double mz)
         { return mzTol.daAt(mz); };
         ms1Peaks = PSMfeatureExtractor::findMs1IsotopicPeaks(
-            ms1Data, ms1ScanNumber, precursorCharge, monoPrecursorMz,
-            match.matchedMz, targetNominalShift, mzToleranceDaAt);
+            ms1Data,
+            ms1ScanNumber,
+            precursorCharge,
+            monoPrecursorMz,
+            match.matchedMz,
+            avg.pepAtomCounts,
+            labeledRecord.sipAtom,
+            labeledRecord.ms2Pct,
+            mzToleranceDaAt);
     }
     const PSMfeatureExtractor::Ms1AbundanceResult ms1Abundance =
         PSMfeatureExtractor::getSIPelementAbundanceFromMS1Peaks(
-            ms1Peaks, baseMass, rec.peptide, precursorCharge, labeledRecord.sipAtom);
+            ms1Peaks, baseMass, rec.peptide, precursorCharge, labeledRecord.sipAtom,
+            labeledRecord.ms2Pct);
 
     ShardPsmRow row;
     row.scanIdx = static_cast<int32_t>(scanIdx);
@@ -2240,7 +2263,8 @@ ShardPsmRow makeScoringRow(size_t scanIdx,
     row.peptideLength = static_cast<int>(rec.nakedPeptide.size());
     row.missCleavage = PSMfeatureExtractor::countMissCleavage(rec.nakedPeptide);
     row.ptmCount = PSMfeatureExtractor::countPTM(rec.peptide);
-    row.isotopicPeakNumbers = ms1Abundance.isotopicPeakCount;
+    row.isotopicPeakNumbers =
+        ms1Abundance.valid ? ms1Abundance.isotopicPeakCount : 0;
     row.wdp = wdp;
     row.xcorr = xcorr;
     row.mvh = mvh;

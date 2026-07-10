@@ -3004,14 +3004,8 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 			return 1;
 		}
 		sipAtom = static_cast<char>(std::toupper(static_cast<unsigned char>(cfgAtom[0])));
-		if (sipAtom == 'O')
-		{
-			sipIsotopeMassNumber = 18;
-		}
-		else if (sipAtom == 'S')
-		{
-			sipIsotopeMassNumber = 34;
-		}
+		sipIsotopeMassNumber =
+			ProNovoConfig::getSipIsotopeMassNumber();
 	}
 
 	int targetSipIsotopeIndex = 1;

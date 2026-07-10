@@ -59,3 +59,17 @@ target_include_directories(siprosMPI PUBLIC ${PROJECT_SOURCE_DIR}/sipros/include
 target_link_libraries(siprosMPI PUBLIC sipros_common sipros_core MPI::MPI_CXX OpenMP::OpenMP_CXX)
 target_compile_options(siprosMPI PUBLIC -ffast-math -march=native -fPIC)
 sipros_compile_definitions(siprosMPI)
+
+if(BUILD_TESTING)
+  add_executable(ms1_isotope_envelope_test
+    ${PROJECT_SOURCE_DIR}/sipros/tests/test_ms1_isotope_envelope.cpp
+  )
+  target_include_directories(ms1_isotope_envelope_test PUBLIC ${SIPROS_INCLUDE_DIRS})
+  target_link_libraries(ms1_isotope_envelope_test PUBLIC sipros_common sipros_core)
+  sipros_compile_definitions(ms1_isotope_envelope_test)
+  sipros_optimization_options(ms1_isotope_envelope_test)
+  add_test(
+    NAME ms1_isotope_envelope
+    COMMAND ms1_isotope_envelope_test ${PROJECT_SOURCE_DIR}/configTemplates/SIP.cfg
+  )
+endif()
