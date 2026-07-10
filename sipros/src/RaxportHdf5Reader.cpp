@@ -141,38 +141,29 @@ void finalizeMs2Scan(MS2Scan *scan)
 {
     scan->isMS2HighRes = (ProNovoConfig::getMassAccuracyFragmentIon() < 0.1);
     scan->isMS1HighRes = true;
-    if (scan->iParentChargeState > 0)
-    {
-        const double charged = scan->dParentMZ * scan->iParentChargeState;
-        scan->dParentMass = charged;
-        scan->dParentNeutralMass = charged - scan->iParentChargeState * ProNovoConfig::getProtonMass();
-    }
-    else if (!scan->iParentChargeStates.empty())
-    {
-        double maxChargedMass = 0.0;
-        int maxCharge = 0;
-        const size_t n = std::min(scan->iParentChargeStates.size(), scan->dParentMZs.size());
-        for (size_t i = 0; i < n; ++i)
+
+    double maxChargedMass = 0.0;
+    double maxNeutralMass = 0.0;
+    auto considerPrecursor = [&](double mz, int charge) {
+        if (mz <= 0.0 || charge <= 0)
         {
-            const int charge = scan->iParentChargeStates[i];
-            const double mz = scan->dParentMZs[i];
-            if (charge <= 0 || mz <= 0.0)
-            {
-                continue;
-            }
-            const double chargedMass = mz * charge;
-            if (chargedMass > maxChargedMass)
-            {
-                maxChargedMass = chargedMass;
-                maxCharge = charge;
-            }
+            return;
         }
-        if (maxCharge > 0)
-        {
-            scan->dParentMass = maxChargedMass;
-            scan->dParentNeutralMass = maxChargedMass - maxCharge * ProNovoConfig::getProtonMass();
-        }
+        const double chargedMass = mz * charge;
+        const double neutralMass = chargedMass -
+                                   static_cast<double>(charge) * ProNovoConfig::getProtonMass();
+        maxChargedMass = std::max(maxChargedMass, chargedMass);
+        maxNeutralMass = std::max(maxNeutralMass, neutralMass);
+    };
+
+    considerPrecursor(scan->dParentMZ, scan->iParentChargeState);
+    const size_t n = std::min(scan->iParentChargeStates.size(), scan->dParentMZs.size());
+    for (size_t i = 0; i < n; ++i)
+    {
+        considerPrecursor(scan->dParentMZs[i], scan->iParentChargeStates[i]);
     }
+    scan->dParentMass = maxChargedMass;
+    scan->dParentNeutralMass = maxNeutralMass;
 }
 
 void appendCandidatePrecursors(MS2Scan *scan,
@@ -285,9 +276,12 @@ bool readRaxportHdf5Scans(const std::string &path,
         {
             throw std::runtime_error("missing root attribute schema_version");
         }
-        if (schemaVersion != 5)
+        constexpr int kSupportedSchemaVersion = 6;
+        if (schemaVersion != kSupportedSchemaVersion)
         {
-            throw std::runtime_error("unsupported Raxport HDF5 schema_version " + std::to_string(schemaVersion) + "; expected 5");
+            throw std::runtime_error("unsupported Raxport HDF5 schema_version " +
+                                     std::to_string(schemaVersion) +
+                                     "; expected 6");
         }
 
         const std::vector<int> scanNumber = read1D<int>(file, "/scans/scan_number", H5::PredType::NATIVE_INT);
@@ -319,15 +313,21 @@ bool readRaxportHdf5Scans(const std::string &path,
             throw std::runtime_error("/reactions datasets have inconsistent lengths");
         }
 
-        std::vector<int> candidateCharge;
-        std::vector<double> candidateMz;
-        if (hasObject(file.getId(), "precursor_candidates/charge"))
+        const std::vector<int> candidateCharge =
+            read1D<int>(file, "/precursor_candidates/charge", H5::PredType::NATIVE_INT);
+        const std::vector<double> candidateMz =
+            read1D<double>(file, "/precursor_candidates/mz", H5::PredType::NATIVE_DOUBLE);
+        // These v6 fields describe candidate provenance and confidence.
+        // Validate their alignment, but search every candidate Raxport selected.
+        const std::vector<int> candidateChargeSource =
+            read1D<int>(file, "/precursor_candidates/charge_source", H5::PredType::NATIVE_INT);
+        const std::vector<int> candidateIsotopeMatchCount =
+            read1D<int>(file, "/precursor_candidates/isotope_match_count", H5::PredType::NATIVE_INT);
+        if (candidateCharge.size() != candidateMz.size() ||
+            candidateChargeSource.size() != candidateMz.size() ||
+            candidateIsotopeMatchCount.size() != candidateMz.size())
         {
-            candidateCharge = read1D<int>(file, "/precursor_candidates/charge", H5::PredType::NATIVE_INT);
-        }
-        if (hasObject(file.getId(), "precursor_candidates/mz"))
-        {
-            candidateMz = read1D<double>(file, "/precursor_candidates/mz", H5::PredType::NATIVE_DOUBLE);
+            throw std::runtime_error("Raxport schema 6 precursor-candidate datasets have inconsistent lengths");
         }
 
         H5::DataSet peakMzDataset = file.openDataSet("/peaks/mz");

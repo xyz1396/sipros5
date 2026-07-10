@@ -991,7 +991,8 @@ void MS2Scan::initialPreprocess()
 	{
 		bSetMS2Flag = true;
 		sortPeakList();
-		iMaxMZ = (int)min(vdMZ[vdMZ.size() - 1], dParentMZ * iParentChargeState);
+		const double parentUpperMass = dParentMass > 0 ? dParentMass : dParentMZ * iParentChargeState;
+		iMaxMZ = (int)min(vdMZ[vdMZ.size() - 1], parentUpperMass);
 		iMinMZ = (int)vdMZ[0];
 	}
 }

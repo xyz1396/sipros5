@@ -357,7 +357,7 @@ void SiprosSearchRunner::printUsage(std::ostream &out, const std::string &prog)
 {
 	out << "Usage:\n";
 	out << "  " << prog << " -f sample.h5 -c config.cfg -fasta proteins.fasta -o out "
-		<< "[-a C13 -b 1-5 -s 1] [--pin-label 1|-1]\n";
+		<< "[-a C13 -b 1-5 -s 1] [--pin-label 1|-1] [--pin-output name.pin]\n";
 	out << "  " << prog << " -w hdf5_directory -c config.cfg -fasta proteins.fasta -o out "
 		<< "[-a C13 -b 1-5 -s 1] [--pin-label 1|-1]\n\n";
 	out << "Parameters:\n";
@@ -366,6 +366,7 @@ void SiprosSearchRunner::printUsage(std::ostream &out, const std::string &prog)
 	out << "  -w <directory>              directory of Raxport HDF5 scan files\n";
 	out << "  -fasta <proteins.fasta>     one FASTA database; target/decoy orchestration is external\n";
 	out << "  -o <directory>              output directory, default: out\n";
+	out << "  --pin-output <name.pin>      PIN filename for a single -f input; default: <sample>.pin\n";
 	out << "  -a <SIP atom/isotope>       SIP element such as C13, H2, N15, O18, S33, S34\n";
 	out << "  -b <pct|lower-upper>        SIP percentage or inclusive range\n";
 	out << "  -s, --step <pct>            SIP percentage step\n";
@@ -417,6 +418,10 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 		else if (option == "-o")
 		{
 			args.outputDirectory = requireValue(i, option);
+		}
+		else if (option == "--pin-output")
+		{
+			args.pinOutputFile = requireValue(i, option);
 		}
 		else if (option == "-a")
 		{
@@ -519,6 +524,22 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 	if (args.outputDirectory.empty())
 	{
 		args.outputDirectory = "out";
+	}
+	if (!args.pinOutputFile.empty())
+	{
+		const fs::path pinOutput(args.pinOutputFile);
+		if (pinOutput.has_parent_path() ||
+			pinOutput.filename().string() != args.pinOutputFile ||
+			pinOutput.extension() != ".pin")
+		{
+			err << "--pin-output must be a .pin filename within the output directory\n";
+			return false;
+		}
+		if (args.singleWorkingFile.empty() || args.scanFiles.size() != 1)
+		{
+			err << "--pin-output requires exactly one -f input file\n";
+			return false;
+		}
 	}
 	return true;
 }
@@ -638,7 +659,12 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 	{
 		extractor.extractFeaturesForPsm(scanFile, extractor.sipPSMs.front());
 	}
-	const fs::path pinPath = fs::path(args.outputDirectory) / (sampleName + ".pin");
+	std::string pinFileName = args.pinOutputFile;
+	if (pinFileName.empty())
+	{
+		pinFileName = sampleName + ".pin";
+	}
+	const fs::path pinPath = fs::path(args.outputDirectory) / pinFileName;
 	PinWriter::writePecorlatorPin(pinPath.string(), extractor.sipPSMs, false);
 	std::cout << "Wrote PIN: " << pinPath.string() << " (" << scoredRows.size() << " scored rows retained after top-N pruning)\n";
 	return 0;

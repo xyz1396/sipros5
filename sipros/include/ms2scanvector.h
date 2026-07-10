@@ -100,7 +100,7 @@ public:
 	MS2ScanVector(const string & sScanFilenameInput, const string & sOutputDirectory, const string & sConfigFilename);
 	~MS2ScanVector();
 
-	// Populate vpAllMS2Scans from a Raxport schema v5 HDF5 file.
+	// Populate vpAllMS2Scans from a Raxport schema v6 HDF5 file.
 	// Return false if there is a problem with the file.
 	bool loadMassData();
 

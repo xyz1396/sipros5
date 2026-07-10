@@ -78,7 +78,7 @@ class search:
         return lower.endswith('.h5') or lower.endswith('.hdf5')
 
     def expected_hdf5_path(self, base_name: str) -> str:
-        return f'{self.outPutPath}/{base_name}/hdf5/{base_name}.h5'
+        return f'{self.outPutPath}/{base_name}/{base_name}.h5'
 
     def run_command_raxport(self, raw_file: str, hdf5_dir: str, expected_hdf5: str):
         min_complete_hdf5_size = 1024 * 1024
@@ -94,7 +94,7 @@ class search:
         raxport_heap_limit = (
             os.environ.get("SIPROS_RAXPORT_GC_HEAP_LIMIT")
             or os.environ.get("DOTNET_GCHeapHardLimit")
-            or str(8 * 1024 * 1024 * 1024)
+            or str(128 * 1024 * 1024)
         )
         env["DOTNET_GCHeapHardLimit"] = raxport_heap_limit
         self.logger.info(f"Set DOTNET_GCHeapHardLimit to {raxport_heap_limit} bytes")
@@ -102,10 +102,6 @@ class search:
                f'--format hdf5 -j {min(10, self.threadNumber, self.core_count)} -n {self.nPrecursor}')
         self.run_command(cmd, env)
         if not os.path.exists(expected_hdf5):
-            candidates = sorted(Path(hdf5_dir).glob('*.h5')) + sorted(Path(hdf5_dir).glob('*.hdf5'))
-            if len(candidates) == 1:
-                self.hdf5_paths[self.sample_base_name(raw_file)] = str(candidates[0])
-                return
             raise FileNotFoundError(f'Raxport did not create expected HDF5 file: {expected_hdf5}')
 
     def run_command_sipros(self, cmd: str, output_file: str | None = None):
@@ -256,9 +252,6 @@ class search:
     def create_sample_directories(self):
         for base_name in self.base_names:
             os.makedirs(f'{self.outPutPath}/{base_name}', exist_ok=True)
-            os.makedirs(f'{self.outPutPath}/{base_name}/hdf5', exist_ok=True)
-            os.makedirs(f'{self.outPutPath}/{base_name}/target', exist_ok=True)
-            os.makedirs(f'{self.outPutPath}/{base_name}/decoy', exist_ok=True)
 
     def prepare_hdf5_inputs(self):
         self.logger.info('Preparing Raxport HDF5 scan inputs')
@@ -391,20 +384,21 @@ class search:
         merge_jobs: list[tuple[str, str, str]] = []
         for base_name in self.base_names:
             hdf5_path = self.hdf5_paths[base_name]
-            target_dir = f'{self.outPutPath}/{base_name}/target'
-            decoy_dir = f'{self.outPutPath}/{base_name}/decoy'
-            target_pin = f'{target_dir}/{Path(hdf5_path).stem}.pin'
-            decoy_pin = f'{decoy_dir}/{Path(hdf5_path).stem}.pin'
-            final_pin = f'{self.outPutPath}/{base_name}/{base_name}.pin'
+            sample_dir = f'{self.outPutPath}/{base_name}'
+            target_pin_name = f'{base_name}_target.pin'
+            decoy_pin_name = f'{base_name}_decoy.pin'
+            target_pin = f'{sample_dir}/{target_pin_name}'
+            decoy_pin = f'{sample_dir}/{decoy_pin_name}'
+            final_pin = f'{sample_dir}/{base_name}.pin'
             commands.append((
                 f'{self.q(self.siprosPath)} search-fasta -c {self.q(config)} -fasta {self.q(self.fastaPath)} '
-                f'-f {self.q(hdf5_path)} -o {self.q(target_dir)}{sip_args} '
+                f'-f {self.q(hdf5_path)} -o {self.q(sample_dir)} --pin-output {self.q(target_pin_name)}{sip_args} '
                 f'--pin-label 1 --top-psms-per-scan {direct_top_psms_per_scan}',
                 target_pin,
             ))
             commands.append((
                 f'{self.q(self.siprosPath)} search-fasta -c {self.q(config)} -fasta {self.q(self.decoyPath)} '
-                f'-f {self.q(hdf5_path)} -o {self.q(decoy_dir)}{sip_args} '
+                f'-f {self.q(hdf5_path)} -o {self.q(sample_dir)} --pin-output {self.q(decoy_pin_name)}{sip_args} '
                 f'--pin-label -1 --top-psms-per-scan {direct_top_psms_per_scan}',
                 decoy_pin,
             ))

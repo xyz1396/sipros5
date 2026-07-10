@@ -68,16 +68,21 @@ std::pair<int, int> PSMfeatureExtractor::getSeqLengthAndMissCleavageSiteNumber(c
     {
         seq = peptideSeq.substr(start + 1, end - start - 1);
     }
-    int count = 0;
-    for (char &A : cleavageSites)
+    std::string aminoAcids;
+    aminoAcids.reserve(seq.size());
+    for (char c : seq)
     {
-        for (char &S : seq)
-        {
-            if (S == A)
-                count++;
-        }
+        if (std::isalpha(static_cast<unsigned char>(c)))
+            aminoAcids.push_back(c);
     }
-    return {static_cast<int>(seq.size()), count};
+
+    int count = 0;
+    for (size_t i = 1; i + 1 < aminoAcids.size(); ++i)
+    {
+        if (std::find(cleavageSites.begin(), cleavageSites.end(), aminoAcids[i]) != cleavageSites.end())
+            ++count;
+    }
+    return {static_cast<int>(aminoAcids.size()), count};
 }
 
 int PSMfeatureExtractor::getPTMnumber(const std::string &peptideSeq)
@@ -128,7 +133,7 @@ int PSMfeatureExtractor::countMissCleavage(const std::string &naked)
     if (naked.size() <= 1)
         return 0;
     int n = 0;
-    for (size_t i = 0; i + 1 < naked.size(); ++i)
+    for (size_t i = 1; i + 1 < naked.size(); ++i)
     {
         if (naked[i] == 'K' || naked[i] == 'R')
             ++n;
@@ -244,63 +249,128 @@ std::vector<isotopicPeak> PSMfeatureExtractor::findMs1IsotopicPeaks(
         return peaks;
 
     const double neutronMz = ProNovoConfig::getNeutronMass() / precursorCharge;
-    const int isotopeWindow = Ms1IsotopeWindow * std::max(1, targetNominalShift);
-    constexpr int kMs1AssignmentIndexTolerance = 1;
-    const int assignedIndex = static_cast<int>(std::round((matchedPrecursorMz - monoPrecursorMz) / neutronMz));
-    if (assignedIndex < 0)
-        return peaks;
-    const int firstIsotopeIndex = std::max(0, assignedIndex - isotopeWindow);
-    const int lastIsotopeIndex = assignedIndex + isotopeWindow;
+    const int assignedIndex = std::max(0, static_cast<int>(std::round((matchedPrecursorMz - monoPrecursorMz) / neutronMz)));
 
     size_t scanIdx = scanIt->second;
+    size_t anchorIdx = std::numeric_limits<size_t>::max();
+    const sipros::RaxportMs1Scan *anchorScan = nullptr;
     for (int attempt = 0; attempt < 3; ++attempt)
     {
         const sipros::RaxportMs1Scan &scan = ms1Data->scans[scanIdx];
-        peaks.clear();
-        for (int isotopeIndex = firstIsotopeIndex; isotopeIndex <= lastIsotopeIndex; ++isotopeIndex)
-        {
-            const double expectedMz = monoPrecursorMz + isotopeIndex * neutronMz;
-            size_t idx = findMs1Peak(scan, expectedMz, mzToleranceDaAt, precursorCharge);
-            if (idx == std::numeric_limits<size_t>::max())
-                idx = findMs1Peak(scan, expectedMz, mzToleranceDaAt);
-            if (idx != std::numeric_limits<size_t>::max())
-            {
-                peaks.push_back({scan.mz[idx],
-                                 ms1PeakCharge(scan, idx),
-                                 scan.intensity[idx],
-                                 isotopeIndex});
-            }
-        }
-        bool hasAssignmentAnchor = false;
-        bool hasExactAssignmentAnchor = false;
-        for (const isotopicPeak &peak : peaks)
-        {
-            const int indexDelta = std::abs(peak.isotopeIndex - assignedIndex);
-            if (indexDelta <= kMs1AssignmentIndexTolerance)
-                hasAssignmentAnchor = true;
-            if (indexDelta == 0)
-                hasExactAssignmentAnchor = true;
-        }
-        if (!peaks.empty() && hasAssignmentAnchor &&
-            (peaks.size() > 1 || hasExactAssignmentAnchor))
+        anchorIdx = findMs1Peak(scan, matchedPrecursorMz, mzToleranceDaAt, precursorCharge);
+        if (anchorIdx == std::numeric_limits<size_t>::max())
+            anchorIdx = findMs1Peak(scan, matchedPrecursorMz, mzToleranceDaAt);
+        if (anchorIdx != std::numeric_limits<size_t>::max())
         {
             ms1ScanNumber = scan.scanNumber;
+            anchorScan = &scan;
             break;
         }
-        peaks.clear();
         if (scanIdx == 0)
             break;
         --scanIdx;
     }
-    if (peaks.empty())
+    if (!anchorScan)
         return peaks;
+
+    const sipros::RaxportMs1Scan &scan = *anchorScan;
+    peaks.push_back({scan.mz[anchorIdx],
+                     ms1PeakCharge(scan, anchorIdx),
+                     scan.intensity[anchorIdx],
+                     assignedIndex});
+
+    constexpr int kLegacyIsotopePeaksEachSide = 20;
+    for (int direction : {-1, 1})
+    {
+        if ((direction < 0 && anchorIdx == 0) ||
+            (direction > 0 && anchorIdx + 1 >= scan.mz.size()))
+        {
+            continue;
+        }
+        int currentIndex = static_cast<int>(anchorIdx) + direction;
+        for (int iso = 1; iso <= kLegacyIsotopePeaksEachSide; ++iso)
+        {
+            bool foundPeak = false;
+            size_t foundIdx = 0;
+            double maxIntensity = 0.0;
+            const double expectedMz = scan.mz[anchorIdx] + direction * iso * neutronMz;
+            const double mzTolerance = mzToleranceDaAt(expectedMz);
+            while (currentIndex >= 0 && currentIndex < static_cast<int>(scan.mz.size()))
+            {
+                const size_t idx = static_cast<size_t>(currentIndex);
+                if (direction * (scan.mz[idx] - expectedMz) >= mzTolerance)
+                    break;
+                if (std::fabs(expectedMz - scan.mz[idx]) < mzTolerance &&
+                    scan.intensity[idx] > maxIntensity)
+                {
+                    foundPeak = true;
+                    foundIdx = idx;
+                    maxIntensity = scan.intensity[idx];
+                }
+                currentIndex += direction;
+            }
+            if (!foundPeak)
+                break;
+            peaks.push_back({scan.mz[foundIdx],
+                             ms1PeakCharge(scan, foundIdx),
+                             scan.intensity[foundIdx],
+                             assignedIndex + direction * iso});
+        }
+    }
 
     std::sort(peaks.begin(), peaks.end(), [](const isotopicPeak &a, const isotopicPeak &b)
               { return a.mz < b.mz; });
-    peaks.erase(std::unique(peaks.begin(), peaks.end(),
-                            [](const isotopicPeak &a, const isotopicPeak &b)
-                            { return std::fabs(a.mz - b.mz) <= 1e-12; }),
-                peaks.end());
+    if (peaks.size() > 2)
+    {
+        std::vector<int> vertexIndices;
+        double lastIntensityDiff = 1.0;
+        for (size_t i = 1; i < peaks.size(); ++i)
+        {
+            const double intensityDiff = peaks[i].intensity - peaks[i - 1].intensity;
+            if (lastIntensityDiff > 0.0 && intensityDiff < 0.0)
+                vertexIndices.push_back(static_cast<int>(i - 1));
+            lastIntensityDiff = intensityDiff;
+        }
+        if (lastIntensityDiff > 0.0)
+            vertexIndices.push_back(static_cast<int>(peaks.size() - 1));
+
+        int closestVertexIndex = 0;
+        double closestMzDiff = std::numeric_limits<double>::max();
+        for (int vertexIndex : vertexIndices)
+        {
+            const double mzDiff = std::fabs(peaks[vertexIndex].mz - monoPrecursorMz);
+            if (mzDiff < closestMzDiff)
+            {
+                closestMzDiff = mzDiff;
+                closestVertexIndex = vertexIndex;
+            }
+        }
+
+        int currentPeakIndex = closestVertexIndex - 1;
+        while (currentPeakIndex >= 0)
+        {
+            const double intensityDiff = peaks[currentPeakIndex].intensity - peaks[currentPeakIndex + 1].intensity;
+            if (intensityDiff > 0.0)
+            {
+                peaks.erase(peaks.begin(), peaks.begin() + currentPeakIndex + 1);
+                closestVertexIndex -= currentPeakIndex + 1;
+                break;
+            }
+            --currentPeakIndex;
+        }
+
+        currentPeakIndex = closestVertexIndex + 1;
+        while (currentPeakIndex < static_cast<int>(peaks.size()))
+        {
+            const double intensityDiff = peaks[currentPeakIndex].intensity - peaks[currentPeakIndex - 1].intensity;
+            if (intensityDiff > 0.0)
+            {
+                peaks.erase(peaks.begin() + currentPeakIndex, peaks.end());
+                break;
+            }
+            ++currentPeakIndex;
+        }
+    }
     return peaks;
 }
 
@@ -315,46 +385,56 @@ PSMfeatureExtractor::Ms1AbundanceResult PSMfeatureExtractor::getSIPelementAbunda
         return {};
 
     averagine avg;
-    const char atom = sipAtomLetter(sipAtom);
-    const int targetIsotopeIndex = sipNominalShiftPerAtom(std::string(1, atom));
     avg.calPepAtomCounts(peptideBodyWithPtms(peptide));
     const int atomIndex = sipAtomIndex(sipAtom);
     const double atomNumber = avg.pepAtomCounts[atomIndex];
     if (atomNumber <= 0.0)
         return {};
 
-    const double maxIsotopeIndex = atomNumber * targetIsotopeIndex;
     const double baseMz = baseMass / precursorCharge + ProNovoConfig::getProtonMass();
+    const double mzThreshold = baseMz - 0.5 / precursorCharge;
+    std::vector<double> usefulPeakIntensities;
+    usefulPeakIntensities.reserve(peaks.size());
+    double firstUsefulPeakMz = 0.0;
+    bool foundUsefulPeak = false;
 
-    double sumIntensity = 0.0;
-    double weightedIsotopeIndex = 0.0;
-    int validPeakCount = 0;
-    for (size_t i = 0; i < peaks.size(); ++i)
+    for (const isotopicPeak &peak : peaks)
     {
-        const isotopicPeak &peak = peaks[i];
-        if (peak.intensity <= 0.0)
+        if (peak.intensity <= 0.0 || peak.mz <= mzThreshold)
             continue;
-        const int isotopeIndex = peak.isotopeIndex >= 0
-                                     ? peak.isotopeIndex
-                                     : static_cast<int>(std::round((peak.mz - baseMz) /
-                                                                  ProNovoConfig::getNeutronMass() * precursorCharge));
-        if (isotopeIndex < 0)
-            continue;
-        sumIntensity += peak.intensity;
-        weightedIsotopeIndex += peak.intensity * std::min(static_cast<double>(isotopeIndex), maxIsotopeIndex);
-        ++validPeakCount;
+        if (!foundUsefulPeak)
+        {
+            firstUsefulPeakMz = peak.mz;
+            foundUsefulPeak = true;
+        }
+        usefulPeakIntensities.push_back(peak.intensity);
     }
-    if (validPeakCount == 0 || sumIntensity <= 0.0)
+    if (usefulPeakIntensities.empty())
         return {};
 
-    const double meanIsotopeIndex = weightedIsotopeIndex / sumIntensity;
-    const double naturalOtherShift = expectedNaturalNominalShiftExceptTarget(
-        avg.pepAtomCounts, atomIndex, targetIsotopeIndex);
-    double pct = (meanIsotopeIndex - naturalOtherShift) / maxIsotopeIndex * 100.0;
+    const int firstDeltaNeutron = static_cast<int>(std::round(
+        (firstUsefulPeakMz - baseMz) / ProNovoConfig::getNeutronMass() * precursorCharge));
+    const double sumIntensity = std::accumulate(usefulPeakIntensities.begin(),
+                                                usefulPeakIntensities.end(), 0.0);
+    if (sumIntensity <= 0.0)
+        return {};
+
+    double abundance = 0.0;
+    for (size_t i = 0; i < usefulPeakIntensities.size(); ++i)
+    {
+        abundance += usefulPeakIntensities[i] / sumIntensity *
+                     static_cast<double>(static_cast<int>(i) + firstDeltaNeutron);
+    }
+
+    double nominalShiftPerAtom = 1.0;
+    const char atom = sipAtomLetter(sipAtom);
+    if (atom == 'O' || atom == 'S')
+        nominalShiftPerAtom = 2.0;
+
+    const double pct = abundance / (atomNumber * nominalShiftPerAtom) * 100.0;
     if (!std::isfinite(pct))
         return {};
-    pct = std::min(100.0, std::max(0.0, pct));
-    return {pct, validPeakCount};
+    return {pct, static_cast<int>(usefulPeakIntensities.size())};
 }
 
 static std::filesystem::path resolveHdf5FeaturePath(const std::string &hdf5BasePath)
@@ -446,7 +526,7 @@ void PSMfeatureExtractor::extractFeaturesOfEachPSM()
                 compositionPeptide,
                 precursorCharge,
                 ProNovoConfig::getSetSIPelement());
-            mSipPSM->isotopicPeakNumbers[i] = ms1Abundance.isotopicPeakCount;
+            mSipPSM->isotopicPeakNumbers[i] = static_cast<int>(mSipPSM->isotopicPeakss[i].size());
             mSipPSM->MS1IsotopicAbundances[i] = ms1Abundance.abundancePct;
         }
         std::tie(mSipPSM->peptideLengths[i], mSipPSM->missCleavageSiteNumbers[i]) =

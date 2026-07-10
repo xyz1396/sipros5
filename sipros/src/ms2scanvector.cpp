@@ -78,42 +78,46 @@ bool MS2ScanVector::loadRaxportHdf5File()
 		{
 			continue;
 		}
-		const double primaryChargedMass = scan->dParentMZ * scan->iParentChargeState;
-		if (scan->iParentChargeState > 0 && scan->dParentMZ > 0.0)
-		{
-			const double parentNeutralMass = primaryChargedMass -
-				static_cast<double>(scan->iParentChargeState) * ProNovoConfig::getProtonMass();
-			scan->dParentNeutralMass = parentNeutralMass;
-			scan->dParentMass = primaryChargedMass;
-			vAllPrecursorMassChargeMS2ScanPtrTuples.push_back({parentNeutralMass, scan->iParentChargeState, scan});
-		}
+		std::vector<std::pair<double, int>> scanPrecursorMassCharges;
 
-		const size_t nCandidates = std::min(scan->dParentMZs.size(), scan->iParentChargeStates.size());
-		for (size_t j = 0; j < nCandidates; ++j)
+		auto appendPrecursorMz = [&](double mz, int charge)
 		{
-			const int charge = scan->iParentChargeStates[j];
-			const double mz = scan->dParentMZs[j];
 			if (charge <= 0 || mz <= 0.0)
 			{
-				continue;
+				return;
 			}
-			const double candidateChargedMass = mz * charge;
-			if (scan->iParentChargeState > 0 &&
-				std::abs(candidateChargedMass - primaryChargedMass) <= ProNovoConfig::getMassAccuracyParentIon())
-			{
-				continue;
-			}
-			const double parentNeutralMass = candidateChargedMass -
+			const double chargedMass = mz * charge;
+			const double parentNeutralMass = chargedMass -
 				static_cast<double>(charge) * ProNovoConfig::getProtonMass();
+			for (const auto &existing : scanPrecursorMassCharges)
+			{
+				if (existing.second == charge &&
+					std::abs(existing.first - parentNeutralMass) <= ProNovoConfig::getMassAccuracyParentIon())
+				{
+					return;
+				}
+			}
+			scanPrecursorMassCharges.push_back({parentNeutralMass, charge});
 			vAllPrecursorMassChargeMS2ScanPtrTuples.push_back({parentNeutralMass, charge, scan});
 			if (parentNeutralMass > scan->dParentNeutralMass)
 			{
 				scan->dParentNeutralMass = parentNeutralMass;
 			}
-			if (candidateChargedMass > scan->dParentMass)
+			if (chargedMass > scan->dParentMass)
 			{
-				scan->dParentMass = candidateChargedMass;
+				scan->dParentMass = chargedMass;
 			}
+		};
+
+		if (scan->iParentChargeState > 0 && scan->dParentMZ > 0.0)
+		{
+			appendPrecursorMz(scan->dParentMZ, scan->iParentChargeState);
+		}
+
+		const size_t nCandidates = std::min(scan->dParentMZs.size(), scan->iParentChargeStates.size());
+		for (size_t j = 0; j < nCandidates; ++j)
+		{
+			appendPrecursorMz(scan->dParentMZs[j], scan->iParentChargeStates[j]);
 		}
 
 		if (scan->iParentChargeState <= 0 && nCandidates > 0)

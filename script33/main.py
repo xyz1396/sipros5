@@ -100,7 +100,8 @@ citation:
                             help="Fasta file path")
         parser.add_argument('-n', '--nPrecursor', required=False,
                             type=int, default=6,
-                            help="Max precursor number in isolation window when converting raw file, recommend 6 in DDA (default) 15 in DIA")
+                            help=("Raxport isotope-envelope apex m/z values selected per MSn scan "
+                                  "before charge expansion (default: 6; consider 15 for DIA)"))
         parser.add_argument('-t', '--thread', required=False, type=int, default=0,
                             help="Thread number to be limited, all threads in default")
         parser.add_argument('--topN', '--top-psms-per-scan', dest='topN', required=False, type=int, default=8,
@@ -124,6 +125,8 @@ citation:
             args.thread = os.cpu_count() or 1  # Use all available CPUs
         if args.topN <= 0:
             parser.error('--topN must be a positive integer')
+        if args.nPrecursor <= 0:
+            parser.error('--nPrecursor must be a positive integer')
         
         spectra_mode = bool(args.psm_tsv or args.unlabeled_input or args.spectra_dir)
         if not args.element:

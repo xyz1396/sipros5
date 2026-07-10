@@ -25,6 +25,7 @@ struct DatabaseSearchArguments
 	std::string singleWorkingFile;
 	std::string fastaFile;
 	std::string outputDirectory;
+	std::string pinOutputFile;
 	std::string sipElementSpec;
 	std::string sipRangeSpec;
 	double sipStepPct = 1.0;
