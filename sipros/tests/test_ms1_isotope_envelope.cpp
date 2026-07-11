@@ -305,6 +305,38 @@ PSMfeatureExtractor::Ms1AbundanceResult fitFixture(
             initializerPct);
 }
 
+sipPSM extractFixtureFeatures(Fixture &fixture)
+{
+    const double matchedMz =
+        fixtureMzAt(fixture, fixture.modeIndex);
+
+    sipPSM psm;
+    psm.scanNumbers.push_back(200);
+    psm.precursorScanNumbers.push_back(100);
+    psm.parentCharges.push_back(fixture.charge);
+    psm.measuredParentMasses.push_back(
+        (matchedMz - ProNovoConfig::getProtonMass()) *
+        fixture.charge);
+    psm.calculatedParentMasses.push_back(
+        fixture.baseMass);
+    psm.identifiedPeptides.push_back(
+        "[" + fixture.peptide + "]");
+    psm.originalPeptides.push_back(
+        "[" + fixture.peptide + "]");
+    psm.MS2IsotopicAbundances.push_back(
+        fixture.expectedPct);
+    psm.ranks.push_back(1);
+    psm.WDPscores.push_back(1.0f);
+    psm.isolationWindowCenterMZs.push_back(matchedMz);
+
+    PSMfeatureExtractor extractor;
+    extractor.ms1Data = fixture.ms1;
+    extractor.mSipPSM = &psm;
+    extractor.initializeFeatureVectors(psm);
+    extractor.extractFeaturesOfEachPSM();
+    return psm;
+}
+
 void checkWhitelistAndConfiguredMasses()
 {
     for (const TargetCase &target : targetCases())
@@ -708,6 +740,11 @@ void checkInvalidEvidenceAndUnsupportedTarget()
                 fixture.expectedPct);
     check(!invalid.valid,
           "incompatible peak was marked valid");
+    check(invalid.fitScore == 0.0,
+          "incompatible peak received a positive fit score");
+    check(invalid.rawIsotopicPeakCount == 1 &&
+              invalid.isotopicPeakCount == 1,
+          "invalid fit discarded its raw peak count");
     check(std::fabs(
               invalid.abundancePct -
               fixture.expectedPct) > 1.0,
@@ -723,8 +760,59 @@ void checkInvalidEvidenceAndUnsupportedTarget()
                 "S33",
                 fixture.expectedPct);
     check(!unsupported.valid &&
-              unsupported.isotopicPeakCount == 0,
+              unsupported.fitScore == 0.0 &&
+              unsupported.isotopicPeakCount == 0 &&
+              unsupported.rawIsotopicPeakCount == 1,
           "unsupported isotope entered fitter");
+}
+
+void checkRawCountAndFitScoreFeatures()
+{
+    const TargetCase &carbon = targetCases()[0];
+
+    Fixture sparse = makeFixture(carbon, 0.5, 2);
+    auto &sparseScan = sparse.ms1.scans.front();
+    const double anchorMz =
+        fixtureMzAt(sparse, sparse.modeIndex);
+    for (size_t index = sparseScan.mz.size();
+         index-- > 0;)
+    {
+        if (std::fabs(sparseScan.mz[index] - anchorMz) <
+            1e-8)
+            continue;
+        sparseScan.mz.erase(
+            sparseScan.mz.begin() +
+            static_cast<std::ptrdiff_t>(index));
+        sparseScan.intensity.erase(
+            sparseScan.intensity.begin() +
+            static_cast<std::ptrdiff_t>(index));
+        sparseScan.charge.erase(
+            sparseScan.charge.begin() +
+            static_cast<std::ptrdiff_t>(index));
+    }
+    check(sparseScan.mz.size() == 1,
+          "failed to create sparse one-peak fixture");
+
+    const sipPSM sparsePsm =
+        extractFixtureFeatures(sparse);
+    check(sparsePsm.isotopicPeakss[0].size() == 1 &&
+              sparsePsm.isotopicPeakNumbers[0] == 1,
+          "invalid MS1 fit did not preserve raw peak count");
+    check(sparsePsm.MS1IsotopeFitScores[0] == 0.0,
+          "one-peak MS1 fit received a positive score");
+
+    Fixture complete = makeFixture(carbon, 0.5, 2);
+    const sipPSM completePsm =
+        extractFixtureFeatures(complete);
+    check(completePsm.isotopicPeakNumbers[0] ==
+              static_cast<int>(
+                  completePsm.isotopicPeakss[0].size()),
+          "valid MS1 fit did not report raw peak count");
+    check(completePsm.isotopicPeakNumbers[0] > 1 &&
+              completePsm.MS1IsotopeFitScores[0] >=
+                  PSMfeatureExtractor::MinMs1IsotopeFitScore &&
+              completePsm.MS1IsotopeFitScores[0] <= 1.0,
+          "complete MS1 envelope received an invalid score");
 }
 
 
@@ -785,6 +873,7 @@ int main(int argc, char **argv)
         checkMissingPeaksAndInterference();
         checkLargeHydrogenEnvelope();
         checkInvalidEvidenceAndUnsupportedTarget();
+        checkRawCountAndFitScoreFeatures();
         checkEndpointStateIndependence();
 
         std::cout

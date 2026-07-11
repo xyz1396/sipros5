@@ -51,6 +51,7 @@ public:
     std::vector<double> massErrors;
     std::vector<std::vector<isotopicPeak>> isotopicPeakss;
     std::vector<int> isotopicPeakNumbers;
+    std::vector<double> MS1IsotopeFitScores;
     std::vector<double> precursorIntensities;
     std::vector<double> MS1IsotopicAbundances;
     std::vector<double> MS2IsotopicAbundances;

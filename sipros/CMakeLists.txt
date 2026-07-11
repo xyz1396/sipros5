@@ -72,4 +72,16 @@ if(BUILD_TESTING)
     NAME ms1_isotope_envelope
     COMMAND ms1_isotope_envelope_test ${PROJECT_SOURCE_DIR}/configTemplates/SIP.cfg
   )
+
+  add_executable(pin_writer_schema_test
+    ${PROJECT_SOURCE_DIR}/sipros/tests/test_pin_writer_schema.cpp
+  )
+  target_include_directories(pin_writer_schema_test PUBLIC ${SIPROS_INCLUDE_DIRS})
+  target_link_libraries(pin_writer_schema_test PUBLIC sipros_core)
+  sipros_compile_definitions(pin_writer_schema_test)
+  sipros_optimization_options(pin_writer_schema_test)
+  add_test(
+    NAME pin_writer_schema
+    COMMAND pin_writer_schema_test
+  )
 endif()

@@ -51,6 +51,8 @@ void PinWriter::writePecorlatorPin(const std::string &fileName, const std::vecto
        << "\t"
        << "isotopicPeakNumbers"
        << "\t"
+       << "MS1IsotopeFitScore"
+       << "\t"
        << "MS1IsotopicAbundances"
        << "\t"
        << "MS2IsotopicAbundances"
@@ -96,6 +98,7 @@ void PinWriter::writePecorlatorPin(const std::string &fileName, const std::vecto
                    << psms[i].missCleavageSiteNumbers[k] << "\t"
                    << psms[i].PTMnumbers[k] << "\t"
                    << psms[i].isotopicPeakNumbers[k] << "\t"
+                   << psms[i].MS1IsotopeFitScores[k] << "\t"
                    << psms[i].MS1IsotopicAbundances[k] << "\t"
                    << psms[i].MS2IsotopicAbundances[k] << "\t"
                    << psms[i].isotopicAbundanceDiffs[k] << "\t"
@@ -149,7 +152,8 @@ size_t PinWriter::writeSearchSpectraPin(const std::string &fileName,
         "SpecId\tLabel\tScanNr\tExpMass\tretentiontime\tranks\tparentCharges\t"
         "massErrors\tisotopicMassWindowShifts\tmzShiftFromisolationWindowCenters\t"
         "peptideLengths\tmissCleavageSiteNumbers\tPTMnumbers\tisotopicPeakNumbers\t"
-        "MS1IsotopicAbundances\tMS2IsotopicAbundances\tisotopicAbundanceDiffs\t"
+        "MS1IsotopeFitScore\tMS1IsotopicAbundances\tMS2IsotopicAbundances\t"
+        "isotopicAbundanceDiffs\t"
         "WDPscores\tXcorrScores\tMVHscores\tentropyScores\tcosineScores\t"
         "matchedYenvelopes\tmatchedBenvelopes\tdeltaRT\t"
         "diffScores\tlog10_precursorIntensities\tPeptide\tProteins\n";
@@ -186,6 +190,7 @@ size_t PinWriter::writeSearchSpectraPin(const std::string &fileName,
         pin << row.missCleavageSiteNumber << '\t';
         pin << row.ptmNumber << '\t';
         pin << row.isotopicPeakNumber << '\t';
+        pin << row.ms1IsotopeFitScore << '\t';
         pin << row.ms1IsotopicAbundance << '\t';
         pin << row.ms2IsotopicAbundance << '\t';
         pin << (row.ms1IsotopicAbundance - row.ms2IsotopicAbundance) << '\t';

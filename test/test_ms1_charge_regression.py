@@ -229,6 +229,11 @@ def run_flat_fasta_layout(scan_file: Path) -> None:
     decoy_header, decoy_rows = read_pin(decoy_pin)
     merged_header, merged_rows = read_pin(merged_pin)
     assert target_header == decoy_header == merged_header
+    assert target_header.count("MS1IsotopeFitScore") == 1
+    raw_count_index = target_header.index("isotopicPeakNumbers")
+    fit_score_index = target_header.index("MS1IsotopeFitScore")
+    assert fit_score_index == raw_count_index + 1
+    assert target_header[fit_score_index + 1] == "MS1IsotopicAbundances"
     label_index = target_header.index("Label")
     assert all(row[label_index] == "1" for row in target_rows)
     assert all(row[label_index] == "-1" for row in decoy_rows)

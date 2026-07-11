@@ -880,21 +880,24 @@ PSMfeatureExtractor::getSIPelementAbundanceFromMS1Peaks(
     const std::string &sipAtom,
     double expectedEnrichmentPct)
 {
+    Ms1AbundanceResult result;
+    result.rawIsotopicPeakCount = static_cast<int>(peaks.size());
+
     SupportedSipIsotope spec;
     if (peaks.empty() || precursorCharge <= 0 ||
         !resolveSupportedSipIsotope(sipAtom, spec) ||
         !std::isfinite(expectedEnrichmentPct))
-        return {};
+        return result;
 
     averagine avg;
     avg.calPepAtomCounts(peptideBodyWithPtms(peptide));
     if (spec.atomIndex < 0 ||
         spec.atomIndex >= static_cast<int>(avg.pepAtomCounts.size()))
-        return {};
+        return result;
     const double atomNumber =
         avg.pepAtomCounts[static_cast<size_t>(spec.atomIndex)];
     if (atomNumber <= 0.0)
-        return {};
+        return result;
 
     const double baseMz =
         baseMass / precursorCharge + ProNovoConfig::getProtonMass();
@@ -915,7 +918,7 @@ PSMfeatureExtractor::getSIPelementAbundanceFromMS1Peaks(
             peak.intensity * static_cast<double>(peak.isotopeIndex);
     }
     if (observed.empty() || rawIntensity <= 0.0)
-        return {};
+        return result;
 
     const double initialPct =
         std::max(0.0, std::min(100.0, expectedEnrichmentPct));
@@ -938,8 +941,10 @@ PSMfeatureExtractor::getSIPelementAbundanceFromMS1Peaks(
     double rawPct = shiftToPct(
         rawWeightedShift / rawIntensity, initialFraction);
     if (!std::isfinite(rawPct))
-        return {};
+        return result;
     rawPct = std::max(0.0, std::min(100.0, rawPct));
+    result.abundancePct = rawPct;
+    result.isotopicPeakCount = static_cast<int>(observed.size());
 
     double fittedPct = initialPct;
     const double binomialVariance =
@@ -1044,13 +1049,20 @@ PSMfeatureExtractor::getSIPelementAbundanceFromMS1Peaks(
     }
 
     if (!fitted)
-        return {rawPct, static_cast<int>(observed.size()), false};
+        return result;
 
-    const bool valid =
-        compatiblePeakCount >= 2 && modelCoverage >= 0.02;
-    if (!valid)
-        return {rawPct, static_cast<int>(observed.size()), false};
-    return {fittedPct, compatiblePeakCount, true};
+    if (compatiblePeakCount >= 2 &&
+        std::isfinite(modelCoverage))
+    {
+        result.fitScore = std::max(
+            0.0, std::min(1.0, modelCoverage));
+    }
+    if (result.fitScore < MinMs1IsotopeFitScore)
+        return result;
+    result.abundancePct = fittedPct;
+    result.isotopicPeakCount = compatiblePeakCount;
+    result.valid = true;
+    return result;
 }
 
 static std::filesystem::path resolveHdf5FeaturePath(const std::string &hdf5BasePath)
@@ -1091,6 +1103,7 @@ void PSMfeatureExtractor::initializeFeatureVectors(sipPSM &psm)
     const size_t count = psm.scanNumbers.size();
     psm.isotopicPeakss = std::vector<std::vector<isotopicPeak>>(count);
     psm.isotopicPeakNumbers = std::vector<int>(count);
+    psm.MS1IsotopeFitScores = std::vector<double>(count);
     psm.MS1IsotopicAbundances = std::vector<double>(count);
     if (psm.MS2IsotopicAbundances.size() != count)
         psm.MS2IsotopicAbundances = std::vector<double>(count, 1.07);
@@ -1148,7 +1161,9 @@ void PSMfeatureExtractor::extractFeaturesOfEachPSM()
                 sipIsotope,
                 mSipPSM->MS2IsotopicAbundances[i]);
             mSipPSM->isotopicPeakNumbers[i] =
-                ms1Abundance.valid ? ms1Abundance.isotopicPeakCount : 0;
+                ms1Abundance.rawIsotopicPeakCount;
+            mSipPSM->MS1IsotopeFitScores[i] =
+                ms1Abundance.fitScore;
             mSipPSM->MS1IsotopicAbundances[i] = ms1Abundance.abundancePct;
         }
         std::tie(mSipPSM->peptideLengths[i], mSipPSM->missCleavageSiteNumbers[i]) =

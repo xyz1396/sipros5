@@ -38,10 +38,16 @@ class filter:
             cmd,
             self.logger,
             env_updates=thread_env_updates(threads),
+            cpu_cores=threads,
         )
             
     def ignore_pct_in_pin(self, baseName) -> None:
-        pct_columns = ['MS1IsotopicAbundances', 'MS2IsotopicAbundances', 'isotopicAbundanceDiffs']
+        pct_columns = [
+            'MS1IsotopeFitScore',
+            'MS1IsotopicAbundances',
+            'MS2IsotopicAbundances',
+            'isotopicAbundanceDiffs',
+        ]
         self.logger.info(f'Ignoring {", ".join(pct_columns)} in {baseName}_NoPCT.pin')
         pin = pd.read_csv(f'{self.outPutPath}/{baseName}/{baseName}.pin', sep='\t')
         pin.drop(columns=pct_columns, inplace=True, errors='ignore')
@@ -61,16 +67,22 @@ class filter:
         minimum = min(allocation.task_threads)
         maximum = max(allocation.task_threads)
         per_job = str(minimum) if minimum == maximum else f'{minimum}-{maximum}'
+        unit = 'core' if minimum == maximum == 1 else 'cores'
         self.logger.info(
-            f'Percolator: up to {allocation.worker_count} concurrent jobs, '
-            f'{per_job} threads per job, {allocation.peak_threads}/{self.threadNumber} '
-            f'threads in the first wave'
+            f'Percolator: up to {allocation.worker_count} concurrent processes; '
+            f'{per_job} CPU {unit} per process; '
+            f'{allocation.peak_threads}/{self.threadNumber} cores allocated at peak'
         )
         if not self.dryrun:
             postfix = ''
             if self.ignorePCT:
                 preprocessing_allocation = allocate_threads(
                     self.threadNumber, len(self.baseNames)
+                )
+                self.logger.info(
+                    f'PIN preprocessing: up to '
+                    f'{preprocessing_allocation.worker_count} concurrent processes; '
+                    '1 CPU core per process'
                 )
                 with concurrent.futures.ProcessPoolExecutor(
                         max_workers=preprocessing_allocation.worker_count,

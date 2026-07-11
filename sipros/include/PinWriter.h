@@ -19,6 +19,7 @@ public:
         int32_t missCleavageSiteNumber = 0;
         int32_t ptmNumber = 0;
         int32_t isotopicPeakNumber = 0;
+        double ms1IsotopeFitScore = 0.0;
         int32_t matchedYEnvelope = 0;
         int32_t matchedBEnvelope = 0;
         double expMass = 0.0;

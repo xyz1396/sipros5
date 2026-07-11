@@ -13,6 +13,8 @@
 class PSMfeatureExtractor
 {
 public:
+    static constexpr double MinMs1IsotopeFitScore = 0.02;
+
     PSMfeatureExtractor();
 
     averagine mAveragine;
@@ -31,7 +33,12 @@ public:
     struct Ms1AbundanceResult
     {
         double abundancePct = 0.0;
+        // Model probability covered by at least two compatible peaks.
+        double fitScore = 0.0;
+        // Peaks retained by the abundance fitter.
         int isotopicPeakCount = 0;
+        // All peaks returned by findMs1IsotopicPeaks.
+        int rawIsotopicPeakCount = 0;
         bool valid = false;
     };
 

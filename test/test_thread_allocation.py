@@ -20,6 +20,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import assembly as assembly_module
+import command_runner as command_runner_module
 import filter as filter_module
 import search as search_module
 import thread_allocation as allocation_module
@@ -31,6 +32,32 @@ def null_logger(name: str) -> logging.Logger:
     logger.addHandler(logging.NullHandler())
     logger.propagate = False
     return logger
+
+
+class CommandLoggingTests(unittest.TestCase):
+    def test_process_log_reports_cores_without_environment_spam(self) -> None:
+        logger = mock.Mock()
+        with mock.patch.object(
+                command_runner_module.subprocess,
+                "check_output",
+                return_value=b"complete\n",
+        ) as check_output:
+            command_runner_module.run_logged_command(
+                "tool --input sample",
+                logger,
+                env_updates={"OMP_NUM_THREADS": "6", "GOMAXPROCS": "6"},
+                cpu_cores=6,
+            )
+
+        self.assertEqual(
+            logger.info.call_args_list[0].args[0],
+            "Running process (allocated 6 CPU cores): tool --input sample",
+        )
+        info_messages = [call.args[0] for call in logger.info.call_args_list]
+        self.assertFalse(any(message.startswith("Set ") for message in info_messages))
+        process_env = check_output.call_args.kwargs["env"]
+        self.assertEqual(process_env["OMP_NUM_THREADS"], "6")
+        self.assertEqual(process_env["GOMAXPROCS"], "6")
 
 
 class ThreadAllocationTests(unittest.TestCase):
@@ -349,10 +376,14 @@ class WorkflowAllocationTests(unittest.TestCase):
         workflow.logger = null_logger(f"filter-allocation-{id(workflow)}")
         workflow.ignorePCT = False
         workflow.dryrun = False
-        captured: list[tuple[str, dict[str, str]]] = []
+        captured: list[tuple[str, dict[str, str], int]] = []
 
         def fake_logged_command(command, _logger, **kwargs):
-            captured.append((command, kwargs["env_updates"]))
+            captured.append((
+                command,
+                kwargs["env_updates"],
+                kwargs["cpu_cores"],
+            ))
 
         with mock.patch.object(
                 filter_module, "run_logged_command", side_effect=fake_logged_command):
@@ -360,14 +391,15 @@ class WorkflowAllocationTests(unittest.TestCase):
 
         command_threads = sorted(
             int(re.search(r"--num-threads (\d+)", command).group(1))
-            for command, _ in captured
+            for command, _, _ in captured
         )
         self.assertEqual(command_threads, [8, 8, 8])
         self.assertEqual(
             sorted(int(environment["OMP_NUM_THREADS"])
-                   for _, environment in captured),
+                   for _, environment, _ in captured),
             [8, 8, 8],
         )
+        self.assertEqual(sorted(cores for _, _, cores in captured), [8, 8, 8])
 
     def test_philosopher_jobs_receive_balanced_gomaxprocs(self) -> None:
         workflow = object.__new__(assembly_module.assembly)

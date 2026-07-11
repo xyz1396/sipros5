@@ -68,6 +68,7 @@ class search:
             self.logger,
             env=env,
             env_updates=thread_env_updates(thread_count),
+            cpu_cores=thread_count,
         )
 
     def log_thread_allocation(self, phase: str, allocation: ThreadAllocation) -> None:
@@ -77,10 +78,11 @@ class search:
         minimum = min(allocation.task_threads)
         maximum = max(allocation.task_threads)
         per_job = str(minimum) if minimum == maximum else f'{minimum}-{maximum}'
+        unit = 'core' if minimum == maximum == 1 else 'cores'
         self.logger.info(
-            f'{phase}: up to {allocation.worker_count} concurrent jobs, '
-            f'{per_job} threads per job, {allocation.peak_threads}/{self.threadNumber} '
-            f'threads in the first wave'
+            f'{phase}: up to {allocation.worker_count} concurrent processes; '
+            f'{per_job} CPU {unit} per process; '
+            f'{allocation.peak_threads}/{self.threadNumber} cores allocated at peak'
         )
 
     def sample_base_name(self, path: str) -> str:
@@ -128,7 +130,7 @@ class search:
             or str(128 * 1024 * 1024)
         )
         env["DOTNET_GCHeapHardLimit"] = raxport_heap_limit
-        self.logger.info(f"Set DOTNET_GCHeapHardLimit to {raxport_heap_limit} bytes")
+        self.logger.debug(f"Raxport heap limit: {raxport_heap_limit} bytes")
         cmd = (f'{self.q(self.raxportPath)} -f {self.q(raw_file)} -o {self.q(hdf5_dir)} '
                f'--format hdf5 -n {self.nPrecursor}')
         self.run_command(cmd, env, threads)
@@ -592,8 +594,10 @@ class search:
             raise SystemExit(1)
         self.reverse_fasta_sequences()
         self.write_workflow_config()
-        self.logger.info(f'Number of CPU cores: {self.core_count}')
-        self.logger.info(f'Maximum workflow thread budget: {self.threadNumber}')
+        self.logger.info(
+            f'Workflow CPU allocation: {self.threadNumber} cores '
+            f'({self.core_count} available)'
+        )
         self.getInputFiles()
         self.validate_negative_controls()
         self.create_sample_directories()
@@ -606,8 +610,10 @@ class search:
     def run(self) -> None:
         self.reverse_fasta_sequences()
         self.write_workflow_config()
-        self.logger.info(f'Number of CPU cores: {self.core_count}')
-        self.logger.info(f'Maximum workflow thread budget: {self.threadNumber}')
+        self.logger.info(
+            f'Workflow CPU allocation: {self.threadNumber} cores '
+            f'({self.core_count} available)'
+        )
         self.getInputFiles()
         self.validate_negative_controls()
         self.create_sample_directories()

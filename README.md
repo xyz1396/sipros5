@@ -58,14 +58,14 @@ siproswf -i raw -f db.faa -e C13 --negative_control Pan_062822_X1iso5 -o sip2_ou
 
 ### 5. Output Files
 
-- `SIP_filtered_psms.tsv`: PSMs from all samples that pass the unlabeled negative-control filter (1% FDR), with SIP element labeling percentages (`MS1IsotopicAbundances`, `MS2IsotopicAbundances`). MS1IsotopicAbundances are more sensitive; MS2IsotopicAbundances are more accurate.
+- `SIP_filtered_psms.tsv`: PSMs from all samples that pass the unlabeled negative-control filter (1% FDR), with SIP element labeling percentages (`MS1IsotopicAbundances`, `MS2IsotopicAbundances`). `isotopicPeakNumbers` is the raw number of extracted MS1 isotope peaks. `MS1IsotopeFitScore` is the theoretical-envelope coverage from `0` to `1`, set to `0` unless at least two compatible peaks are present; scores of at least `0.02` pass the MS1 abundance-fit validity threshold. MS1IsotopicAbundances are more sensitive; MS2IsotopicAbundances are more accurate.
 - `protein_with_SIP_filtered_PSM.tsv`: maps unlabeled negative-control filtered PSMs to the proteins identified in each sample.
 - For each raw-file subdirectory:
   - `<sample>.h5`: Raxport scan data.
   - `<sample>_target.pin`, `<sample>_decoy.pin`: target and decoy search intermediates.
   - `<sample>.pin`: merged target/decoy PIN consumed by Percolator.
   - `peptide.tsv`, `protein.tsv`: peptides, and proteins passing 1% FDR decoy filtering.
-  - `*_filtered_psms.tsv`: PSMs passing 1% FDR decoy filtering with `MS1IsotopicAbundances`, `MS2IsotopicAbundances`.
+  - `*_filtered_psms.tsv`: PSMs passing 1% FDR decoy filtering with `isotopicPeakNumbers`, `MS1IsotopeFitScore`, `MS1IsotopicAbundances`, and `MS2IsotopicAbundances`.
 
 ## Sipros5 Setup Guide (set the python and binary by yourself)
 

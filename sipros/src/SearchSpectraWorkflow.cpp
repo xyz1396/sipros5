@@ -2,7 +2,7 @@
 //
 // Re-score Raxport HDF5 MS2 scans against a pre-generated SIP spectra
 // library (HDF5). HDF5 records are loaded into bounded in-memory batches.
-// Output: one Percolator PIN per HDF5 sample file, 28 columns.
+// Output: one Percolator PIN per HDF5 sample file, 30 columns.
 
 #include <iostream>
 #include <fstream>
@@ -1240,6 +1240,7 @@ struct ShardPsmRow
 	int32_t missCleavage = 0;
 	int32_t ptmCount = 0;
 	int32_t isotopicPeakNumbers = 0;
+	double ms1IsotopeFitScore = 0.0;
 	double wdp = 0.0;
 	double xcorr = 0.0;
 	double mvh = 0.0;
@@ -1291,6 +1292,7 @@ std::vector<PinWriter::SearchSpectraPinRow> makeSearchSpectraPinRows(const std::
 		row.missCleavageSiteNumber = r.missCleavage;
 		row.ptmNumber = r.ptmCount;
 		row.isotopicPeakNumber = r.isotopicPeakNumbers;
+		row.ms1IsotopeFitScore = r.ms1IsotopeFitScore;
 		row.matchedYEnvelope = r.matchedY;
 		row.matchedBEnvelope = r.matchedB;
 		row.expMass = r.calcMassNeutral;
@@ -2264,7 +2266,8 @@ ShardPsmRow makeScoringRow(size_t scanIdx,
     row.missCleavage = PSMfeatureExtractor::countMissCleavage(rec.nakedPeptide);
     row.ptmCount = PSMfeatureExtractor::countPTM(rec.peptide);
     row.isotopicPeakNumbers =
-        ms1Abundance.valid ? ms1Abundance.isotopicPeakCount : 0;
+        ms1Abundance.rawIsotopicPeakCount;
+    row.ms1IsotopeFitScore = ms1Abundance.fitScore;
     row.wdp = wdp;
     row.xcorr = xcorr;
     row.mvh = mvh;

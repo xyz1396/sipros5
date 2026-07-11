@@ -357,6 +357,7 @@ class assembly:
             self.logger,
             cwd=path or None,
             env_updates=thread_env_updates(thread_count),
+            cpu_cores=thread_count,
         )
 
     def run_parallel_commands(self, commands: list[str], paths: list[str],
@@ -370,10 +371,11 @@ class assembly:
         minimum = min(allocation.task_threads)
         maximum = max(allocation.task_threads)
         per_job = str(minimum) if minimum == maximum else f'{minimum}-{maximum}'
+        unit = 'core' if minimum == maximum == 1 else 'cores'
         self.logger.info(
-            f'{phase}: up to {allocation.worker_count} concurrent jobs, '
-            f'{per_job} threads per job, {allocation.peak_threads}/{self.threadNumber} '
-            f'threads in the first wave'
+            f'{phase}: up to {allocation.worker_count} concurrent processes; '
+            f'{per_job} CPU {unit} per process; '
+            f'{allocation.peak_threads}/{self.threadNumber} cores allocated at peak'
         )
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=allocation.worker_count) as executor:
