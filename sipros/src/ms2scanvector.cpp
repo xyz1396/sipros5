@@ -134,9 +134,6 @@ bool MS2ScanVector::loadRaxportHdf5File()
 	{
 		vpPrecursorMasses.push_back(std::get<0>(entry));
 	}
-#ifdef Ticktock
-	TOCK1ST(loadHdf5file);
-#endif
 	return true;
 }
 

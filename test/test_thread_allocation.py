@@ -259,6 +259,31 @@ class WorkflowAllocationTests(unittest.TestCase):
         workflow.topPsmsPerScan = 8
         return workflow
 
+    def test_workflows_write_config_without_configs_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            templates = root / "templates"
+            templates.mkdir()
+            (templates / "Regular.cfg").write_text(
+                "Search_Name = old\nSIP_Element = C\nSIP_Element_Isotope = 13\n"
+            )
+            (templates / "SIP.cfg").write_text(
+                "Search_Name = old\nSIP_Element = C\nSIP_Element_Isotope = 13\n"
+            )
+            for element, filename in (("R", "Regular.cfg"), ("N15", "SIP.cfg")):
+                with self.subTest(element=element):
+                    output = root / element
+                    workflow = self.make_search(str(output))
+                    workflow.element = element
+                    workflow.configTemplatePath = str(templates)
+                    workflow.fastaPath = "target.fasta"
+
+                    config = workflow.write_workflow_config()
+
+                    self.assertEqual(config, str(output / filename))
+                    self.assertTrue(Path(config).is_file())
+                    self.assertFalse((output / "configs").exists())
+
     def test_spectra_search_divides_cli_threads_between_samples(self) -> None:
         with tempfile.TemporaryDirectory() as output:
             workflow = self.make_search(output)
@@ -268,7 +293,7 @@ class WorkflowAllocationTests(unittest.TestCase):
             }
             captured: list[tuple[str, int]] = []
             workflow.run_command_sipros = (
-                lambda command, _output, threads: captured.append((command, threads))
+                lambda command, threads: captured.append((command, threads))
             )
 
             workflow.search_spectra_samples("config.cfg", "spectra")
@@ -279,7 +304,7 @@ class WorkflowAllocationTests(unittest.TestCase):
                 self.assertIsNotNone(match)
                 self.assertEqual(int(match.group(1)), threads)
 
-    def test_resumed_spectra_search_reallocates_skipped_job_threads(self) -> None:
+    def test_spectra_search_overwrites_existing_pin(self) -> None:
         with tempfile.TemporaryDirectory() as output:
             workflow = self.make_search(output)
             workflow.base_names = ["done", "two", "three"]
@@ -291,13 +316,12 @@ class WorkflowAllocationTests(unittest.TestCase):
             completed.write_bytes(b"x" * (500 * 1024 + 1))
             captured: list[int] = []
             workflow.run_command_sipros = (
-                lambda _command, _output, threads: captured.append(threads)
+                lambda _command, threads: captured.append(threads)
             )
 
             workflow.search_spectra_samples("config.cfg", "spectra")
 
-            self.assertEqual(sorted(captured), [8, 8])
-            self.assertEqual(sum(captured), 16)
+            self.assertEqual(sorted(captured), [8, 8, 8])
 
     def test_fasta_target_and_decoy_share_one_budget(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -307,20 +331,19 @@ class WorkflowAllocationTests(unittest.TestCase):
             workflow.element = "R"
             workflow.fastaPath = "target.fasta"
             workflow.decoyPath = "decoy.fasta"
-            workflow.get_workflow_config = lambda: "config.cfg"
             workflow.direct_sip_args = lambda: ""
             captured: list[int] = []
             workflow.run_command_sipros = (
-                lambda _command, _output, threads: captured.append(threads)
+                lambda _command, threads: captured.append(threads)
             )
             workflow.merge_pin_files = lambda *_arguments: None
 
-            workflow.sipros_search()
+            workflow.sipros_search("config.cfg")
 
             self.assertEqual(sorted(captured), [8, 8])
             self.assertEqual(sum(captured), 16)
 
-    def test_resumed_fasta_search_gives_pending_decoy_full_budget(self) -> None:
+    def test_fasta_search_overwrites_existing_pin(self) -> None:
         with tempfile.TemporaryDirectory() as output:
             workflow = self.make_search(output)
             workflow.base_names = ["sample"]
@@ -328,7 +351,6 @@ class WorkflowAllocationTests(unittest.TestCase):
             workflow.element = "R"
             workflow.fastaPath = "target.fasta"
             workflow.decoyPath = "decoy.fasta"
-            workflow.get_workflow_config = lambda: "config.cfg"
             workflow.direct_sip_args = lambda: ""
             completed = Path(output) / "sample" / "sample_target.pin"
             completed.parent.mkdir(parents=True)
@@ -336,15 +358,15 @@ class WorkflowAllocationTests(unittest.TestCase):
             captured: list[int] = []
             merged: list[tuple[str, str, str]] = []
             workflow.run_command_sipros = (
-                lambda _command, _output, threads: captured.append(threads)
+                lambda _command, threads: captured.append(threads)
             )
             workflow.merge_pin_files = (
                 lambda *arguments: merged.append(arguments)
             )
 
-            workflow.sipros_search()
+            workflow.sipros_search("config.cfg")
 
-            self.assertEqual(captured, [16])
+            self.assertEqual(captured, [8, 8])
             self.assertEqual(len(merged), 1)
 
     def test_raxport_single_file_uses_dotnet_quota_not_dash_j(self) -> None:

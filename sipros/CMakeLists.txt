@@ -53,6 +53,7 @@ target_include_directories(sipros PUBLIC ${PROJECT_SOURCE_DIR}/sipros/include)
 target_link_libraries(sipros PUBLIC sipros_openmp_tools)
 sipros_compile_definitions(sipros)
 sipros_optimization_options(sipros)
+sipros_static_link_options(sipros)
 
 add_executable(siprosMPI ${PROJECT_SOURCE_DIR}/sipros/src/mpi_main.cpp)
 target_include_directories(siprosMPI PUBLIC ${PROJECT_SOURCE_DIR}/sipros/include)
@@ -68,6 +69,7 @@ if(BUILD_TESTING)
   target_link_libraries(ms1_isotope_envelope_test PUBLIC sipros_common sipros_core)
   sipros_compile_definitions(ms1_isotope_envelope_test)
   sipros_optimization_options(ms1_isotope_envelope_test)
+  sipros_static_link_options(ms1_isotope_envelope_test)
   add_test(
     NAME ms1_isotope_envelope
     COMMAND ms1_isotope_envelope_test ${PROJECT_SOURCE_DIR}/configTemplates/SIP.cfg
@@ -80,6 +82,7 @@ if(BUILD_TESTING)
   target_link_libraries(pin_writer_schema_test PUBLIC sipros_core)
   sipros_compile_definitions(pin_writer_schema_test)
   sipros_optimization_options(pin_writer_schema_test)
+  sipros_static_link_options(pin_writer_schema_test)
   add_test(
     NAME pin_writer_schema
     COMMAND pin_writer_schema_test

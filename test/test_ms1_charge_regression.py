@@ -208,11 +208,11 @@ def run_flat_fasta_layout(scan_file: Path) -> None:
         topPsmsPerScan=2,
     )
     workflow.reverse_fasta_sequences()
-    workflow.write_workflow_config()
+    config = workflow.write_workflow_config()
     workflow.getInputFiles()
     workflow.create_sample_directories()
     workflow.prepare_hdf5_inputs()
-    workflow.sipros_search()
+    workflow.sipros_search(config)
 
     base = scan_file.stem
     sample_dir = output / base

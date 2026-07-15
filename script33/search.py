@@ -32,7 +32,6 @@ class search:
         self.sipRange = sipRange
         self.step = step
         self.configTemplatePath = configTemplatePath
-        self.configsPath = f'{outputPath}/configs'
         self.raxportPath = raxportPath
         self.siprosPath = siprosPath
         self.fastaPath = fastaPath
@@ -106,13 +105,6 @@ class search:
     def complete_hdf5_exists(self, path: str) -> bool:
         return os.path.exists(path) and os.path.getsize(path) >= 1024 * 1024
 
-    def complete_search_output_exists(self, path: str | None) -> bool:
-        return bool(
-            path
-            and os.path.exists(path)
-            and os.path.getsize(path) > 500 * 1024
-        )
-
     def run_command_raxport(self, raw_file: str, hdf5_dir: str,
                             expected_hdf5: str, threads: int):
         if os.path.exists(expected_hdf5):
@@ -137,11 +129,7 @@ class search:
         if not os.path.exists(expected_hdf5):
             raise FileNotFoundError(f'Raxport did not create expected HDF5 file: {expected_hdf5}')
 
-    def run_command_sipros(self, cmd: str, output_file: str | None = None,
-                           threads: int | None = None):
-        if self.complete_search_output_exists(output_file):
-            self.logger.info(f'the output file {output_file} existed, skip this search')
-            return
+    def run_command_sipros(self, cmd: str, threads: int | None = None):
         self.run_command(cmd, threads=threads)
 
     def reverse_fasta_sequences(self):
@@ -199,18 +187,15 @@ class search:
             suffix = "  #" + stripped.split("#", 1)[1].rstrip("\n")
         return f"{indent}{line_key} = {replacements[line_key]}{suffix}\n"
 
-    def write_workflow_config(self):
-        self.logger.info(f"Writing workflow config to {self.configsPath}")
-        os.makedirs(self.configsPath, exist_ok=True)
-        for cfg in Path(self.configsPath).glob("*.cfg"):
-            cfg.unlink()
+    def write_workflow_config(self) -> str:
         cfgTempName = "Regular.cfg" if self.element == "R" else "SIP.cfg"
         template_path = Path(self.configTemplatePath) / cfgTempName
         if not template_path.exists():
             self.logger.error(f"Config template does not exist: {template_path}")
             raise SystemExit(1)
-        output_name = "Regular.cfg" if self.element == "R" else "SIP.cfg"
-        output_path = Path(self.configsPath) / output_name
+        output_path = Path(self.outPutPath) / cfgTempName
+        self.logger.info(f"Writing workflow config to {output_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         toleranceMS1 = self.toleranceMS1 if self.toleranceMS1 is not None else 0.01
         toleranceMS2 = self.toleranceMS2 if self.toleranceMS2 is not None else 0.01
         search_type = "Regular" if self.element == "R" else "SIP"
@@ -228,29 +213,7 @@ class search:
             for line in source:
                 output.write(self.update_config_line(line, replacements))
         self.logger.info(f"Wrote config file: {output_path}")
-
-    def get_workflow_config(self) -> str:
-        cfg_files = sorted(Path(self.configsPath).glob('*.cfg'))
-        if not cfg_files:
-            self.logger.error(f'No config files found in {self.configsPath}')
-            raise SystemExit(1)
-        if len(cfg_files) == 1:
-            return str(cfg_files[0])
-        pct_files: list[tuple[float, Path]] = []
-        for cfg in cfg_files:
-            stem = cfg.stem
-            if 'Pct' not in stem:
-                continue
-            try:
-                pct_text = stem.rsplit('_', 1)[1].replace('Pct', '')
-                pct = float(pct_text)
-            except Exception:
-                continue
-            if pct > 0:
-                pct_files.append((pct, cfg))
-        if pct_files:
-            return str(sorted(pct_files, key=lambda item: item[0])[0][1])
-        return str(cfg_files[0])
+        return str(output_path)
 
     def input_entries(self, input_path: str) -> list[str]:
         path = Path(input_path)
@@ -432,11 +395,10 @@ class search:
             for row in merged_rows:
                 merged.write("\t".join(row) + "\n")
 
-    def sipros_search(self):
-        config = self.get_workflow_config()
+    def sipros_search(self, config: str):
         sip_args = self.direct_sip_args()
         direct_top_psms_per_scan = self.topPsmsPerScan
-        commands: list[tuple[str, str]] = []
+        commands: list[str] = []
         merge_jobs: list[tuple[str, str, str]] = []
         for base_name in self.base_names:
             hdf5_path = self.hdf5_paths[base_name]
@@ -446,28 +408,17 @@ class search:
             target_pin = f'{sample_dir}/{target_pin_name}'
             decoy_pin = f'{sample_dir}/{decoy_pin_name}'
             final_pin = f'{sample_dir}/{base_name}.pin'
-            commands.append((
+            commands.append(
                 f'{self.q(self.siprosPath)} search-fasta -c {self.q(config)} -fasta {self.q(self.fastaPath)} '
                 f'-f {self.q(hdf5_path)} -o {self.q(sample_dir)} --pin-output {self.q(target_pin_name)}{sip_args} '
-                f'--pin-label 1 --top-psms-per-scan {direct_top_psms_per_scan}',
-                target_pin,
-            ))
-            commands.append((
+                f'--pin-label 1 --top-psms-per-scan {direct_top_psms_per_scan}'
+            )
+            commands.append(
                 f'{self.q(self.siprosPath)} search-fasta -c {self.q(config)} -fasta {self.q(self.decoyPath)} '
                 f'-f {self.q(hdf5_path)} -o {self.q(sample_dir)} --pin-output {self.q(decoy_pin_name)}{sip_args} '
-                f'--pin-label -1 --top-psms-per-scan {direct_top_psms_per_scan}',
-                decoy_pin,
-            ))
+                f'--pin-label -1 --top-psms-per-scan {direct_top_psms_per_scan}'
+            )
             merge_jobs.append((target_pin, decoy_pin, final_pin))
-        pending_commands = []
-        for command, output in commands:
-            if self.complete_search_output_exists(output):
-                self.logger.info(
-                    f'the output file {output} existed, skip this search'
-                )
-            else:
-                pending_commands.append((command, output))
-        commands = pending_commands
         allocation = allocate_threads(
             self.threadNumber,
             len(commands),
@@ -479,9 +430,9 @@ class search:
                     max_workers=allocation.worker_count) as executor:
                 futures = [
                     executor.submit(
-                        self.run_command_sipros, cmd, output, threads
+                        self.run_command_sipros, cmd, threads
                     )
-                    for (cmd, output), threads
+                    for cmd, threads
                     in zip(commands, allocation.task_threads)
                 ]
                 for future in concurrent.futures.as_completed(futures):
@@ -549,41 +500,33 @@ class search:
         return self.generatedSpectraDir
 
     def search_spectra_samples(self, config: str, spectra_dir: str):
-        commands: list[tuple[str, str, int]] = []
-        pending_samples: list[tuple[str, str, str, str]] = []
+        commands: list[tuple[str, int]] = []
+        samples: list[tuple[str, str, str]] = []
         for base_name in self.base_names:
             hdf5_path = self.hdf5_paths[base_name]
             sample_dir = f'{self.outPutPath}/{base_name}'
             os.makedirs(sample_dir, exist_ok=True)
-            pin_path = f'{sample_dir}/{base_name}.pin'
-            if self.complete_search_output_exists(pin_path):
-                self.logger.info(
-                    f'the output file {pin_path} existed, skip this search'
-                )
-                continue
-            pending_samples.append(
-                (base_name, hdf5_path, sample_dir, pin_path)
-            )
+            samples.append((base_name, hdf5_path, sample_dir))
         allocation = allocate_threads(
             self.threadNumber,
-            len(pending_samples),
+            len(samples),
             minimum_threads_per_task=MIN_SIPROS_OR_PERCOLATOR_THREADS,
         )
         self.log_thread_allocation('Sipros spectra search', allocation)
         if allocation.worker_count == 0:
             return
-        for (_, hdf5_path, sample_dir, pin_path), threads in zip(
-                pending_samples, allocation.task_threads):
+        for (_, hdf5_path, sample_dir), threads in zip(
+                samples, allocation.task_threads):
             cmd = (f'{self.q(self.siprosPath)} search-spectra -f {self.q(hdf5_path)} '
                    f'-c {self.q(config)} -h5 {self.q(spectra_dir)} -o {self.q(sample_dir)} '
                    f'-t {threads} --tolerance-ms1 {self.toleranceMS1} --tolerance-ms1-unit da '
                    f'--tolerance-ms2 {self.toleranceMS2} --tolerance-ms2-unit da --top-psms-per-scan {self.topPsmsPerScan}')
-            commands.append((cmd, pin_path, threads))
+            commands.append((cmd, threads))
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=allocation.worker_count) as executor:
             futures = [
-                executor.submit(self.run_command_sipros, cmd, output, threads)
-                for cmd, output, threads in commands
+                executor.submit(self.run_command_sipros, cmd, threads)
+                for cmd, threads in commands
             ]
             for future in concurrent.futures.as_completed(futures):
                 future.result()
@@ -593,7 +536,7 @@ class search:
             self.logger.error('search-spectra mode requires a SIP element such as C13')
             raise SystemExit(1)
         self.reverse_fasta_sequences()
-        self.write_workflow_config()
+        config = self.write_workflow_config()
         self.logger.info(
             f'Workflow CPU allocation: {self.threadNumber} cores '
             f'({self.core_count} available)'
@@ -603,13 +546,12 @@ class search:
         self.create_sample_directories()
         if not self.dryrun:
             self.prepare_hdf5_inputs()
-            config = self.get_workflow_config()
             spectra_dir = self.generate_or_reuse_spectra_library(config)
             self.search_spectra_samples(config, spectra_dir)
 
     def run(self) -> None:
         self.reverse_fasta_sequences()
-        self.write_workflow_config()
+        config = self.write_workflow_config()
         self.logger.info(
             f'Workflow CPU allocation: {self.threadNumber} cores '
             f'({self.core_count} available)'
@@ -619,4 +561,4 @@ class search:
         self.create_sample_directories()
         if not self.dryrun:
             self.prepare_hdf5_inputs()
-            self.sipros_search()
+            self.sipros_search(config)
