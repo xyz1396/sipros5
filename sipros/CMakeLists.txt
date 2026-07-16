@@ -62,6 +62,19 @@ target_compile_options(siprosMPI PUBLIC -ffast-math -march=native -fPIC)
 sipros_compile_definitions(siprosMPI)
 
 if(BUILD_TESTING)
+  add_executable(builtin_config_test
+    ${PROJECT_SOURCE_DIR}/sipros/tests/test_builtin_config.cpp
+  )
+  target_include_directories(builtin_config_test PUBLIC ${SIPROS_INCLUDE_DIRS})
+  target_link_libraries(builtin_config_test PUBLIC sipros_core)
+  sipros_compile_definitions(builtin_config_test)
+  sipros_optimization_options(builtin_config_test)
+  sipros_static_link_options(builtin_config_test)
+  add_test(
+    NAME builtin_config
+    COMMAND builtin_config_test
+  )
+
   add_executable(ms1_isotope_envelope_test
     ${PROJECT_SOURCE_DIR}/sipros/tests/test_ms1_isotope_envelope.cpp
   )
@@ -72,7 +85,7 @@ if(BUILD_TESTING)
   sipros_static_link_options(ms1_isotope_envelope_test)
   add_test(
     NAME ms1_isotope_envelope
-    COMMAND ms1_isotope_envelope_test ${PROJECT_SOURCE_DIR}/configTemplates/SIP.cfg
+    COMMAND ms1_isotope_envelope_test
   )
 
   add_executable(pin_writer_schema_test

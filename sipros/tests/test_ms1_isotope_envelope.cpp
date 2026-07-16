@@ -1,17 +1,22 @@
 #include "PSMfeatureExtractor.h"
 #include "SiprosSearchRunner.h"
 #include "proNovoConfig.h"
+#include "proteindatabase.h"
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 namespace
 {
@@ -35,12 +40,11 @@ struct TargetCase
 const std::vector<TargetCase> &targetCases()
 {
     static const std::vector<TargetCase> cases{
-        {"C13", 0, 1, 1, 1.003355, 1.07, "YDSTHGR"},
-        {"H2", 1, 1, 1, 1.006277, 0.0115, "YDSTHGR"},
-        {"N15", 3, 1, 1, 0.997035, 0.368, "YDSTHGR"},
-        {"O18", 2, 2, 2, 2.004245, 0.205, "YDSTHGR"},
-        {"S34", 5, 2, 2, 1.995796, 4.29,
-         std::string(12, 'M')},
+        {"C13", 0, 1, 1, 1.003355, 1.07, "CCCCCCK"},
+        {"H2", 1, 1, 1, 1.006277, 0.0115, "CCCCCCK"},
+        {"N15", 3, 1, 1, 0.997035, 0.368, "CCCCCCK"},
+        {"O18", 2, 2, 2, 2.004245, 0.205, "CCCCCCK"},
+        {"S34", 5, 2, 2, 1.995796, 4.29, "CCCCCCK"},
     };
     return cases;
 }
@@ -103,32 +107,42 @@ void multiplyByAtom(NominalDistribution &distribution,
 }
 
 NominalDistribution peptideDistribution(
-    const std::array<int, 6> &counts,
+    const sipros::SourcedComposition &composition,
     const TargetCase &target,
     double targetFraction)
 {
     NominalDistribution distribution;
-    const auto &configured =
-        ProNovoConfig::configIsotopologue
-            .vAtomIsotopicDistribution;
-    for (size_t atom = 0; atom < counts.size(); ++atom)
+    const auto &configured = ProNovoConfig::configIsotopologue
+                                 .vNaturalAtomIsotopicDistribution;
+    for (size_t source = 0;
+         source < sipros::IsotopeSourceCount;
+         ++source)
     {
-        std::vector<double> probabilities =
-            ProNovoConfig::getNaturalAtomIsotopeProbabilities(atom);
-        if (static_cast<int>(atom) == target.atomIndex)
+        const bool biosynthetic =
+            source == static_cast<size_t>(
+                          sipros::IsotopeSource::Biosynthetic);
+        for (size_t atom = 0; atom < sipros::ElementCount; ++atom)
         {
-            check(averagine::changeAtomProbability(
-                      probabilities,
-                      target.label[0],
-                      targetFraction),
-                  "failed to set target isotope abundance");
-        }
-        for (int count = 0; count < counts[atom]; ++count)
-        {
-            multiplyByAtom(
-                distribution,
-                probabilities,
-                configured[atom].vMass);
+            std::vector<double> probabilities =
+                ProNovoConfig::getNaturalAtomIsotopeProbabilities(atom);
+            if (biosynthetic &&
+                static_cast<int>(atom) == target.atomIndex)
+            {
+                check(averagine::changeAtomProbability(
+                          probabilities,
+                          target.label[0],
+                          targetFraction),
+                      "failed to set target isotope abundance");
+            }
+            for (int count = 0;
+                 count < composition.atoms[source][atom];
+                 ++count)
+            {
+                multiplyByAtom(
+                    distribution,
+                    probabilities,
+                    configured[atom].vMass);
+            }
         }
     }
 
@@ -174,7 +188,7 @@ struct Fixture
     double baseMass = 0.0;
     double baseMz = 0.0;
     int modeIndex = 0;
-    std::array<int, 6> atomCounts{};
+    sipros::SourcedComposition composition;
     NominalDistribution distribution;
     sipros::RaxportMs1Data ms1;
 };
@@ -192,10 +206,10 @@ Fixture makeFixture(const TargetCase &target,
     averagine avg;
     fixture.baseMass =
         avg.calPrecursorBaseMass(fixture.peptide);
-    fixture.atomCounts = avg.pepAtomCounts;
+    fixture.composition = avg.pepComposition;
     fixture.targetAtomCount =
-        fixture.atomCounts[
-            static_cast<size_t>(target.atomIndex)];
+        fixture.composition[sipros::IsotopeSource::Biosynthetic]
+                           [static_cast<size_t>(target.atomIndex)];
     check(fixture.targetAtomCount > 0,
           std::string(target.label) +
               " test peptide has no target atoms");
@@ -203,7 +217,7 @@ Fixture makeFixture(const TargetCase &target,
         fixture.baseMass / charge +
         ProNovoConfig::getProtonMass();
     fixture.distribution = peptideDistribution(
-        fixture.atomCounts, target, targetFraction);
+        fixture.composition, target, targetFraction);
     fixture.modeIndex = static_cast<int>(
         std::max_element(
             fixture.distribution.probability.begin(),
@@ -289,7 +303,7 @@ PSMfeatureExtractor::Ms1AbundanceResult fitFixture(
             fixture.charge,
             fixture.baseMz,
             matchedMz,
-            fixture.atomCounts,
+            fixture.composition,
             fixture.target->label,
             initializerPct,
             tolerance);
@@ -436,6 +450,208 @@ void checkWhitelistAndConfiguredMasses()
     }
     check(rejectedPhosphorus,
           "configuration resolver accepted phosphorus");
+}
+
+void checkPrecursorMassUsesExactTargetDelta()
+{
+    constexpr double midpointFraction = 0.55;
+    averagine avg;
+    for (const TargetCase &target : targetCases())
+    {
+        check(ProNovoConfig::applySipAbundance(
+                  target.label[0], 0.0),
+              std::string("failed to set zero enrichment for ") +
+                  target.label);
+        const double zeroMass =
+            avg.calPrecursorMass(target.peptide);
+        const int targetAtomCount =
+            avg.pepComposition[
+                sipros::IsotopeSource::Biosynthetic]
+                [static_cast<size_t>(target.atomIndex)];
+        check(targetAtomCount > 0,
+              std::string("precursor test has no ") +
+                  target.label + " atoms");
+
+        check(ProNovoConfig::applySipAbundance(
+                  target.label[0], midpointFraction),
+              std::string("failed to set midpoint enrichment for ") +
+                  target.label);
+        const double midpointMass =
+            avg.calPrecursorMass(target.peptide);
+        const int midpointHeavyCount = static_cast<int>(
+            std::floor(
+                (static_cast<double>(targetAtomCount) + 1.0) *
+                midpointFraction));
+        const double expectedMidpointShift =
+            static_cast<double>(midpointHeavyCount) *
+            target.expectedMassDelta;
+        check(std::fabs(
+                  (midpointMass - zeroMass) -
+                  expectedMidpointShift) < 1e-6,
+              std::string("precursor midpoint used an averaged neutron delta for ") +
+                  target.label);
+
+        check(ProNovoConfig::applySipAbundance(
+                  target.label[0], 1.0),
+              std::string("failed to set full enrichment for ") +
+                  target.label);
+        const double fullMass =
+            avg.calPrecursorMass(target.peptide);
+        const double expectedFullShift =
+            static_cast<double>(targetAtomCount) *
+            target.expectedMassDelta;
+        check(std::fabs(
+                  (fullMass - zeroMass) -
+                  expectedFullShift) < 1e-6,
+              std::string("precursor endpoint used an averaged neutron delta for ") +
+                  target.label);
+
+        // calNetronMass is explicitly per nominal-neutron unit. Therefore a
+        // full O18/S34 event is divided by two here, but not in the precursor
+        // peak mass checked above.
+        check(std::fabs(
+                  avg.calNetronMass(target.peptide) -
+                  target.expectedMassDelta /
+                      static_cast<double>(target.nominalShift)) < 1e-9,
+              std::string("nominal neutron spacing is wrong for ") +
+                  target.label);
+        check(std::fabs(
+                  ProNovoConfig::getNeutronMass() -
+                  target.expectedMassDelta /
+                      static_cast<double>(target.nominalShift)) < 1e-9,
+              std::string("configured nominal neutron spacing is wrong for ") +
+                  target.label);
+    }
+
+    const double naturalCarbon =
+        ProNovoConfig::getNaturalAtomIsotopeProbabilities(0)[1];
+    check(ProNovoConfig::applySipAbundance('C', naturalCarbon),
+          "failed to restore natural carbon after precursor checks");
+}
+
+void checkExactMultinomialBoundaryModes()
+{
+    struct BoundaryCase
+    {
+        char atom;
+        std::string peptide;
+        int element;
+        int expectedHeavyCount;
+        double exactDelta;
+    };
+    const std::vector<BoundaryCase> boundaries{
+        // With 19 atoms and p=0.55, target counts 10 and 11 are tied in
+        // the target-vs-rest binomial. O17/S33 split the rest, making 11
+        // target atoms the unique multinomial mode.
+        {'O', std::string(18, 'A') + "K", 2, 11, 2.004245},
+        {'S', std::string(19, 'M') + "K", 5, 11, 1.995796},
+        // A genuine two-isotope tie retains the lower-mass mode.
+        {'C', "AAAGGK", 0, 9, 1.003355}};
+
+    averagine avg;
+    for (const BoundaryCase &boundary : boundaries)
+    {
+        check(ProNovoConfig::load(ProNovoConfig::Profile::Sip),
+              "failed to reset SIP profile for multinomial boundary");
+        check(ProNovoConfig::applySipAbundance(boundary.atom, 0.0),
+              "failed to set light multinomial boundary");
+        const double lightMass =
+            avg.calPrecursorMass(boundary.peptide);
+        const int atomCount =
+            avg.pepComposition[
+                sipros::IsotopeSource::Biosynthetic]
+                [static_cast<size_t>(boundary.element)];
+        check(atomCount == 19,
+              "multinomial boundary peptide has the wrong atom count");
+
+        check(ProNovoConfig::applySipAbundance(
+                  boundary.atom, boundary.atom == 'C' ? 0.5 : 0.55),
+              "failed to set multinomial boundary abundance");
+        const double labeledMass =
+            avg.calPrecursorMass(boundary.peptide);
+        check(std::fabs(
+                  (labeledMass - lightMass) -
+                  boundary.expectedHeavyCount * boundary.exactDelta) < 1e-6,
+              std::string("wrong exact multinomial boundary mode for ") +
+                  boundary.atom);
+    }
+}
+
+void checkDirectSearchUsesFullPtmComposition()
+{
+    std::string error;
+    check(ProNovoConfig::load(ProNovoConfig::Profile::Sip),
+          "failed to load SIP profile for direct-search PTM mass test");
+    check(ProNovoConfig::configureVariablePtms(
+              {"deamidation"}, 1, error),
+          error);
+    check(ProNovoConfig::applySipAbundance('N', 0.55),
+          "failed to set N15 abundance for direct-search PTM mass test");
+
+    averagine avg;
+    const std::string plain = "NAAAAHK";
+    const std::string modified = "N!AAAAHK";
+    const double plainMass = avg.calPrecursorMass(plain);
+    const double expectedModifiedMass =
+        avg.calPrecursorMass(modified);
+    const double fullCompositionShift =
+        expectedModifiedMass - plainMass;
+    check(std::fabs(fullCompositionShift - 0.984016) < 1e-6,
+          "full deamidated peptide changed an unchanged N15 modal count");
+    check(std::fabs(
+              fullCompositionShift -
+              ProNovoConfig::getResidueMass("!")) > 0.9,
+          "deamidation fixture does not expose standalone-mode nonadditivity");
+
+    struct TemporaryFasta
+    {
+        std::string path;
+        ~TemporaryFasta()
+        {
+            std::remove(path.c_str());
+        }
+    } temporary{
+        "/tmp/sipros5_direct_ptm_precursor_" +
+        std::to_string(static_cast<long long>(getpid())) + ".fasta"};
+    {
+        std::ofstream output(temporary.path);
+        check(output.good(), "failed to create direct-search PTM fixture");
+        output << ">ptm_mass_fixture\n" << plain << "\n";
+    }
+
+    ProNovoConfig::setFASTAfilename(temporary.path);
+    ProteinDatabase database;
+    database.loadDatabase();
+    check(database.getFirstProtein(),
+          "failed to read direct-search PTM fixture");
+
+    bool foundPlain = false;
+    bool foundModified = false;
+    Peptide peptide;
+    for (int candidate = 0;
+         candidate < 8 && database.getNextPeptide(&peptide);
+         ++candidate)
+    {
+        if (peptide.getPeptideSeq() == "[NAAAAHK]")
+        {
+            foundPlain = true;
+            check(std::fabs(peptide.getPeptideMass() - plainMass) < 1e-6,
+                  "direct search assigned the wrong unmodified precursor mass");
+        }
+        else if (peptide.getPeptideSeq() == "[N!AAAAHK]")
+        {
+            foundModified = true;
+            check(std::fabs(
+                      peptide.getPeptideMass() -
+                      expectedModifiedMass) < 1e-6,
+                  "direct search added a standalone PTM mode instead of "
+                  "recomputing the full decorated peptide");
+        }
+    }
+    check(foundPlain && foundModified,
+          "direct search did not generate both PTM mass fixtures");
+    check(ProNovoConfig::load(ProNovoConfig::Profile::Sip),
+          "failed to restore SIP profile after direct-search PTM mass test");
 }
 
 void checkTargetElementCategories()
@@ -861,12 +1077,16 @@ int main(int argc, char **argv)
 {
     try
     {
-        check(argc == 2,
-              "usage: ms1_isotope_envelope_test SIP.cfg");
-        check(ProNovoConfig::setFilename(argv[1]),
-              "failed to load SIP config");
+        (void)argv;
+        check(argc == 1,
+              "usage: ms1_isotope_envelope_test");
+        check(ProNovoConfig::load(ProNovoConfig::Profile::Sip),
+              "failed to load built-in SIP profile");
 
         checkWhitelistAndConfiguredMasses();
+        checkPrecursorMassUsesExactTargetDelta();
+        checkExactMultinomialBoundaryModes();
+        checkDirectSearchUsesFullPtmComposition();
         checkTargetElementCategories();
         checkCleanEnrichments();
         checkBiasedInitializersAndCharges();

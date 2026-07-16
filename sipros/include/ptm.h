@@ -28,8 +28,7 @@ public:
 
   int size() { return _residue.size(); }
 
-  bool populate_from_xml_config();
-  //The current configure file is not xml format, but this function name is kept
+  bool populateFromEnabledPtms();
   
   bool add_ptm(char, string, double);
   void dump();

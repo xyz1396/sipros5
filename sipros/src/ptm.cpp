@@ -15,7 +15,7 @@ void PTM_List::dump() {
   for(int i = 0; i < size(); i++) { cout << i << "\t" << _residue[i] << "\t" << _symbol[i] << "\t" << _mass_shift[i] << endl; }
 }
 
-bool PTM_List::populate_from_xml_config() {
+bool PTM_List::populateFromEnabledPtms() {
   map<string, string> mPTMinfo;
   ProNovoConfig::getPTMinfo(mPTMinfo);
   map<string, string>::iterator iter;

@@ -12,7 +12,7 @@ set -e
 # Micromamba/Conda build (./make.sh buildConda):
 #   micromamba create -n sipros5 -c conda-forge \
 #     hdf5 h5py openmpi cmake ninja gcc_linux-64 gxx_linux-64 gdb gperftools \
-#     python=3.12 lxml pandas sysroot_linux-64=2.34
+#     python=3.12 lxml pandas sysroot_linux-64=2.34 matplotlib
 #
 # Static HDF5 used by the system build:
 #   git clone --depth 1 https://github.com/microsoft/vcpkg.git vcpkg
@@ -316,7 +316,7 @@ case $1 in
     $0 build
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/sipros"
-    cp -a configTemplates tools script33 LICENSE "$tmpdir/sipros"
+    cp -a tools script33 LICENSE "$tmpdir/sipros"
     if [ -f siprosRelease.zip ]; then
         rm siprosRelease.zip
     fi

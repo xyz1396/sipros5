@@ -1,384 +1,518 @@
 #include "proNovoConfig.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 #include "averagine.h"
+#include "isotopologue.h"
 
-string ProNovoConfig::sFilename = "SiprosConfig.cfg";
-
-void ProNovoConfig::setFASTAfilename(const string &fastaFilename)
+namespace
 {
-	sFASTAFilename = fastaFilename;
+
+constexpr const char *kCamChemistryProfileId =
+	"sipros5/source-aware-cam-tryptic-water/v1";
+constexpr const char *kNaturalCysChemistryProfileId =
+	"sipros5/source-aware-natural-cys-tryptic-water/v1";
+
+// The compiled profiles are the single source of truth for Sipros chemistry
+// and search defaults. Runtime inputs such as FASTA paths, SIP targets,
+// abundances, and optional tolerance overrides do not belong here.
+const std::vector<ProNovoConfig::PtmDefinition> &compiledPtmCatalog()
+{
+	static const std::vector<ProNovoConfig::PtmDefinition> catalog{
+		{"oxidation", "~", "M",
+		 "Oxidation of methionine; oxygen remains reagent-natural.",
+		 15.994915, true, true},
+		{"deamidation", "!", "NQ",
+		 "Deamidation of asparagine or glutamine; removed H/N are "
+		 "biosynthetic and incorporated O is reagent-natural.",
+		 0.984016, true, true},
+		{"phosphorylation", "@", "STYHD",
+		 "Phosphorylation (+HPO3) without forced fragment neutral loss.",
+		 79.966332, true, false},
+		{"phosphorylation-loss-hpo3", ">", "STYHD",
+		 "Phosphorylation whose modified fragments lose HPO3.",
+		 79.966332, true, false},
+		{"phosphorylation-loss-hpo3-h2o", "<", "ST",
+		 "Phosphorylation whose modified fragments lose HPO3 and H2O.",
+		 79.966332, true, false},
+		{"acetylation", "%", "K",
+		 "Acetylation (+C2H2O).",
+		 42.010565, true, false},
+		{"mono-methylation", "^", "KRED",
+		 "Mono-methylation (+CH2).",
+		 14.015650, true, false},
+		{"di-methylation", "&", "KR",
+		 "Di-methylation (+C2H4).",
+		 28.031300, true, false},
+		{"tri-methylation", "*", "K",
+		 "Tri-methylation (+C3H6).",
+		 42.046950, true, false},
+		{"s-nitrosylation", "(", "C",
+		 "S-nitrosylation replaces any fixed CAM, removes biosynthetic H, "
+		 "and adds reagent-natural NO.",
+		 28.990164, true, false},
+		{"nitration", ")", "Y",
+		 "Tyrosine nitration removes biosynthetic H and adds reagent-natural NO2.",
+		 44.985079, true, false},
+		{"iaa-blocking", "/", "C",
+		 "Legacy variable CAM/IAA token. It is selectable only when fixed "
+		 "carbamidomethylation is disabled; otherwise it is a zero-delta alias.",
+		 57.021464, true, false},
+		{"beta-methylthiolation", "$", "D",
+		 "Beta-methylthiolation (+CH2S).",
+		 45.987721, true, false}};
+	return catalog;
 }
 
-void ProNovoConfig::setMassAccuracy(double parentIonToleranceDa, double fragmentIonToleranceDa)
+const std::vector<ProNovoConfig::FixedPtmDefinition> &
+compiledFixedPtmCatalog()
 {
-	dMassAccuracyParentIon = parentIonToleranceDa;
-	dMassAccuracyFragmentIon = fragmentIonToleranceDa;
+	static const std::vector<ProNovoConfig::FixedPtmDefinition> catalog{
+		{"carbamidomethyl", "C",
+		 "Carbamidomethylation of cysteine by reagent-natural IAA (+C2H3NO).",
+		 57.021464, true}};
+	return catalog;
 }
 
-#if _WIN32
-string ProNovoConfig::sWorkingDirectory = ".\\";
-#else
-string ProNovoConfig::sWorkingDirectory = ".";
-#endif
-
-// variables from the Peptide_Identification element
-string ProNovoConfig::sFASTAFilename = "";
-string ProNovoConfig::sSearchType = "Regular";
-string ProNovoConfig::sSearchName = "Null";
-string ProNovoConfig::sFragmentationMethod = "CID";
-
-int ProNovoConfig::iMaxPTMcount = 0;
-
-int ProNovoConfig::iMinPeptideLength = 6;
-int ProNovoConfig::iMaxPeptideLength = 60;
-
-string ProNovoConfig::sCleavageAfterResidues = "KR";
-string ProNovoConfig::sCleavageBeforeResidues = "ACDEFGHIJKLMNPQRSTVWXY";
-int ProNovoConfig::iMaxMissedCleavages = 2;
-bool ProNovoConfig::bTestStartRemoval = false;
-
-double ProNovoConfig::dMassAccuracyParentIon = 0.05;
-double ProNovoConfig::dMassAccuracyFragmentIon = 0.05;
-vector<int> ProNovoConfig::viParentMassWindows;
-
-ProNovoConfig *ProNovoConfig::ProNovoConfigSingleton = NULL;
-
-vector<string> ProNovoConfig::vsSingleResidueNames;
-vector<double> ProNovoConfig::vdSingleResidueMasses;
-
-double ProNovoConfig::dTerminusMassN = 1.0072765;
-double ProNovoConfig::dTerminusMassC = 17.00265;
-
-string ProNovoConfig::sElementList = "";
-
-map<string, string> ProNovoConfig::mapConfigKeyValues;
-Isotopologue ProNovoConfig::configIsotopologue;
-vector<vector<double>>
-    ProNovoConfig::naturalAtomIsotopeProbabilities;
-
-const vector<double> &
-ProNovoConfig::getNaturalAtomIsotopeProbabilities(size_t atomIndex)
+std::string trimText(const std::string &text)
 {
-    static const vector<double> empty;
-    if (atomIndex < naturalAtomIsotopeProbabilities.size())
-        return naturalAtomIsotopeProbabilities[atomIndex];
-    if (atomIndex <
-        configIsotopologue.vAtomIsotopicDistribution.size())
-    {
-        return configIsotopologue
-            .vAtomIsotopicDistribution[atomIndex].vProb;
-    }
-    return empty;
+	const size_t first = text.find_first_not_of(" \t\f\v\n\r");
+	if (first == std::string::npos)
+		return std::string();
+	const size_t last = text.find_last_not_of(" \t\f\v\n\r");
+	return text.substr(first, last - first + 1);
 }
 
-vector<pair<double, double>> ProNovoConfig::vpPeptideMassWindowOffset;
-
-vector<pair<string, string>> ProNovoConfig::vpNeutralLossList;
-
-//---------------Comet Begin---------------------
-bool ProNovoConfig::bXcorrEnable = false;
-Options ProNovoConfig::options;
-double ProNovoConfig::dInverseBinWidth = 0;	  // this is used in BIN() many times so use inverse binWidth to do multiply vs. divide
-double ProNovoConfig::dOneMinusBinOffset = 0; // this is used in BIN() many times so calculate once
-IonInfo ProNovoConfig::ionInformation;
-int ProNovoConfig::iXcorrProcessingOffset = 75;
-PrecalcMasses ProNovoConfig::precalcMasses;
-double ProNovoConfig::dMaxMS2ScanMass = 0;
-double ProNovoConfig::dMaxPeptideMass = 0;
-// map<char, double> ProNovoConfig::pdAAMassFragment;
-AminoAcidMasses ProNovoConfig::pdAAMassFragment;
-double ProNovoConfig::dHighResFragmentBinSize = 0.02;
-double ProNovoConfig::dHighResFragmentBinStartOffset = 0;
-double ProNovoConfig::dLowResFragmentBinSize = 1.0005;
-double ProNovoConfig::dLowResFragmentBinStartOffset = 0.4;
-double ProNovoConfig::dHighResInverseBinWidth = 1.0 / ProNovoConfig::dHighResFragmentBinSize;
-double ProNovoConfig::dLowResInverseBinWidth = 1.0 / ProNovoConfig::dLowResFragmentBinSize;
-double ProNovoConfig::dHighResOneMinusBinOffset = 1.0 - ProNovoConfig::dHighResFragmentBinStartOffset;
-double ProNovoConfig::dLowResOneMinusBinOffset = 1.0 - ProNovoConfig::dLowResFragmentBinStartOffset;
-int ProNovoConfig::iMaxPercusorCharge = 0;
-//---------------Comet End-----------------------
-
-//---------------Myrimatch Begin-----------------
-bool ProNovoConfig::bMvhEnable = true;
-double ProNovoConfig::ClassSizeMultiplier = 2;
-int ProNovoConfig::NumIntensityClasses = 3;
-int ProNovoConfig::minIntensityClassCount = int((pow(ClassSizeMultiplier, NumIntensityClasses) - 1) / (ClassSizeMultiplier - 1));
-double ProNovoConfig::ticCutoffPercentage = 0.98;
-int ProNovoConfig::MaxPeakCount = 300;
-int ProNovoConfig::MinMatchedFragments = 5;
-double ProNovoConfig::minObservedMz = numeric_limits<double>::max();
-double ProNovoConfig::maxObservedMz = 0;
-//---------------Myrimatch End-------------------
-
-//---------------Sipros Score--------------------
-bool ProNovoConfig::bWeightDotSumEnable = false;
-bool ProNovoConfig::bLessIsotopicDistribution = false;
-bool ProNovoConfig::bMultiScores = true;
-string ProNovoConfig::sDecoyPrefix = "";
-int ProNovoConfig::INTTOPKEEP = 10;
-int ProNovoConfig::iRank = 0;
-//---------------Sipros Score--------------------
-
-double AminoAcidMasses::dNULL = -1;
-double AminoAcidMasses::dERROR = -2;
-
-string ProNovoConfig::SIPelement = "C";
-int ProNovoConfig::SIPisotopeMassNumber = 13;
-double ProNovoConfig::minValue = 0;
-double ProNovoConfig::fold = 0;
-double ProNovoConfig::deductionCoefficient = 0;
-string ProNovoConfig::fileNameSuffix = "h5";
-// carbon isotopic delta mass in default
-double ProNovoConfig::neutronMass = 1.003355;
-
-int ProNovoConfig::atomIndex(char sipAtom)
+bool parsePsmModificationMass(const std::string &text, double &mass)
 {
-	const string atoms = "CHONPS";
-	const char atom = static_cast<char>(std::toupper(static_cast<unsigned char>(sipAtom)));
-	const size_t pos = atoms.find(atom);
-	return pos == string::npos ? -1 : static_cast<int>(pos);
-}
-
-static bool supportedSipTarget(char sipAtom,
-                               int &massNumber,
-                               int &isotopeIndex,
-                               int &nominalShift)
-{
-    const char atom = static_cast<char>(
-        std::toupper(static_cast<unsigned char>(sipAtom)));
-    switch (atom)
-    {
-    case 'C':
-        massNumber = 13;
-        isotopeIndex = 1;
-        nominalShift = 1;
-        return true;
-    case 'H':
-        massNumber = 2;
-        isotopeIndex = 1;
-        nominalShift = 1;
-        return true;
-    case 'N':
-        massNumber = 15;
-        isotopeIndex = 1;
-        nominalShift = 1;
-        return true;
-    case 'O':
-        massNumber = 18;
-        isotopeIndex = 2;
-        nominalShift = 2;
-        return true;
-    case 'S':
-        massNumber = 34;
-        isotopeIndex = 2;
-        nominalShift = 2;
-        return true;
-    default:
-        return false;
-    }
-}
-
-bool ProNovoConfig::refreshResidueDistributions(Isotopologue &iso)
-{
-	for (const auto &kv : iso.mResidueAtomicComposition)
+	try
 	{
-		IsotopeDistribution dist;
-		if (!iso.computeIsotopicDistribution(kv.second, dist))
-		{
+		std::string normalized = trimText(text);
+		if (!normalized.empty() && normalized.front() == '+')
+			normalized.erase(normalized.begin());
+		if (normalized.empty())
 			return false;
+		size_t consumed = 0;
+		mass = std::stod(normalized, &consumed);
+		return consumed == normalized.size() && std::isfinite(mass);
+	}
+	catch (const std::exception &)
+	{
+		return false;
+	}
+}
+
+double reportedMassMatchError(double reportedMass,
+							  double unmodifiedResidueMass,
+							  double modificationShift)
+{
+	const double deltaError = std::abs(reportedMass - modificationShift);
+	const double absoluteError = std::abs(
+		reportedMass - (unmodifiedResidueMass + modificationShift));
+	double best = -1.0;
+	// Delta masses in FragPipe's Modified Peptide column retain decimals;
+	// absolute residue masses are commonly rounded to an integer.
+	if (deltaError <= 0.05)
+		best = deltaError;
+	if (absoluteError <= 0.5)
+		best = best < 0.0 ? absoluteError : std::min(best, absoluteError);
+	return best;
+}
+
+std::string normalizeSelector(const std::string &selector)
+{
+	const size_t first = selector.find_first_not_of(" \t\f\v\n\r");
+	if (first == std::string::npos)
+		return std::string();
+	const size_t last = selector.find_last_not_of(" \t\f\v\n\r");
+	std::string normalized;
+	normalized.reserve(last - first + 1);
+	bool previousDash = false;
+	for (size_t index = first; index <= last; ++index)
+	{
+		const unsigned char raw = static_cast<unsigned char>(selector[index]);
+		const bool separator = std::isspace(raw) != 0 || raw == '_';
+		char value = separator ? '-' : static_cast<char>(std::tolower(raw));
+		if (value == '-' && previousDash)
+			continue;
+		normalized.push_back(value);
+		previousDash = value == '-';
+	}
+	return normalized;
+}
+
+std::string ptmSearchKey(const std::string &token)
+{
+	if (token == ">")
+		return ">to1";
+	if (token == "<")
+		return "<to2";
+	return token;
+}
+
+std::vector<std::pair<std::string, std::string>> neutralLossesFor(
+	const std::map<std::string, std::string> &variablePtms)
+{
+	std::vector<std::pair<std::string, std::string>> losses;
+	if (variablePtms.find(">to1") != variablePtms.end())
+		losses.push_back({">", "1"});
+	if (variablePtms.find("<to2") != variablePtms.end())
+		losses.push_back({"<", "2"});
+	return losses;
+}
+
+class BuiltInConfig
+{
+public:
+	struct FixedModification
+	{
+		std::string name;
+		std::string sites;
+		sipros::SourcedComposition delta;
+	};
+
+	std::string searchType;
+	std::string searchName;
+	int maxPtmCount = 0;
+	int defaultMaxPtmCount = 0;
+	int minPeptideLength = 7;
+	int maxPeptideLength = 60;
+	std::string cleavageAfter = "KR";
+	std::string cleavageBefore = "ACDEFGHIJKLMNPQRSTVWY";
+	int maxMissedCleavages = 2;
+	bool removeFirstMethionine = true;
+	double parentToleranceDa = 0.01;
+	double fragmentToleranceDa = 0.01;
+	std::vector<int> parentMassWindows{-2, -1, 0, 1, 2};
+	std::map<std::string, std::string> variablePtms;
+	std::map<std::string, std::string> defaultVariablePtms;
+	std::string atomNames = "CHONPS";
+	std::map<std::string, sipros::SourcedComposition> baseResidues;
+	std::map<std::string, sipros::SourcedComposition> residues;
+	std::vector<FixedModification> fixedModifications;
+	std::vector<std::string> defaultFixedPtms;
+	std::vector<std::string> enabledFixedPtms;
+	std::vector<IsotopeDistribution> atoms;
+	double deductionMinValue = 0.0;
+	double deductionFold = 0.0;
+
+	bool fixedPtmEnabled(const std::string &name) const
+	{
+		return std::find(enabledFixedPtms.begin(), enabledFixedPtms.end(), name) !=
+			enabledFixedPtms.end();
+	}
+
+	const FixedModification &fixedModification(
+		const std::string &name) const
+	{
+		for (const FixedModification &modification : fixedModifications)
+		{
+			if (modification.name == name)
+				return modification;
 		}
-		iso.vResidueIsotopicDistribution[kv.first] = dist;
+		throw std::logic_error("Unknown compiled fixed modification.");
+	}
+
+	void rebuildResidues()
+	{
+		residues = baseResidues;
+		for (const std::string &name : enabledFixedPtms)
+		{
+			const FixedModification &modification = fixedModification(name);
+			for (char site : modification.sites)
+			{
+				auto residue = residues.find(std::string(1, site));
+				if (residue == residues.end())
+					throw std::logic_error(
+						"Fixed modification site is absent from built-in residues.");
+				residue->second += modification.delta;
+			}
+		}
+
+		const sipros::SourcedComposition nitrosyl =
+			sipros::compositionFrom(
+				sipros::IsotopeSource::Biosynthetic,
+				{0, -1, 0, 0, 0, 0}) +
+			sipros::compositionFrom(
+				sipros::IsotopeSource::ReagentNatural,
+				{0, 0, 1, 1, 0, 0});
+		if (fixedPtmEnabled("carbamidomethyl"))
+		{
+			const sipros::SourcedComposition &cam =
+				fixedModification("carbamidomethyl").delta;
+			// Fixed CAM is already present on C. The legacy IAA token becomes
+			// a mass-neutral compatibility alias, while SNO first removes CAM.
+			residues["/"] = {};
+			residues["("] = nitrosyl - cam;
+		}
+		else
+		{
+			residues["/"] = fixedModification("carbamidomethyl").delta;
+			residues["("] = nitrosyl;
+		}
+	}
+
+	static BuiltInConfig create(ProNovoConfig::Profile profile)
+	{
+		BuiltInConfig config;
+
+		// Six real elements in C,H,O,N,P,S order. Source provenance controls which atoms can follow SIP labeling.
+		config.atoms = {
+			IsotopeDistribution({12.000000, 13.003355},
+								{0.9893, 0.0107}),
+			IsotopeDistribution({1.007825, 2.014102},
+								{0.999885, 0.000115}),
+			IsotopeDistribution({15.994915, 16.999132, 17.999160},
+								{0.99757, 0.00038, 0.00205}),
+			IsotopeDistribution({14.003074, 15.000109},
+								{0.99632, 0.00368}),
+			IsotopeDistribution({30.973762}, {1.0}),
+			IsotopeDistribution(
+				{31.972071, 32.971459, 33.967867, 34.967867, 35.967081},
+				{0.9493, 0.0076, 0.0429, 0.0, 0.0002})};
+
+		const auto biosynthetic = [](const sipros::AtomCounts &counts)
+		{
+			return sipros::compositionFrom(
+				sipros::IsotopeSource::Biosynthetic, counts);
+		};
+		const auto reagentNatural = [](const sipros::AtomCounts &counts)
+		{
+			return sipros::compositionFrom(
+				sipros::IsotopeSource::ReagentNatural, counts);
+		};
+		const auto digestionSolvent = [](const sipros::AtomCounts &counts)
+		{
+			return sipros::compositionFrom(
+				sipros::IsotopeSource::DigestionSolvent, counts);
+		};
+
+		config.baseResidues = {
+			{"Nterm", digestionSolvent({0, 1, 0, 0, 0, 0})},
+			{"Cterm", digestionSolvent({0, 1, 1, 0, 0, 0})},
+			{"J", biosynthetic({6, 11, 1, 1, 0, 0})},
+			{"I", biosynthetic({6, 11, 1, 1, 0, 0})},
+			{"L", biosynthetic({6, 11, 1, 1, 0, 0})},
+			{"A", biosynthetic({3, 5, 1, 1, 0, 0})},
+			{"S", biosynthetic({3, 5, 2, 1, 0, 0})},
+			{"G", biosynthetic({2, 3, 1, 1, 0, 0})},
+			{"V", biosynthetic({5, 9, 1, 1, 0, 0})},
+			{"E", biosynthetic({5, 7, 3, 1, 0, 0})},
+			{"K", biosynthetic({6, 12, 1, 2, 0, 0})},
+			{"T", biosynthetic({4, 7, 2, 1, 0, 0})},
+			{"D", biosynthetic({4, 5, 3, 1, 0, 0})},
+			{"R", biosynthetic({6, 12, 1, 4, 0, 0})},
+			{"P", biosynthetic({5, 7, 1, 1, 0, 0})},
+			{"N", biosynthetic({4, 6, 2, 2, 0, 0})},
+			{"F", biosynthetic({9, 9, 1, 1, 0, 0})},
+			{"Q", biosynthetic({5, 8, 2, 2, 0, 0})},
+			{"Y", biosynthetic({9, 9, 2, 1, 0, 0})},
+			{"M", biosynthetic({5, 9, 1, 1, 0, 1})},
+			{"H", biosynthetic({6, 7, 1, 3, 0, 0})},
+			{"C", biosynthetic({3, 5, 1, 1, 0, 1})},
+			{"W", biosynthetic({11, 10, 1, 2, 0, 0})},
+			// Oxidation adds oxygen from an exogenous reagent/air pool.
+			{"~", reagentNatural({0, 0, 1, 0, 0, 0})},
+			// Deamidation removes peptide H/N and incorporates natural O.
+			{"!", biosynthetic({0, -1, 0, -1, 0, 0}) +
+					  reagentNatural({0, 0, 1, 0, 0, 0})},
+			{"@", biosynthetic({0, 1, 3, 0, 1, 0})},
+			{">", biosynthetic({0, 1, 3, 0, 1, 0})},
+			{"<", biosynthetic({0, 1, 3, 0, 1, 0})},
+			// Chemistry-only fragment replacements for phospho neutral loss.
+			{"1", biosynthetic({0, 0, 0, 0, 0, 0})},
+			{"2", biosynthetic({0, -2, -1, 0, 0, 0})},
+			{"%", biosynthetic({2, 2, 1, 0, 0, 0})},
+			{"^", biosynthetic({1, 2, 0, 0, 0, 0})},
+			{"&", biosynthetic({2, 4, 0, 0, 0, 0})},
+			{"*", biosynthetic({3, 6, 0, 0, 0, 0})},
+			{")", biosynthetic({0, -1, 0, 0, 0, 0}) +
+				  reagentNatural({0, 0, 2, 1, 0, 0})},
+			{"$", biosynthetic({1, 2, 0, 0, 0, 1})}};
+
+		config.fixedModifications = {
+			{"carbamidomethyl", "C",
+			 reagentNatural({2, 3, 1, 1, 0, 0})}};
+		config.defaultFixedPtms = {"carbamidomethyl"};
+		config.enabledFixedPtms = config.defaultFixedPtms;
+		config.rebuildResidues();
+
+		switch (profile)
+		{
+		case ProNovoConfig::Profile::Regular:
+			config.searchType = "Regular";
+			config.searchName = "SE";
+			config.defaultMaxPtmCount = 3;
+			config.defaultVariablePtms = {{"!", "NQ"}, {"~", "M"}};
+			break;
+		case ProNovoConfig::Profile::Sip:
+			config.searchType = "SIP";
+			config.searchName = "SIP";
+			config.defaultMaxPtmCount = 0;
+			config.deductionMinValue = 0.005;
+			config.deductionFold = 4.0;
+			break;
+		default:
+			throw std::invalid_argument("Unknown built-in Sipros profile.");
+		}
+		config.maxPtmCount = config.defaultMaxPtmCount;
+		config.variablePtms = config.defaultVariablePtms;
+		return config;
+	}
+};
+
+BuiltInConfig activeConfig;
+bool configLoaded = false;
+
+bool supportedSipTarget(char sipAtom,
+						int &massNumber,
+						int &isotopeIndex,
+						int &nominalShift)
+{
+	const char atom = static_cast<char>(
+		std::toupper(static_cast<unsigned char>(sipAtom)));
+	switch (atom)
+	{
+	case 'C':
+		massNumber = 13;
+		isotopeIndex = 1;
+		nominalShift = 1;
+		return true;
+	case 'H':
+		massNumber = 2;
+		isotopeIndex = 1;
+		nominalShift = 1;
+		return true;
+	case 'N':
+		massNumber = 15;
+		isotopeIndex = 1;
+		nominalShift = 1;
+		return true;
+	case 'O':
+		massNumber = 18;
+		isotopeIndex = 2;
+		nominalShift = 2;
+		return true;
+	case 'S':
+		massNumber = 34;
+		isotopeIndex = 2;
+		nominalShift = 2;
+		return true;
+	default:
+		return false;
+	}
+}
+
+struct ChemistryBuildState
+{
+	Isotopologue isotopologue;
+	std::vector<std::string> residueNames;
+	std::vector<double> residueMasses;
+	double terminusMassN = 0.0;
+	double terminusMassC = 0.0;
+	std::vector<std::vector<double>> naturalProbabilities;
+};
+
+bool buildChemistryState(const BuiltInConfig &config,
+						 ChemistryBuildState &state,
+						 std::string &error)
+{
+	if (!state.isotopologue.setupIsotopologue(
+			config.residues, config.atoms, config.atomNames))
+	{
+		error = "Failed to build compiled residue isotope distributions.";
+		return false;
+	}
+	if (!state.isotopologue.getSingleResidueMostAbundantMasses(
+			state.residueNames,
+			state.residueMasses,
+			state.terminusMassN,
+			state.terminusMassC))
+	{
+		error = "Failed to derive compiled residue masses.";
+		return false;
+	}
+	state.naturalProbabilities.clear();
+	for (const IsotopeDistribution &distribution :
+		 state.isotopologue.vNaturalAtomIsotopicDistribution)
+	{
+		state.naturalProbabilities.push_back(distribution.vProb);
 	}
 	return true;
 }
 
-int ProNovoConfig::resolveSipIsotopeIndex(const Isotopologue &iso,
-                                              char sipAtom,
-                                              int isotopeMassNumber)
-{
-    const char atom = static_cast<char>(
-        std::toupper(static_cast<unsigned char>(sipAtom)));
-    int expectedMassNumber = 0;
-    int expectedIsotopeIndex = -1;
-    int nominalShift = 0;
-    if (!supportedSipTarget(
-            atom, expectedMassNumber, expectedIsotopeIndex, nominalShift) ||
-        (isotopeMassNumber > 0 &&
-         isotopeMassNumber != expectedMassNumber))
-    {
-        throw std::runtime_error(
-            "Unsupported SIP isotope. Use C13,H2,N15,O18,S34.");
-    }
+} // namespace
 
-    const int atomIx = atomIndex(atom);
-    if (atomIx < 0 ||
-        atomIx >= static_cast<int>(
-            iso.vAtomIsotopicDistribution.size()))
-    {
-        throw std::runtime_error(
-            "Configured SIP atom distribution is not available.");
-    }
-    const auto &distribution =
-        iso.vAtomIsotopicDistribution[static_cast<size_t>(atomIx)];
-    if (expectedIsotopeIndex >=
-            static_cast<int>(distribution.vProb.size()) ||
-        expectedIsotopeIndex >=
-            static_cast<int>(distribution.vMass.size()) ||
-        static_cast<int>(std::lround(
-            distribution.vMass[
-                static_cast<size_t>(expectedIsotopeIndex)])) !=
-            expectedMassNumber)
-    {
-        throw std::runtime_error(
-            "Configured distribution does not contain the requested "
-            "supported SIP isotope.");
-    }
-    return expectedIsotopeIndex;
-}
+std::string ProNovoConfig::sFASTAFilename;
+std::string ProNovoConfig::sSearchType;
+std::string ProNovoConfig::sSearchName;
+int ProNovoConfig::iMaxPTMcount = 0;
+int ProNovoConfig::iMinPeptideLength = 0;
+int ProNovoConfig::iMaxPeptideLength = 0;
+std::string ProNovoConfig::sCleavageAfterResidues;
+std::string ProNovoConfig::sCleavageBeforeResidues;
+int ProNovoConfig::iMaxMissedCleavages = 0;
+bool ProNovoConfig::bTestStartRemoval = false;
+double ProNovoConfig::dMassAccuracyParentIon = 0.0;
+double ProNovoConfig::dMassAccuracyFragmentIon = 0.0;
+std::vector<int> ProNovoConfig::viParentMassWindows;
+std::vector<std::pair<double, double>> ProNovoConfig::vpPeptideMassWindowOffset;
+std::vector<std::pair<std::string, std::string>> ProNovoConfig::vpNeutralLossList;
+std::vector<std::string> ProNovoConfig::vsSingleResidueNames;
+std::vector<double> ProNovoConfig::vdSingleResidueMasses;
+double ProNovoConfig::dTerminusMassN = 0.0;
+double ProNovoConfig::dTerminusMassC = 0.0;
 
-void ProNovoConfig::setSipAbundance(Isotopologue &iso,
-                                      char sipAtom,
-                                      int isotopeIndex,
-                                      double sipPct)
-{
-    const char atom = static_cast<char>(
-        std::toupper(static_cast<unsigned char>(sipAtom)));
-    int massNumber = 0;
-    int expectedIsotopeIndex = -1;
-    int nominalShift = 0;
-    if (!supportedSipTarget(
-            atom, massNumber, expectedIsotopeIndex, nominalShift) ||
-        isotopeIndex != expectedIsotopeIndex)
-    {
-        throw std::runtime_error(
-            "Unsupported SIP isotope. Use C13,H2,N15,O18,S34.");
-    }
+Isotopologue ProNovoConfig::configIsotopologue;
+std::vector<std::vector<double>>
+	ProNovoConfig::naturalAtomIsotopeProbabilities;
 
-    const int atomIx = atomIndex(atom);
-    if (atomIx < 0 ||
-        atomIx >= static_cast<int>(
-            iso.vAtomIsotopicDistribution.size()) ||
-        isotopeIndex >= static_cast<int>(
-            iso.vAtomIsotopicDistribution[
-                static_cast<size_t>(atomIx)].vProb.size()))
-    {
-        throw std::runtime_error(
-            "Configured isotopic distribution for SIP target is not usable.");
-    }
+Options ProNovoConfig::options;
+IonInfo ProNovoConfig::ionInformation;
+int ProNovoConfig::iXcorrProcessingOffset = 75;
+PrecalcMasses ProNovoConfig::precalcMasses;
+double ProNovoConfig::dMaxMS2ScanMass = 0.0;
+double ProNovoConfig::dMaxPeptideMass = 0.0;
+AminoAcidMasses ProNovoConfig::pdAAMassFragment;
+double ProNovoConfig::dHighResInverseBinWidth = 1.0 / 0.02;
+double ProNovoConfig::dLowResInverseBinWidth = 1.0 / 1.0005;
+double ProNovoConfig::dHighResOneMinusBinOffset = 1.0;
+double ProNovoConfig::dLowResOneMinusBinOffset = 0.6;
+int ProNovoConfig::iMaxPercusorCharge = 0;
 
-    auto &probabilities =
-        iso.vAtomIsotopicDistribution[
-            static_cast<size_t>(atomIx)].vProb;
-    if (!averagine::changeAtomProbability(
-            probabilities, atom, sipPct / 100.0))
-    {
-        throw std::runtime_error(
-            "Configured isotopic distribution for SIP target is not usable.");
-    }
-    if (!refreshResidueDistributions(iso))
-        throw std::runtime_error(
-            "Failed to refresh residue isotopic distributions.");
-}
+double ProNovoConfig::ClassSizeMultiplier = 2.0;
+int ProNovoConfig::NumIntensityClasses = 3;
+int ProNovoConfig::minIntensityClassCount = static_cast<int>(
+	(std::pow(ClassSizeMultiplier, NumIntensityClasses) - 1.0) /
+	(ClassSizeMultiplier - 1.0));
+double ProNovoConfig::ticCutoffPercentage = 0.98;
+int ProNovoConfig::MaxPeakCount = 300;
+int ProNovoConfig::MinMatchedFragments = 5;
+double ProNovoConfig::minObservedMz = std::numeric_limits<double>::max();
+double ProNovoConfig::maxObservedMz = 0.0;
 
-double ProNovoConfig::getIsotopeAbundancePct(
-    const Isotopologue &iso,
-    char sipAtom,
-    int isotopeIndex)
-{
-    int massNumber = 0;
-    int expectedIsotopeIndex = -1;
-    int nominalShift = 0;
-    if (!supportedSipTarget(
-            sipAtom, massNumber, expectedIsotopeIndex, nominalShift) ||
-        isotopeIndex != expectedIsotopeIndex)
-    {
-        throw std::runtime_error(
-            "Unsupported SIP isotope. Use C13,H2,N15,O18,S34.");
-    }
-    const int atomIx = atomIndex(sipAtom);
-    if (atomIx < 0 ||
-        atomIx >= static_cast<int>(
-            iso.vAtomIsotopicDistribution.size()) ||
-        isotopeIndex >= static_cast<int>(
-            iso.vAtomIsotopicDistribution[
-                static_cast<size_t>(atomIx)].vProb.size()))
-    {
-        throw std::runtime_error(
-            "Configured isotope abundance is not available.");
-    }
-    return iso.vAtomIsotopicDistribution[
-               static_cast<size_t>(atomIx)]
-               .vProb[static_cast<size_t>(isotopeIndex)] *
-           100.0;
-}
+int ProNovoConfig::INTTOPKEEP = 10;
+int ProNovoConfig::iRank = 0;
 
-bool ProNovoConfig::applySipAbundance(char sipAtom,
-                                        double fraction)
-{
-    const char atom = static_cast<char>(
-        std::toupper(static_cast<unsigned char>(sipAtom)));
-    int massNumber = 0;
-    int isotopeIndex = -1;
-    int nominalShift = 0;
-    if (!supportedSipTarget(
-            atom, massNumber, isotopeIndex, nominalShift))
-        return false;
+std::string ProNovoConfig::SIPelement;
+double ProNovoConfig::deductionCoefficient = 0.0;
+double ProNovoConfig::neutronMass = 0.0;
 
-    const int atomIx = atomIndex(atom);
-    if (atomIx < 0 ||
-        atomIx >= static_cast<int>(
-            configIsotopologue.vAtomIsotopicDistribution.size()))
-        return false;
-
-    if (naturalAtomIsotopeProbabilities.size() ==
-        configIsotopologue.vAtomIsotopicDistribution.size())
-    {
-        for (size_t index = 0;
-             index < naturalAtomIsotopeProbabilities.size();
-             ++index)
-        {
-            configIsotopologue.vAtomIsotopicDistribution[index].vProb =
-                naturalAtomIsotopeProbabilities[index];
-        }
-    }
-
-    getSetSIPelement() = std::string(1, atom);
-    const bool updated = averagine::changeAtomProbability(
-        configIsotopologue.vAtomIsotopicDistribution[
-            static_cast<size_t>(atomIx)].vProb,
-        atom,
-        fraction);
-    if (!updated ||
-        !refreshResidueDistributions(configIsotopologue))
-        return false;
-
-    setDeductionCoefficient(false);
-    if (!calculatePeptideMassWindowOffset())
-        return false;
-    getSetSIPelement() = std::string(1, atom);
-    return true;
-}
+double AminoAcidMasses::dNULL = -1.0;
+double AminoAcidMasses::dERROR = -2.0;
 
 AminoAcidMasses::AminoAcidMasses()
+	: vdMasses(AminoAcidMassesSize, -1.0)
 {
-	vdMasses.clear();
-	vdMasses.resize(AminoAcidMassesSize, 0);
-	for (int i = 0; i < AminoAcidMassesSize; i++)
-	{
-		vdMasses.at(i) = dNULL;
-	}
 }
 
 void AminoAcidMasses::clear()
 {
-	for (int i = 0; i < AminoAcidMassesSize; i++)
-	{
-		vdMasses.at(i) = dNULL;
-	}
+	std::fill(vdMasses.begin(), vdMasses.end(), dNULL);
 }
 
 double AminoAcidMasses::end()
@@ -386,106 +520,891 @@ double AminoAcidMasses::end()
 	return dNULL;
 }
 
-double AminoAcidMasses::find(char _cAminoAcid)
+double AminoAcidMasses::find(char aminoAcid)
 {
-	/*
-	if (((int)_cAminoAcid) >= AminoAcidMassesSize ) {
-		cerr << "error AminoAcidMasses. " << endl;
-		exit(1);
-		return dERROR;
-	}*/
-	return vdMasses.at((int)_cAminoAcid);
+	return vdMasses.at(static_cast<unsigned char>(aminoAcid));
 }
 
-double AminoAcidMasses::operator[](char _cAminoAcid) const
+double AminoAcidMasses::operator[](char aminoAcid) const
 {
-	/*
-	if (((int)_cAminoAcid) >= AminoAcidMassesSize) {
-		cerr << "error AminoAcidMasses. " << endl;
-		exit(1);
-		return dERROR;
-	}*/
-	return vdMasses.at((int)_cAminoAcid);
+	return vdMasses.at(static_cast<unsigned char>(aminoAcid));
 }
 
-double &AminoAcidMasses::operator[](char _cAminoAcid)
+double &AminoAcidMasses::operator[](char aminoAcid)
 {
-	/*
-	if (_cAminoAcid >= AminoAcidMassesSize || _cAminoAcid < 0) {
-		cerr << "error AminoAcidMasses. " << endl;
-		exit(1);
-		return dERROR;
-	}*/
-	return vdMasses.at((int)_cAminoAcid);
+	return vdMasses.at(static_cast<unsigned char>(aminoAcid));
 }
 
-ProNovoConfig::ProNovoConfig()
+bool ProNovoConfig::refreshSessionMassCaches()
 {
-}
-
-bool ProNovoConfig::setFilename(const string &sConfigFileName)
-{
-	if (ProNovoConfigSingleton == NULL)
+	std::vector<std::string> residueNames;
+	std::vector<double> residueMasses;
+	double terminusMassN = 0.0;
+	double terminusMassC = 0.0;
+	if (!configIsotopologue.getSingleResidueMostAbundantMasses(
+			residueNames, residueMasses, terminusMassN, terminusMassC) ||
+		residueNames.size() != residueMasses.size() ||
+		activeConfig.atomNames.size() !=
+			configIsotopologue.vAtomIsotopicDistribution.size())
 	{
-		ProNovoConfigSingleton = new ProNovoConfig;
-	}
-
-	sFilename = sConfigFileName;
-
-	// Try loading the file.
-	if (!ProNovoConfigSingleton->parseConfigKeyValues())
-	{
-		cerr << "ERROR! Loading Configuration file" << endl;
 		return false;
 	}
 
-	if (!ProNovoConfigSingleton->getParameters())
+	AminoAcidMasses fragmentMasses;
+	for (size_t atomIndexValue = 0;
+		 atomIndexValue < activeConfig.atomNames.size(); ++atomIndexValue)
+	{
+		const IsotopeDistribution &distribution =
+			configIsotopologue.vAtomIsotopicDistribution[atomIndexValue];
+		if (distribution.vMass.empty() ||
+			distribution.vMass.size() != distribution.vProb.size())
+		{
+			return false;
+		}
+		const auto mostAbundant = std::max_element(
+			distribution.vProb.begin(), distribution.vProb.end());
+		const size_t isotopeIndex = static_cast<size_t>(
+			std::distance(distribution.vProb.begin(), mostAbundant));
+		const char atom = static_cast<char>(std::tolower(
+			static_cast<unsigned char>(activeConfig.atomNames[atomIndexValue])));
+		if (fragmentMasses.find(atom) != fragmentMasses.end())
+			return false;
+		fragmentMasses[atom] = distribution.vMass[isotopeIndex];
+	}
+	for (size_t index = 0; index < residueNames.size(); ++index)
+	{
+		if (residueNames[index].size() != 1)
+			return false;
+		const char residue = residueNames[index][0];
+		if (fragmentMasses.find(residue) != fragmentMasses.end())
+			return false;
+		fragmentMasses[residue] = residueMasses[index];
+	}
+
+	const double hydrogen = fragmentMasses.find('h');
+	const double carbon = fragmentMasses.find('c');
+	const double oxygen = fragmentMasses.find('o');
+	const double nitrogen = fragmentMasses.find('n');
+	if (hydrogen == fragmentMasses.end() ||
+		carbon == fragmentMasses.end() ||
+		oxygen == fragmentMasses.end() ||
+		nitrogen == fragmentMasses.end())
+	{
+		return false;
+	}
+
+	PrecalcMasses calculated{};
+	const double ammonia = hydrogen * 3.0 + nitrogen;
+	const double water = hydrogen * 2.0 + oxygen;
+	calculated.iMinus17LowRes = static_cast<int>(
+		ammonia * dLowResInverseBinWidth + dLowResOneMinusBinOffset);
+	calculated.iMinus17HighRes = static_cast<int>(
+		ammonia * dHighResInverseBinWidth + dHighResOneMinusBinOffset);
+	calculated.iMinus18LowRes = static_cast<int>(
+		water * dLowResInverseBinWidth + dLowResOneMinusBinOffset);
+	calculated.iMinus18HighRes = static_cast<int>(
+		water * dHighResInverseBinWidth + dHighResOneMinusBinOffset);
+	calculated.dNtermProton = PROTON_MASS;
+	// Tryptic terminal water is introduced by digestion solvent and therefore
+	// stays at its natural isotope distribution even under SIP enrichment.
+	calculated.dCtermOH2 = terminusMassN + terminusMassC;
+	calculated.dCtermOH2Proton =
+		calculated.dCtermOH2 + PROTON_MASS;
+	calculated.dCO = oxygen + carbon;
+	calculated.dNH2 = nitrogen + hydrogen * 2.0;
+	calculated.dNH3 = ammonia;
+	calculated.dCOminusH2 = calculated.dCO - hydrogen * 2.0;
+
+	vsSingleResidueNames = std::move(residueNames);
+	vdSingleResidueMasses = std::move(residueMasses);
+	dTerminusMassN = terminusMassN;
+	dTerminusMassC = terminusMassC;
+	pdAAMassFragment = std::move(fragmentMasses);
+	precalcMasses = calculated;
+	return true;
+}
+
+bool ProNovoConfig::load(Profile profile)
+{
+	configLoaded = false;
+	activeConfig = BuiltInConfig::create(profile);
+
+	sFASTAFilename.clear();
+	sSearchType = activeConfig.searchType;
+	sSearchName = activeConfig.searchName;
+	iMaxPTMcount = activeConfig.maxPtmCount;
+	iMinPeptideLength = activeConfig.minPeptideLength;
+	iMaxPeptideLength = activeConfig.maxPeptideLength;
+	sCleavageAfterResidues = activeConfig.cleavageAfter;
+	sCleavageBeforeResidues = activeConfig.cleavageBefore;
+	iMaxMissedCleavages = activeConfig.maxMissedCleavages;
+	bTestStartRemoval = activeConfig.removeFirstMethionine;
+	dMassAccuracyParentIon = activeConfig.parentToleranceDa;
+	dMassAccuracyFragmentIon = activeConfig.fragmentToleranceDa;
+	viParentMassWindows = activeConfig.parentMassWindows;
+	SIPelement = "C";
+	deductionCoefficient = 0.0;
+
+	minObservedMz = std::numeric_limits<double>::max();
+	maxObservedMz = 0.0;
+	dMaxMS2ScanMass = 0.0;
+	dMaxPeptideMass = 0.0;
+	iMaxPercusorCharge = 0;
+	options = Options{};
+	ionInformation = IonInfo{};
+
+	if (!configIsotopologue.setupIsotopologue(
+			activeConfig.residues,
+			activeConfig.atoms,
+			activeConfig.atomNames))
+	{
+		return false;
+	}
+	if (!refreshSessionMassCaches())
 	{
 		return false;
 	}
 
 	naturalAtomIsotopeProbabilities.clear();
 	for (const IsotopeDistribution &distribution :
-		 configIsotopologue.vAtomIsotopicDistribution)
+		 configIsotopologue.vNaturalAtomIsotopicDistribution)
 	{
-		naturalAtomIsotopeProbabilities.push_back(
-			distribution.vProb);
+		naturalAtomIsotopeProbabilities.push_back(distribution.vProb);
 	}
-
-	// parse neutral loss
-	ProNovoConfigSingleton->NeutralLoss();
-
-	// Compute the target-specific score coefficient and validate the
-	// configured element/isotope pair before any workflow starts.
-	try
+	vpNeutralLossList = neutralLossesFor(activeConfig.variablePtms);
+	configLoaded = true;
+	std::string chemistryError;
+	if (!validatePreparationChemistry(configIsotopologue, chemistryError))
 	{
-		ProNovoConfigSingleton->setDeductionCoefficient();
-	}
-	catch (const std::exception &error)
-	{
-		cerr << "ERROR: " << error.what() << endl;
+		std::cerr << "ERROR: " << chemistryError << std::endl;
+		configLoaded = false;
 		return false;
 	}
-	if (!ProNovoConfigSingleton->calculatePeptideMassWindowOffset())
+	setDeductionCoefficient();
+	if (!calculatePeptideMassWindowOffset())
 	{
+		configLoaded = false;
 		return false;
 	}
-
-	// If everything goes fine return 0.
 	return true;
 }
 
-bool ProNovoConfig::setWorkingDirectory(const string &sDirectoryName)
+void ProNovoConfig::setFASTAfilename(const std::string &fastaFilename)
 {
-	if (sDirectoryName[sDirectoryName.size() - 1] == ProNovoConfig::getSeparator())
+	sFASTAFilename = fastaFilename;
+}
+
+void ProNovoConfig::setMassAccuracy(double parentIonToleranceDa,
+									 double fragmentIonToleranceDa)
+{
+	dMassAccuracyParentIon = parentIonToleranceDa;
+	dMassAccuracyFragmentIon = fragmentIonToleranceDa;
+	calculatePeptideMassWindowOffset();
+}
+
+const std::vector<ProNovoConfig::PtmDefinition> &
+ProNovoConfig::getPtmCatalog()
+{
+	static const std::vector<PtmDefinition> fixedCamView = []
 	{
-		sWorkingDirectory = sDirectoryName;
-	}
-	else
+		std::vector<PtmDefinition> view = compiledPtmCatalog();
+		for (PtmDefinition &definition : view)
+		{
+			if (definition.token == "/")
+				definition.selectable = false;
+		}
+		return view;
+	}();
+	static const std::vector<PtmDefinition> naturalCysteineView = []
 	{
-		sWorkingDirectory = sDirectoryName + ProNovoConfig::getSeparator();
+		std::vector<PtmDefinition> view = compiledPtmCatalog();
+		for (PtmDefinition &definition : view)
+		{
+			if (definition.token == "/")
+				definition.selectable = true;
+		}
+		return view;
+	}();
+	const bool camEnabled =
+		!configLoaded || activeConfig.fixedPtmEnabled("carbamidomethyl");
+	return camEnabled ? fixedCamView : naturalCysteineView;
+}
+
+const std::vector<ProNovoConfig::FixedPtmDefinition> &
+ProNovoConfig::getFixedPtmCatalog()
+{
+	return compiledFixedPtmCatalog();
+}
+
+std::vector<std::string> ProNovoConfig::getEnabledFixedPtmNames()
+{
+	return configLoaded ? activeConfig.enabledFixedPtms
+						: std::vector<std::string>{};
+}
+
+bool ProNovoConfig::translatePsmPeptide(
+	const std::string &plainPeptide,
+	const std::string &modifiedPeptide,
+	std::string &translatedPeptide,
+	std::string &error)
+{
+	return translatePsmPeptide(
+		plainPeptide, modifiedPeptide, std::string(),
+		translatedPeptide, error);
+}
+
+bool ProNovoConfig::translatePsmPeptide(
+	const std::string &plainPeptide,
+	const std::string &modifiedPeptide,
+	const std::string &assignedModifications,
+	std::string &translatedPeptide,
+	std::string &error)
+{
+	translatedPeptide.clear();
+	error.clear();
+	if (!configLoaded)
+	{
+		error = "Built-in Sipros chemistry is not initialized.";
+		return false;
 	}
 
+	const std::string modified = trimText(modifiedPeptide);
+	const std::string source = modified.empty()
+								   ? trimText(plainPeptide)
+								   : modified;
+	if (source.empty())
+	{
+		error = "empty peptide";
+		return false;
+	}
+
+	const auto fixedEnabled = [&](const std::string &name)
+	{
+		return activeConfig.fixedPtmEnabled(name);
+	};
+	const auto unmodifiedResidueMass = [&](char residue)
+	{
+		double mass = getResidueMass(std::string(1, residue));
+		for (const FixedPtmDefinition &definition : compiledFixedPtmCatalog())
+		{
+			if (fixedEnabled(definition.name) &&
+				definition.sites.find(residue) != std::string::npos)
+			{
+				mass -= definition.externalMonoisotopicShift;
+			}
+		}
+		return mass;
+	};
+	const auto variableTokenForFixed = [&](
+		const FixedPtmDefinition &fixed) -> std::string
+	{
+		for (const PtmDefinition &definition : compiledPtmCatalog())
+		{
+			if (definition.sites == fixed.sites &&
+				std::abs(definition.externalMonoisotopicShift -
+						 fixed.externalMonoisotopicShift) <= 1e-6)
+			{
+				return definition.token;
+			}
+		}
+		return std::string();
+	};
+	const auto translateResidueModification = [&](
+		char residue,
+		const std::string &massText,
+		std::string &body) -> bool
+	{
+		double reportedMass = 0.0;
+		if (!parsePsmModificationMass(massText, reportedMass))
+		{
+			error = "invalid modification mass " + massText;
+			return false;
+		}
+
+		const double baseMass = unmodifiedResidueMass(residue);
+		for (const FixedPtmDefinition &definition : compiledFixedPtmCatalog())
+		{
+			if (definition.sites.find(residue) == std::string::npos)
+			{
+				continue;
+			}
+			const double matchError = reportedMassMatchError(
+				reportedMass, baseMass,
+				definition.externalMonoisotopicShift);
+			if (matchError < 0.0)
+				continue;
+			if (fixedEnabled(definition.name))
+				return true;
+			const std::string token = variableTokenForFixed(definition);
+			if (token.empty())
+			{
+				error = "fixed modification " + definition.name +
+						" has no compiled variable token";
+				return false;
+			}
+			body += token;
+			return true;
+		}
+
+		const PtmDefinition *best = nullptr;
+		double bestError = 0.0;
+		for (const PtmDefinition &definition : compiledPtmCatalog())
+		{
+			if (definition.sites.find(residue) == std::string::npos)
+				continue;
+			const double matchError = reportedMassMatchError(
+				reportedMass, baseMass,
+				definition.externalMonoisotopicShift);
+			if (matchError >= 0.0 &&
+				(best == nullptr || matchError < bestError))
+			{
+				best = &definition;
+				bestError = matchError;
+			}
+		}
+		if (best == nullptr)
+		{
+			error = std::string("unsupported modification ") + residue +
+					"[" + massText + "]";
+			return false;
+		}
+		body += best->token;
+		return true;
+	};
+	const auto translateNTermModification = [&](
+		const std::string &massText,
+		std::string &body) -> bool
+	{
+		double reportedMass = 0.0;
+		if (!parsePsmModificationMass(massText, reportedMass))
+		{
+			error = "invalid N-terminal modification mass " + massText;
+			return false;
+		}
+		if (std::abs(reportedMass - 42.010565) > 0.05 &&
+			std::abs(reportedMass - 43.0) > 0.5)
+		{
+			error = "unsupported N-terminal modification n[" + massText + "]";
+			return false;
+		}
+		for (const PtmDefinition &definition : compiledPtmCatalog())
+		{
+			if (definition.name == "acetylation")
+			{
+				body += definition.token;
+				return true;
+			}
+		}
+		error = "N-terminal acetylation is absent from compiled chemistry";
+		return false;
+	};
+
+	struct ParsedPeptide
+	{
+		std::vector<char> residues;
+		std::vector<std::string> nTermModifications;
+		std::vector<std::vector<std::string>> residueModifications;
+	};
+	ParsedPeptide parsed;
+	for (size_t index = 0; index < source.size();)
+	{
+		const char raw = source[index];
+		if (index == 0 && raw == 'n' && index + 1 < source.size() &&
+			source[index + 1] == '[')
+		{
+			const size_t right = source.find(']', index + 2);
+			if (right == std::string::npos)
+			{
+				error = "unterminated N-terminal modification";
+				return false;
+			}
+			parsed.nTermModifications.push_back(
+				source.substr(index + 2, right - index - 2));
+			index = right + 1;
+			continue;
+		}
+		if (std::isspace(static_cast<unsigned char>(raw)) != 0)
+		{
+			++index;
+			continue;
+		}
+		if (!std::isalpha(static_cast<unsigned char>(raw)))
+		{
+			error = "unsupported peptide character";
+			return false;
+		}
+
+		const char residue = static_cast<char>(
+			std::toupper(static_cast<unsigned char>(raw)));
+		parsed.residues.push_back(residue);
+		parsed.residueModifications.emplace_back();
+		++index;
+		while (index < source.size() && source[index] == '[')
+		{
+			const size_t right = source.find(']', index + 1);
+			if (right == std::string::npos)
+			{
+				error = "unterminated modification";
+				return false;
+			}
+			parsed.residueModifications.back().push_back(
+				source.substr(index + 1, right - index - 1));
+			index = right + 1;
+		}
+	}
+
+	if (parsed.residues.empty())
+	{
+		error = "empty peptide";
+		return false;
+	}
+
+	std::vector<std::string> assignedNTermModifications;
+	std::vector<std::vector<std::string>> assignedResidueModifications(
+		parsed.residues.size());
+	const std::string assignedText = trimText(assignedModifications);
+	for (size_t begin = 0; begin < assignedText.size();)
+	{
+		const size_t comma = assignedText.find(',', begin);
+		const size_t end = comma == std::string::npos
+						   ? assignedText.size()
+						   : comma;
+		const std::string entry = trimText(
+			assignedText.substr(begin, end - begin));
+		if (entry.empty())
+		{
+			error = "empty Assigned Modifications entry";
+			return false;
+		}
+
+		const std::string nTermPrefix = "N-term(";
+		const std::string lowerNTermPrefix = "n-term(";
+		if ((entry.compare(0, nTermPrefix.size(), nTermPrefix) == 0 ||
+			 entry.compare(0, lowerNTermPrefix.size(), lowerNTermPrefix) == 0) &&
+			entry.back() == ')')
+		{
+			const std::string massText = entry.substr(
+				nTermPrefix.size(),
+				entry.size() - nTermPrefix.size() - 1);
+			double mass = 0.0;
+			if (!parsePsmModificationMass(massText, mass))
+			{
+				error = "invalid Assigned Modifications entry: " + entry;
+				return false;
+			}
+			assignedNTermModifications.push_back(massText);
+		}
+		else
+		{
+			size_t positionEnd = 0;
+			while (positionEnd < entry.size() &&
+				   std::isdigit(static_cast<unsigned char>(entry[positionEnd])) != 0)
+			{
+				++positionEnd;
+			}
+			if (positionEnd == 0 || positionEnd + 3 > entry.size() ||
+				std::isalpha(static_cast<unsigned char>(entry[positionEnd])) == 0 ||
+				entry[positionEnd + 1] != '(' || entry.back() != ')')
+			{
+				error = "invalid Assigned Modifications entry: " + entry;
+				return false;
+			}
+
+			size_t position = 0;
+			try
+			{
+				position = static_cast<size_t>(
+					std::stoull(entry.substr(0, positionEnd)));
+			}
+			catch (const std::exception &)
+			{
+				error = "invalid Assigned Modifications position: " + entry;
+				return false;
+			}
+			const char residue = static_cast<char>(std::toupper(
+				static_cast<unsigned char>(entry[positionEnd])));
+			if (position == 0 || position > parsed.residues.size())
+			{
+				error = "Assigned Modifications position is outside the peptide: " +
+						entry;
+				return false;
+			}
+			if (parsed.residues[position - 1] != residue)
+			{
+				error = "Assigned Modifications residue does not match peptide at "
+						"position " +
+						std::to_string(position) + ": " + entry;
+				return false;
+			}
+			const std::string massText = entry.substr(
+				positionEnd + 2,
+				entry.size() - positionEnd - 3);
+			double mass = 0.0;
+			if (!parsePsmModificationMass(massText, mass))
+			{
+				error = "invalid Assigned Modifications entry: " + entry;
+				return false;
+			}
+			assignedResidueModifications[position - 1].push_back(massText);
+		}
+
+		if (comma == std::string::npos)
+			break;
+		begin = comma + 1;
+	}
+
+	std::string body;
+	std::vector<bool> assignedNTermUsed(
+		assignedNTermModifications.size(), false);
+	for (const std::string &modifiedMass : parsed.nTermModifications)
+	{
+		size_t assignedIndex = assignedNTermModifications.size();
+		for (size_t index = 0;
+			 index < assignedNTermModifications.size(); ++index)
+		{
+			if (!assignedNTermUsed[index])
+			{
+				assignedIndex = index;
+				break;
+			}
+		}
+		if (assignedIndex < assignedNTermModifications.size())
+		{
+			if (!translateNTermModification(
+					assignedNTermModifications[assignedIndex], body))
+				return false;
+			assignedNTermUsed[assignedIndex] = true;
+		}
+		else if (!translateNTermModification(modifiedMass, body))
+		{
+			return false;
+		}
+	}
+	for (size_t index = 0;
+		 index < assignedNTermModifications.size(); ++index)
+	{
+		if (!assignedNTermUsed[index] &&
+			!translateNTermModification(
+				assignedNTermModifications[index], body))
+		{
+			return false;
+		}
+	}
+
+	for (size_t residueIndex = 0;
+		 residueIndex < parsed.residues.size(); ++residueIndex)
+	{
+		const char residue = parsed.residues[residueIndex];
+		body.push_back(residue);
+		const auto &assignedAtResidue =
+			assignedResidueModifications[residueIndex];
+		std::vector<bool> assignedUsed(assignedAtResidue.size(), false);
+		for (const std::string &modifiedMassText :
+			 parsed.residueModifications[residueIndex])
+		{
+			double modifiedMass = 0.0;
+			if (!parsePsmModificationMass(modifiedMassText, modifiedMass))
+			{
+				error = "invalid modification mass " + modifiedMassText;
+				return false;
+			}
+			const double baseMass = unmodifiedResidueMass(residue);
+			std::vector<std::pair<size_t, double>> availableAssigned;
+			for (size_t assignedIndex = 0;
+				 assignedIndex < assignedAtResidue.size(); ++assignedIndex)
+			{
+				if (assignedUsed[assignedIndex])
+					continue;
+				double assignedMass = 0.0;
+				if (!parsePsmModificationMass(
+						assignedAtResidue[assignedIndex], assignedMass))
+					continue;
+				availableAssigned.push_back({assignedIndex, assignedMass});
+			}
+			if (availableAssigned.size() > 16)
+			{
+				error = "too many Assigned Modifications at one peptide residue";
+				return false;
+			}
+
+			// FragPipe may collapse several positioned deltas into one nominal
+			// bracketed mass. Match every nonempty subset so fixed CAM plus a
+			// variable PTM is reconciled once rather than duplicated or rejected.
+			std::vector<size_t> currentAssigned;
+			std::vector<size_t> bestAssigned;
+			double bestError = std::numeric_limits<double>::infinity();
+			const auto considerSubsets = [&](auto &&self,
+										 size_t offset,
+										 double shiftSum) -> void
+			{
+				if (offset == availableAssigned.size())
+				{
+					if (currentAssigned.empty())
+						return;
+					const double matchError = reportedMassMatchError(
+						modifiedMass, baseMass, shiftSum);
+					if (matchError >= 0.0 &&
+						(matchError + 1e-12 < bestError ||
+						 (std::abs(matchError - bestError) <= 1e-12 &&
+						  currentAssigned.size() > bestAssigned.size())))
+					{
+						bestError = matchError;
+						bestAssigned = currentAssigned;
+					}
+					return;
+				}
+				self(self, offset + 1, shiftSum);
+				currentAssigned.push_back(
+					availableAssigned[offset].first);
+				self(self, offset + 1,
+					 shiftSum + availableAssigned[offset].second);
+				currentAssigned.pop_back();
+			};
+			considerSubsets(considerSubsets, 0, 0.0);
+
+			if (!bestAssigned.empty())
+			{
+				for (size_t assignedIndex : bestAssigned)
+				{
+					if (!translateResidueModification(
+							residue, assignedAtResidue[assignedIndex], body))
+						return false;
+					assignedUsed[assignedIndex] = true;
+				}
+			}
+			else if (!translateResidueModification(
+					 residue, modifiedMassText, body))
+			{
+				return false;
+			}
+		}
+		for (size_t assignedIndex = 0;
+			 assignedIndex < assignedAtResidue.size(); ++assignedIndex)
+		{
+			if (!assignedUsed[assignedIndex] &&
+				!translateResidueModification(
+					residue, assignedAtResidue[assignedIndex], body))
+			{
+				return false;
+			}
+		}
+	}
+
+	translatedPeptide = "[" + body + "]";
+	return true;
+}
+
+bool ProNovoConfig::configureFixedPtms(
+	const std::vector<std::string> &selectors,
+	std::string &error)
+{
+	error.clear();
+	if (!configLoaded)
+	{
+		error = "Built-in Sipros configuration is not initialized.";
+		return false;
+	}
+	if (selectors.empty())
+		return true;
+
+	std::vector<std::string> normalizedSelectors;
+	normalizedSelectors.reserve(selectors.size());
+	for (const std::string &selector : selectors)
+		normalizedSelectors.push_back(normalizeSelector(selector));
+	if (std::find(normalizedSelectors.begin(), normalizedSelectors.end(),
+				  "none") != normalizedSelectors.end() &&
+		normalizedSelectors.size() != 1)
+	{
+		error = "Fixed PTM selector 'none' must be used alone.";
+		return false;
+	}
+
+	std::vector<std::string> candidateNames;
+	auto addName = [&](const std::string &name)
+	{
+		if (std::find(candidateNames.begin(), candidateNames.end(), name) ==
+			candidateNames.end())
+		{
+			candidateNames.push_back(name);
+		}
+	};
+	for (const std::string &selector : normalizedSelectors)
+	{
+		if (selector == "none")
+			continue;
+		if (selector == "default")
+		{
+			for (const std::string &name : activeConfig.defaultFixedPtms)
+				addName(name);
+			continue;
+		}
+		if (selector == "all")
+		{
+			for (const FixedPtmDefinition &definition : compiledFixedPtmCatalog())
+				addName(definition.name);
+			continue;
+		}
+
+		const FixedPtmDefinition *matched = nullptr;
+		for (const FixedPtmDefinition &definition : compiledFixedPtmCatalog())
+		{
+			if (normalizeSelector(definition.name) == selector)
+			{
+				matched = &definition;
+				break;
+			}
+		}
+		if (matched == nullptr)
+		{
+			error = "Unknown fixed PTM selector: " + selector;
+			return false;
+		}
+		addName(matched->name);
+	}
+
+	const bool candidateCamEnabled =
+		std::find(candidateNames.begin(), candidateNames.end(),
+				  "carbamidomethyl") != candidateNames.end();
+	if (candidateCamEnabled &&
+		activeConfig.variablePtms.find("/") != activeConfig.variablePtms.end())
+	{
+		error = "Cannot enable fixed carbamidomethylation while the variable "
+				"iaa-blocking PTM is enabled.";
+		return false;
+	}
+
+	BuiltInConfig candidate = activeConfig;
+	candidate.enabledFixedPtms = candidateNames;
+	candidate.rebuildResidues();
+	ChemistryBuildState chemistry;
+	if (!buildChemistryState(candidate, chemistry, error))
+		return false;
+	if (!validatePreparationChemistry(chemistry.isotopologue, error))
+		return false;
+
+	activeConfig = candidate;
+	// Isotopologue has immutable numeric policy members and is intentionally
+	// non-assignable. Rebuild the session object after the candidate has already
+	// been validated in isolation.
+	if (!configIsotopologue.setupIsotopologue(
+			activeConfig.residues,
+			activeConfig.atoms,
+			activeConfig.atomNames))
+	{
+		error = "Failed to install validated fixed-PTM chemistry.";
+		return false;
+	}
+	naturalAtomIsotopeProbabilities = chemistry.naturalProbabilities;
+	if (!refreshSessionMassCaches())
+	{
+		error = "Failed to refresh residue masses for fixed-PTM chemistry.";
+		return false;
+	}
+	setDeductionCoefficient();
+	return calculatePeptideMassWindowOffset();
+}
+
+bool ProNovoConfig::configureVariablePtms(
+	const std::vector<std::string> &selectors,
+	int maxPtmCountOverride,
+	std::string &error)
+{
+	error.clear();
+	if (!configLoaded)
+	{
+		error = "Built-in Sipros configuration is not initialized.";
+		return false;
+	}
+	if (maxPtmCountOverride < -1)
+	{
+		error = "Maximum PTM count must be -1 (unspecified) or nonnegative.";
+		return false;
+	}
+
+	if (selectors.empty())
+	{
+		if (maxPtmCountOverride >= 0)
+		{
+			activeConfig.maxPtmCount = maxPtmCountOverride;
+			iMaxPTMcount = maxPtmCountOverride;
+		}
+		return true;
+	}
+
+	std::vector<std::string> normalizedSelectors;
+	normalizedSelectors.reserve(selectors.size());
+	for (const std::string &selector : selectors)
+		normalizedSelectors.push_back(normalizeSelector(selector));
+	if (std::find(normalizedSelectors.begin(), normalizedSelectors.end(),
+				  "none") != normalizedSelectors.end() &&
+		normalizedSelectors.size() != 1)
+	{
+		error = "Variable PTM selector 'none' must be used alone.";
+		return false;
+	}
+
+	std::map<std::string, std::string> candidatePtms;
+	auto addDefinition = [&](const PtmDefinition &definition) -> bool
+	{
+		if (!definition.selectable)
+		{
+			error = "PTM '" + definition.name + "' cannot be selected with "
+					"the active fixed chemistry.";
+			return false;
+		}
+		candidatePtms[ptmSearchKey(definition.token)] = definition.sites;
+		return true;
+	};
+	const std::vector<PtmDefinition> activeCatalog = getPtmCatalog();
+	for (const std::string &selector : normalizedSelectors)
+	{
+		if (selector == "none")
+			continue;
+		if (selector == "default")
+		{
+			candidatePtms.insert(activeConfig.defaultVariablePtms.begin(),
+							 activeConfig.defaultVariablePtms.end());
+			continue;
+		}
+		if (selector == "all")
+		{
+			for (const PtmDefinition &definition : activeCatalog)
+			{
+				if (definition.selectable && !addDefinition(definition))
+					return false;
+			}
+			continue;
+		}
+
+		const PtmDefinition *matched = nullptr;
+		for (const PtmDefinition &definition : activeCatalog)
+		{
+			if (normalizeSelector(definition.name) == selector ||
+				normalizeSelector(definition.token) == selector)
+			{
+				matched = &definition;
+				break;
+			}
+		}
+		if (matched == nullptr)
+		{
+			error = "Unknown variable PTM selector: " + selector;
+			return false;
+		}
+		if (!addDefinition(*matched))
+			return false;
+	}
+
+	int candidateMaxPtmCount = activeConfig.defaultMaxPtmCount;
+	if (activeConfig.searchType == "SIP" && !candidatePtms.empty())
+		candidateMaxPtmCount = 3;
+	if (maxPtmCountOverride >= 0)
+		candidateMaxPtmCount = maxPtmCountOverride;
+
+	activeConfig.variablePtms = candidatePtms;
+	activeConfig.maxPtmCount = candidateMaxPtmCount;
+	iMaxPTMcount = candidateMaxPtmCount;
+	vpNeutralLossList = neutralLossesFor(candidatePtms);
 	return true;
 }
 
@@ -498,559 +1417,480 @@ char ProNovoConfig::getSeparator()
 #endif
 }
 
-bool ProNovoConfig::getAtomIsotopicComposition(char cAtom, vector<double> &vdAtomicMass, vector<double> &vdComposition)
+bool ProNovoConfig::getPTMinfo(std::map<std::string, std::string> &ptms)
 {
-
-	// clear the input vectors
-	vdAtomicMass.clear();
-	vdComposition.clear();
-
-	string sData;
-	istringstream issStream;
-	double dValue;
-	string sAtom = "X";
-	sAtom[0] = cAtom;
-
-	map<string, string> mapElementMasses;
-	if (!getConfigMasterKeyValue("[Peptide_Identification]Element_Masses", mapElementMasses))
-	{
-		cerr << "Error: cannot retrieve Element Masses." << endl;
+	if (!configLoaded)
 		return false;
-	}
-
-	map<string, string> mapElementPercent;
-	if (!getConfigMasterKeyValue("[Peptide_Identification]Element_Percent", mapElementPercent))
-	{
-		cerr << "Error: cannot retrieve Element Percent." << endl;
-		return false;
-	}
-
-	map<string, string>::iterator iterMass = mapElementMasses.find(sAtom);
-	if (iterMass == mapElementMasses.end())
-	{
-		cerr << "Error: cannot find element masses for element " << sAtom << endl;
-		return false;
-	}
-	sData = iterMass->second;
-	replaceDelimitor(sData, ',', '\t');
-	// clear end of file state
-	issStream.clear();
-	// re-set the string associated with issStream
-	issStream.str(sData);
-	while (!(issStream.eof()))
-	{
-		issStream >> dValue;
-		vdAtomicMass.push_back(dValue);
-	}
-
-	map<string, string>::iterator iterPercent = mapElementPercent.find(sAtom);
-	if (iterPercent == mapElementPercent.end())
-	{
-		cerr << "Error: cannot find element percent for element " << sAtom << endl;
-		return false;
-	}
-	sData = iterPercent->second;
-	replaceDelimitor(sData, ',', '\t');
-	// clear end of file state
-	issStream.clear();
-	// re-set the string associated with issStream
-	issStream.str(sData);
-	while (!(issStream.eof()))
-	{
-		issStream >> dValue;
-		vdComposition.push_back(dValue);
-	}
-
+	ptms = activeConfig.variablePtms;
 	return true;
 }
 
-bool ProNovoConfig::getResidueElementalComposition(string &sAtomicCompositionTable)
+std::string ProNovoConfig::getChemistryProfileId()
 {
-	sAtomicCompositionTable = "";
-
-	map<string, string> mapResidueTable;
-	if (!getConfigMasterKeyValue("[Peptide_Identification]Residue", mapResidueTable))
+	if (!configLoaded)
+		throw std::logic_error(
+			"Built-in Sipros configuration is not initialized.");
+	if (activeConfig.fixedPtmEnabled("carbamidomethyl"))
 	{
-		cerr << "Error: cannot retrieve Elemental composition of amino acid residues." << endl;
+		return kCamChemistryProfileId;
+	}
+	return kNaturalCysChemistryProfileId;
+}
+
+bool ProNovoConfig::configureChemistryProfileId(
+	const std::string &profileId,
+	std::string &error)
+{
+	error.clear();
+	if (!configLoaded)
+	{
+		error = "Built-in Sipros configuration is not initialized.";
 		return false;
 	}
 
-	map<string, string>::iterator iter;
-
-	for (iter = mapResidueTable.begin(); iter != mapResidueTable.end(); ++iter)
+	std::vector<std::string> fixedPtmSelectors;
+	if (profileId == kCamChemistryProfileId)
 	{
-		sAtomicCompositionTable.append(iter->first);
-		sAtomicCompositionTable.append(",\t");
-		sAtomicCompositionTable.append(iter->second);
-		sAtomicCompositionTable.append("\n");
+		fixedPtmSelectors = {"carbamidomethyl"};
 	}
-	replaceDelimitor(sAtomicCompositionTable, ',', '\t');
-	return true;
-}
-
-bool ProNovoConfig::getPTMinfo(map<string, string> &mPTMinfo)
-{
-	mPTMinfo.clear();
-	if (!getConfigMasterKeyValue("[Peptide_Identification]PTM", mPTMinfo))
+	else if (profileId == kNaturalCysChemistryProfileId)
 	{
-		cerr << "Error: cannot retrieve PTM information." << endl;
+		fixedPtmSelectors = {"none"};
+	}
+	else
+	{
+		error = "Unknown chemistry_profile_id '" + profileId +
+			"'. Regenerate the spectra library with the current Sipros build.";
+		return false;
+	}
+
+	if (!configureFixedPtms(fixedPtmSelectors, error))
+		return false;
+	if (getChemistryProfileId() != profileId)
+	{
+		error = "Compiled chemistry did not reproduce chemistry_profile_id '" +
+			profileId + "'.";
 		return false;
 	}
 	return true;
 }
 
-bool ProNovoConfig::getParameters()
+const std::vector<double> &
+ProNovoConfig::getNaturalAtomIsotopeProbabilities(size_t atomIndex)
 {
-
-	string sTemp;
-	istringstream issStream;
-
-	// Extract the elements inside <Peptide_Identification>
-	getConfigValue("[Peptide_Identification]Search_Type", sSearchType);
-	getConfigValue("[Peptide_Identification]Search_Name", sSearchName);
-
-	getConfigValue("[Peptide_Identification]FASTA_Database", sFASTAFilename);
-	getConfigValue("[Peptide_Identification]Fragmentation_Method", sFragmentationMethod);
-
-	if (sSearchType == "Regular")
+	if (!configLoaded || atomIndex >= naturalAtomIsotopeProbabilities.size())
 	{
-		getConfigValue("[Peptide_Identification]Max_PTM_Count", sTemp);
-		issStream.clear();
-		issStream.str(sTemp);
-		issStream >> iMaxPTMcount;
+		throw std::logic_error(
+			"Built-in Sipros configuration is not initialized for this atom.");
 	}
+	return naturalAtomIsotopeProbabilities[atomIndex];
+}
 
-	getConfigValue("[Peptide_Identification]Search_Mass_Tolerance_Parent_Ion", sTemp);
-	issStream.clear();
-	issStream.str(sTemp);
-	issStream >> dMassAccuracyParentIon;
+int ProNovoConfig::atomIndex(char sipAtom)
+{
+	if (!configLoaded)
+		return -1;
+	const char atom = static_cast<char>(
+		std::toupper(static_cast<unsigned char>(sipAtom)));
+	const size_t position = activeConfig.atomNames.find(atom);
+	return position == std::string::npos ? -1 : static_cast<int>(position);
+}
 
-	getConfigValue("[Peptide_Identification]Mass_Tolerance_Fragment_Ions", sTemp);
-	issStream.clear();
-	issStream.str(sTemp);
-	issStream >> dMassAccuracyFragmentIon;
-
-	getConfigValue("[Peptide_Identification]Parent_Mass_Windows", sTemp);
-	issStream.clear();
-	issStream.str(sTemp);
-	string sField;
-	viParentMassWindows.clear();
-	while (getline(issStream, sField, ','))
+bool ProNovoConfig::validatePreparationChemistry(
+	const Isotopologue &iso,
+	std::string &error)
+{
+	if (!configLoaded)
 	{
-		istringstream issField(sField);
-		int iWindow;
-		issField >> iWindow;
-		viParentMassWindows.push_back(iWindow);
+		error = "Built-in Sipros configuration is not initialized.";
+		return false;
 	}
-
-	// read Peptide_Length
-	getConfigValue("[Peptide_Identification]Minimum_Peptide_Length", sTemp);
-	issStream.clear();
-	issStream.str(sTemp);
-	issStream >> iMinPeptideLength;
-
-	getConfigValue("[Peptide_Identification]Maximum_Peptide_Length", sTemp);
-	issStream.clear();
-	issStream.str(sTemp);
-	issStream >> iMaxPeptideLength;
-
-	// read Cleavage_Rules
-	getConfigValue("[Peptide_Identification]Cleave_After_Residues", sCleavageAfterResidues);
-	getConfigValue("[Peptide_Identification]Cleave_Before_Residues", sCleavageBeforeResidues);
-
-	getConfigValue("[Peptide_Identification]Maximum_Missed_Cleavages", sTemp);
-	issStream.clear();
-	issStream.str(sTemp);
-	issStream >> iMaxMissedCleavages;
-
-	getConfigValue("[Peptide_Identification]Try_First_Methionine", sTemp);
-	if (sTemp == "TRUE" || sTemp == "True" || sTemp == "true" || sTemp == "T")
-		bTestStartRemoval = true;
-	else
-		bTestStartRemoval = false;
-
-	sElementList = "";
-	getConfigValue("[Peptide_Identification]Element_List", sTemp);
-	replaceDelimitor(sTemp, ',', '\t');
-	issStream.clear();
-	issStream.str(sTemp);
-	while (!(issStream.eof()))
+	const auto cysteine = iso.mResidueSourcedComposition.find("C");
+	const auto nTerm = iso.mResidueSourcedComposition.find("Nterm");
+	const auto cTerm = iso.mResidueSourcedComposition.find("Cterm");
+	const auto variableIaa = iso.mResidueSourcedComposition.find("/");
+	const auto sNitrosylation = iso.mResidueSourcedComposition.find("(");
+	if (cysteine == iso.mResidueSourcedComposition.end() ||
+		nTerm == iso.mResidueSourcedComposition.end() ||
+		cTerm == iso.mResidueSourcedComposition.end() ||
+		variableIaa == iso.mResidueSourcedComposition.end() ||
+		sNitrosylation == iso.mResidueSourcedComposition.end())
 	{
-		string sAtom;
-		issStream >> sAtom;
-		if (sAtom.size() == 1)
-			sElementList.append(sAtom);
-		else
-			cerr << "Warning: Ignore an invalid element at Element_List " << sAtom << endl;
+		error = "Built-in preparation chemistry lacks cysteine, peptide termini, "
+				"or conditional cysteine PTMs.";
+		return false;
 	}
-
-	// populate vpPeptideMassWindowOffset
-	calculatePeptideMassWindowOffset();
-
-	// setup configIsotopologue, this must be done after the other parameters have been configured.
-	string sResidueElementalComposition;
-	getResidueElementalComposition(sResidueElementalComposition);
-	configIsotopologue.setupIsotopologue(sResidueElementalComposition, sElementList);
-	configIsotopologue.getSingleResidueMostAbundantMasses(vsSingleResidueNames, vdSingleResidueMasses, dTerminusMassN, dTerminusMassC);
-
+	const sipros::AtomCounts expectedCysBio{3, 5, 1, 1, 0, 1};
+	const sipros::AtomCounts expectedCam{2, 3, 1, 1, 0, 0};
+	const sipros::AtomCounts expectedNitrosylBio{0, -1, 0, 0, 0, 0};
+	const sipros::AtomCounts expectedNitrosylReagent{0, 0, 1, 1, 0, 0};
+	const sipros::AtomCounts noAtoms{};
+	const sipros::AtomCounts expectedNTerm{0, 1, 0, 0, 0, 0};
+	const sipros::AtomCounts expectedCTerm{0, 1, 1, 0, 0, 0};
+	const sipros::AtomCounts cysteineReagent =
+		cysteine->second[sipros::IsotopeSource::ReagentNatural];
+	const bool fixedCamEnabled = cysteineReagent == expectedCam;
+	if (cysteine->second[sipros::IsotopeSource::Biosynthetic] != expectedCysBio ||
+		(cysteineReagent != expectedCam && cysteineReagent != noAtoms) ||
+		cysteine->second[sipros::IsotopeSource::DigestionSolvent] !=
+			noAtoms)
+	{
+		error = "Built-in preparation chemistry must model cysteine as "
+				"biosynthetic C3H5NOS with either zero or one reagent-natural "
+				"CAM C2H3NO group.";
+		return false;
+	}
+	const sipros::AtomCounts expectedVariableIaa =
+		fixedCamEnabled ? noAtoms : expectedCam;
+	sipros::AtomCounts expectedSnoReagent = expectedNitrosylReagent;
+	if (fixedCamEnabled)
+	{
+		for (size_t element = 0; element < expectedSnoReagent.size(); ++element)
+			expectedSnoReagent[element] -= expectedCam[element];
+	}
+	if (variableIaa->second[sipros::IsotopeSource::Biosynthetic] != noAtoms ||
+		variableIaa->second[sipros::IsotopeSource::ReagentNatural] !=
+			expectedVariableIaa ||
+		variableIaa->second[sipros::IsotopeSource::DigestionSolvent] != noAtoms ||
+		sNitrosylation->second[sipros::IsotopeSource::Biosynthetic] !=
+			expectedNitrosylBio ||
+		sNitrosylation->second[sipros::IsotopeSource::ReagentNatural] !=
+			expectedSnoReagent ||
+		sNitrosylation->second[sipros::IsotopeSource::DigestionSolvent] != noAtoms)
+	{
+		error = "Conditional variable IAA and S-nitrosylation formulas do not "
+				"match the active fixed-CAM state.";
+		return false;
+	}
+	if (nTerm->second[sipros::IsotopeSource::DigestionSolvent] !=
+			expectedNTerm ||
+		cTerm->second[sipros::IsotopeSource::DigestionSolvent] !=
+			expectedCTerm ||
+		nTerm->second[sipros::IsotopeSource::Biosynthetic] != noAtoms ||
+		nTerm->second[sipros::IsotopeSource::ReagentNatural] != noAtoms ||
+		cTerm->second[sipros::IsotopeSource::Biosynthetic] != noAtoms ||
+		cTerm->second[sipros::IsotopeSource::ReagentNatural] != noAtoms)
+	{
+		error = "Built-in preparation chemistry must source peptide-terminal "
+				"H2O exclusively from natural-abundance digestion solvent.";
+		return false;
+	}
+	const int phosphorusIndex = atomIndex('P');
+	if (phosphorusIndex < 0 ||
+		static_cast<size_t>(phosphorusIndex) >=
+			iso.vNaturalAtomIsotopicDistribution.size() ||
+		iso.vNaturalAtomIsotopicDistribution[static_cast<size_t>(phosphorusIndex)].vMass !=
+			std::vector<double>{30.973762} ||
+		iso.vNaturalAtomIsotopicDistribution[static_cast<size_t>(phosphorusIndex)].vProb !=
+			std::vector<double>{1.0})
+	{
+		error = "Built-in preparation chemistry must use real monoisotopic "
+				"phosphorus; pseudo-carbon element slots are forbidden.";
+		return false;
+	}
 	return true;
 }
 
-void ProNovoConfig::NeutralLoss()
+bool ProNovoConfig::refreshResidueDistributions(Isotopologue &iso)
 {
-	map<string, string> mPTMinfo;
-	map<string, string>::iterator iter;
-	pair<string, string> pCurrentPair;
-	string sCurrentWholePTM, sOriginalPTM, sChangedPTM;
-	vpNeutralLossList.clear();
-	getPTMinfo(mPTMinfo);
-	for (iter = mPTMinfo.begin(); iter != mPTMinfo.end(); iter++)
+	iso.vResidueIsotopicDistribution.clear();
+	for (const auto &residue : iso.mResidueSourcedComposition)
 	{
-		sCurrentWholePTM = iter->first;
-		if (sCurrentWholePTM.length() > 1)
-		{
-			if (sCurrentWholePTM.substr(1, 2) == "to")
-			{
-				// consider neutral loss
-				sOriginalPTM = sCurrentWholePTM.substr(0, 1);
-				// if it is like PTM{@to}, sChangedPTM is ""
-				sChangedPTM = (sCurrentWholePTM.length() == 3) ? "" : sCurrentWholePTM.substr(3, 1);
-				pCurrentPair = make_pair(sOriginalPTM, sChangedPTM);
-				vpNeutralLossList.push_back(pCurrentPair);
-			}
-			else
-			{
-				cerr << "illeagal ptm: " << sCurrentWholePTM << endl;
-				exit(0);
-			}
-		}
+		IsotopeDistribution distribution;
+		if (!iso.computeIsotopicDistribution(residue.second, distribution))
+			return false;
+		iso.vResidueIsotopicDistribution[residue.first] = distribution;
+	}
+	return true;
+}
+
+int ProNovoConfig::resolveSipIsotopeIndex(const Isotopologue &iso,
+											char sipAtom,
+											int isotopeMassNumber)
+{
+	const char atom = static_cast<char>(
+		std::toupper(static_cast<unsigned char>(sipAtom)));
+	int expectedMassNumber = 0;
+	int expectedIsotopeIndex = -1;
+	int nominalShift = 0;
+	if (!supportedSipTarget(atom, expectedMassNumber,
+							expectedIsotopeIndex, nominalShift) ||
+		(isotopeMassNumber > 0 && isotopeMassNumber != expectedMassNumber))
+	{
+		throw std::runtime_error(
+			"Unsupported SIP isotope. Use C13,H2,N15,O18,S34.");
+	}
+
+	const int index = atomIndex(atom);
+	if (index < 0 ||
+		index >= static_cast<int>(iso.vAtomIsotopicDistribution.size()))
+	{
+		throw std::runtime_error(
+			"Built-in SIP atom distribution is unavailable.");
+	}
+	const auto &distribution =
+		iso.vAtomIsotopicDistribution[static_cast<size_t>(index)];
+	if (expectedIsotopeIndex >= static_cast<int>(distribution.vProb.size()) ||
+		expectedIsotopeIndex >= static_cast<int>(distribution.vMass.size()) ||
+		static_cast<int>(std::lround(
+			distribution.vMass[static_cast<size_t>(expectedIsotopeIndex)])) !=
+			expectedMassNumber)
+	{
+		throw std::runtime_error(
+			"Built-in distribution does not contain the requested SIP isotope.");
+	}
+	return expectedIsotopeIndex;
+}
+
+void ProNovoConfig::setSipAbundance(Isotopologue &iso,
+									char sipAtom,
+									int isotopeIndex,
+									double sipPct)
+{
+	const char atom = static_cast<char>(
+		std::toupper(static_cast<unsigned char>(sipAtom)));
+	int massNumber = 0;
+	int expectedIsotopeIndex = -1;
+	int nominalShift = 0;
+	if (!supportedSipTarget(atom, massNumber,
+							expectedIsotopeIndex, nominalShift) ||
+		isotopeIndex != expectedIsotopeIndex)
+	{
+		throw std::runtime_error(
+			"Unsupported SIP isotope. Use C13,H2,N15,O18,S34.");
+	}
+	const int index = atomIndex(atom);
+	if (index < 0 ||
+		index >= static_cast<int>(iso.vAtomIsotopicDistribution.size()) ||
+		isotopeIndex >= static_cast<int>(
+			iso.vAtomIsotopicDistribution[static_cast<size_t>(index)].vProb.size()))
+	{
+		throw std::runtime_error(
+			"Built-in isotope distribution for SIP target is unusable.");
+	}
+
+	auto &probabilities =
+		iso.vAtomIsotopicDistribution[static_cast<size_t>(index)].vProb;
+	if (!averagine::changeAtomProbability(
+			probabilities, atom, sipPct / 100.0) ||
+		!refreshResidueDistributions(iso))
+	{
+		throw std::runtime_error(
+			"Failed to apply SIP abundance to built-in chemistry.");
 	}
 }
 
-double ProNovoConfig::getResidueMass(string sResidue)
+double ProNovoConfig::getIsotopeAbundancePct(
+	const Isotopologue &iso,
+	char sipAtom,
+	int isotopeIndex)
 {
-	unsigned int i;
-	double dResidueMass = 0.0;
-	if (sResidue == "|||")
+	int massNumber = 0;
+	int expectedIsotopeIndex = -1;
+	int nominalShift = 0;
+	if (!supportedSipTarget(sipAtom, massNumber,
+							expectedIsotopeIndex, nominalShift) ||
+		isotopeIndex != expectedIsotopeIndex)
 	{
-		dResidueMass = 0.0;
-		return dResidueMass;
+		throw std::runtime_error(
+			"Unsupported SIP isotope. Use C13,H2,N15,O18,S34.");
 	}
-	for (i = 0; i < vsSingleResidueNames.size(); ++i)
+	const int index = atomIndex(sipAtom);
+	if (index < 0 ||
+		index >= static_cast<int>(iso.vAtomIsotopicDistribution.size()) ||
+		isotopeIndex >= static_cast<int>(
+			iso.vAtomIsotopicDistribution[static_cast<size_t>(index)].vProb.size()))
 	{
-		if (vsSingleResidueNames[i] == sResidue)
-		{
-			dResidueMass = vdSingleResidueMasses[i];
-			return dResidueMass;
-		}
+		throw std::runtime_error(
+			"Built-in isotope abundance is unavailable.");
 	}
-
-	cerr << "ERROR: cannot find residue " << sResidue << endl;
-	return dResidueMass;
+	return iso.vAtomIsotopicDistribution[static_cast<size_t>(index)]
+			   .vProb[static_cast<size_t>(isotopeIndex)] *
+		   100.0;
 }
 
-void ProNovoConfig::replaceDelimitor(string &sLine, char cOldDelimitor, char cNewDelimitor)
+bool ProNovoConfig::selectSipTarget(char sipAtom,
+									int isotopeMassNumber,
+									std::string &error)
 {
-	int iLength = sLine.length();
-	for (int i = 0; i < iLength; ++i)
+	error.clear();
+	const char atom = static_cast<char>(
+		std::toupper(static_cast<unsigned char>(sipAtom)));
+	int expectedMassNumber = 0;
+	int isotopeIndex = -1;
+	int nominalShift = 0;
+	if (!configLoaded ||
+		!supportedSipTarget(atom, expectedMassNumber,
+							isotopeIndex, nominalShift) ||
+		isotopeMassNumber != expectedMassNumber)
 	{
-		if (sLine[i] == cOldDelimitor)
-			sLine[i] = cNewDelimitor;
-	}
-	return;
-}
-
-// parse the cfg file to populate mapConfigKeyValues
-bool ProNovoConfig::parseConfigKeyValues()
-{
-	bool bReVal = true;
-	string sline, sWhiteSpaces(" \t\f\v\n\r");
-	size_t poundPos, whitespacePos;
-	//    map<string,string>::iterator it;
-
-	ifstream config_stream(sFilename.c_str());
-	bReVal = config_stream.is_open();
-	mapConfigKeyValues.clear();
-	if (bReVal)
-	{
-		while (!config_stream.eof())
-		{
-			sline.clear();
-			getline(config_stream, sline);
-			poundPos = sline.find("#");
-			if (poundPos != string::npos)
-				sline.erase(poundPos);
-			whitespacePos = sline.find_last_not_of(sWhiteSpaces);
-			if (whitespacePos != string::npos)
-				sline.erase(whitespacePos + 1);
-			else
-				// if no character is non-whitespace, make string clear
-				// the previous version is sline.erase(0), but it can't be accepted by pgCC 11.9-0
-				// sline.erase(0);
-				sline.clear();
-			whitespacePos = sline.find_first_not_of(sWhiteSpaces);
-			if (whitespacePos != string::npos)
-				if (whitespacePos != 0)
-					sline.erase(0, whitespacePos);
-			if (sline.length() > 0)
-				parseConfigLine(sline);
-		}
-
-		//	for ( it=mapConfigKeyValues.begin() ; it != mapConfigKeyValues.end(); it++ )
-		//	    cout << (*it).first << " => " << (*it).second << endl;
-	}
-	else
-		cerr << "Can't open configure file " << sFilename << endl;
-	config_stream.clear();
-	config_stream.close();
-	return bReVal;
-}
-
-// get the value of a key;
-bool ProNovoConfig::getConfigValue(string sConfigKey, string &sConfigValue)
-{
-	sConfigValue = "";
-
-	map<string, string>::iterator iter = mapConfigKeyValues.find(sConfigKey);
-	if (iter != mapConfigKeyValues.end())
-	{
-		sConfigValue = iter->second;
-		return true;
-	}
-	else
-	{
-		sConfigValue = "";
-		cerr << "Warning: Cannot find parameter " << sConfigKey << " in the Config file." << endl;
+		error = "Unsupported SIP isotope. Use C13,H2,N15,O18,S34.";
 		return false;
 	}
-}
-
-// get a set of key-value pairs, given a master key
-bool ProNovoConfig::getConfigMasterKeyValue(string sMasterKey, map<string, string> &mapKeyValueSet)
-{
-	bool bReVal = true;
-	map<string, string>::iterator iter;
-	size_t iKeyLength;
-	string sCurrentCoreKey;
-	string sCurrentKey;
-
-	mapKeyValueSet.clear();
-	iKeyLength = sMasterKey.length();
-	for (iter = mapConfigKeyValues.begin(); iter != mapConfigKeyValues.end(); iter++)
+	try
 	{
-		// cout << (*it).first << " => " << (*it).second << endl;
-		sCurrentKey = (*iter).first;
-		if ((sCurrentKey.substr(0, iKeyLength + 1) == (sMasterKey + "{")) && (sCurrentKey.at(sCurrentKey.length() - 1) == '}') && (sCurrentKey.length() > (iKeyLength + 2)))
+		resolveSipIsotopeIndex(
+			configIsotopologue, atom, isotopeMassNumber);
+		SIPelement = std::string(1, atom);
+		setDeductionCoefficient();
+		if (!calculatePeptideMassWindowOffset())
 		{
-			sCurrentCoreKey = sCurrentKey.substr(iKeyLength + 1, sCurrentKey.length() - iKeyLength - 2);
-			mapKeyValueSet.insert(pair<string, string>(sCurrentCoreKey, (*iter).second));
+			error = "Cannot calculate precursor windows for the SIP isotope.";
+			return false;
 		}
 	}
-
-	return bReVal;
+	catch (const std::exception &exception)
+	{
+		error = exception.what();
+		return false;
+	}
+	return true;
 }
 
-// parse one line in Configfile
-bool ProNovoConfig::parseConfigLine(const std::string &sLine)
+bool ProNovoConfig::applySipAbundance(char sipAtom, double fraction)
 {
-	bool bReVal = true;
-	size_t equalPos, leftendPos, rightBeginPos; // position of "=", last nonwhitespace before "=", first nonwhitespace after "="
-	string sKey, sValue;
-	pair<map<string, string>::iterator, bool> ret; // if ret.second == false, key is not unique
-												   //    cout<<"beg!"<<sLine<<"!end"<<endl;
-	if ((sLine.at(0) == '[') && (sLine.at(sLine.length() - 1) == ']'))
-		sSectionName = sLine;
-	else
+	const char atom = static_cast<char>(
+		std::toupper(static_cast<unsigned char>(sipAtom)));
+	int massNumber = 0;
+	int isotopeIndex = -1;
+	int nominalShift = 0;
+	if (!configLoaded ||
+		!supportedSipTarget(atom, massNumber, isotopeIndex, nominalShift))
 	{
-		if (sSectionName == "")
-		{
-			cerr << "can't find the section name" << endl;
-			bReVal = false;
-		}
-		else
-		{
-			equalPos = sLine.find("=");
-			if (equalPos == string::npos)
-			{
-				cerr << "can't find = " << endl;
-				bReVal = false;
-			}
-			else
-			{
-				if ((equalPos == 0) || (equalPos == (sLine.length() - 1)))
-				{
-					cerr << "can't find key or value" << endl;
-					bReVal = false;
-				}
-				else
-				{
-					leftendPos = sLine.find_last_not_of(" \t\f\v\n\r", equalPos - 1);
-					rightBeginPos = sLine.find_first_not_of(" \t\f\v\n\r", equalPos + 1);
-					sKey = sLine.substr(0, leftendPos + 1);
-					sValue = sLine.substr(rightBeginPos);
-					// cout<<"beg!"<<sSectionName+sKey<<"!"<<sValue<<"!end"<<endl;
-					ret = mapConfigKeyValues.insert(pair<string, string>(sSectionName + sKey, sValue));
-					if (ret.second == false)
-					{
-						cerr << "Key " << sSectionName + sKey << " has existed with value of " << ret.first->second << endl;
-						bReVal = false;
-					}
-				}
-			}
-		}
+		return false;
 	}
-	return bReVal;
+	const int index = atomIndex(atom);
+	if (index < 0 ||
+		index >= static_cast<int>(configIsotopologue.vAtomIsotopicDistribution.size()) ||
+		naturalAtomIsotopeProbabilities.size() !=
+			configIsotopologue.vAtomIsotopicDistribution.size())
+	{
+		return false;
+	}
+
+	for (size_t atomIndexValue = 0;
+		 atomIndexValue < naturalAtomIsotopeProbabilities.size();
+		 ++atomIndexValue)
+	{
+		configIsotopologue.vAtomIsotopicDistribution[atomIndexValue].vProb =
+			naturalAtomIsotopeProbabilities[atomIndexValue];
+	}
+	SIPelement = std::string(1, atom);
+	if (!averagine::changeAtomProbability(
+			configIsotopologue.vAtomIsotopicDistribution[static_cast<size_t>(index)].vProb,
+			atom,
+			fraction) ||
+		!refreshResidueDistributions(configIsotopologue))
+	{
+		return false;
+	}
+	if (!refreshSessionMassCaches())
+	{
+		return false;
+	}
+	setDeductionCoefficient();
+	return calculatePeptideMassWindowOffset();
+}
+
+double ProNovoConfig::getResidueMass(std::string residue)
+{
+	if (residue == "|||")
+		return 0.0;
+	for (size_t index = 0; index < vsSingleResidueNames.size(); ++index)
+	{
+		if (vsSingleResidueNames[index] == residue)
+			return vdSingleResidueMasses[index];
+	}
+	std::cerr << "ERROR: cannot find residue " << residue << std::endl;
+	return 0.0;
 }
 
 bool ProNovoConfig::calculatePeptideMassWindowOffset()
 {
-	bool bReVal = true;
-	int i;
-	double dLastUpperBound = -1000, dLastLowerBound = -1000; // last range of acceptable parent mass
-	double dCurrentUpperBound, dCurrentLowerBound;
-
 	vpPeptideMassWindowOffset.clear();
-	sort(viParentMassWindows.begin(), viParentMassWindows.end());
-	for (i = 0; i < (int)viParentMassWindows.size(); i++)
+	std::sort(viParentMassWindows.begin(), viParentMassWindows.end());
+	double lastLower = 0.0;
+	double lastUpper = 0.0;
+	bool haveWindow = false;
+	for (int massWindow : viParentMassWindows)
 	{
-		dCurrentLowerBound = viParentMassWindows.at(i) * getNeutronMass() - dMassAccuracyParentIon;
-		dCurrentUpperBound = viParentMassWindows.at(i) * getNeutronMass() + dMassAccuracyParentIon;
-		if (dLastUpperBound < -100)
+		const double currentLower =
+			massWindow * getNeutronMass() - dMassAccuracyParentIon;
+		const double currentUpper =
+			massWindow * getNeutronMass() + dMassAccuracyParentIon;
+		if (!haveWindow)
 		{
-			dLastLowerBound = dCurrentLowerBound;
-			dLastUpperBound = dCurrentUpperBound;
+			lastLower = currentLower;
+			lastUpper = currentUpper;
+			haveWindow = true;
+		}
+		else if (currentLower <= lastUpper)
+		{
+			lastUpper = currentUpper;
 		}
 		else
 		{
-			if (dCurrentLowerBound <= dLastUpperBound)
-				dLastUpperBound = dCurrentUpperBound;
-			else
-			{
-				vpPeptideMassWindowOffset.push_back(pair<double, double>(dLastLowerBound, dLastUpperBound));
-				dLastLowerBound = dCurrentLowerBound;
-				dLastUpperBound = dCurrentUpperBound;
-			}
+			vpPeptideMassWindowOffset.push_back({lastLower, lastUpper});
+			lastLower = currentLower;
+			lastUpper = currentUpper;
 		}
 	}
-	if (dLastUpperBound > -100)
-		vpPeptideMassWindowOffset.push_back(pair<double, double>(dLastLowerBound, dLastUpperBound));
-
-	return bReVal;
+	if (haveWindow)
+		vpPeptideMassWindowOffset.push_back({lastLower, lastUpper});
+	return haveWindow;
 }
 
-bool ProNovoConfig::getPeptideMassWindows(double dPeptideMass, vector<pair<double, double>> &vpPeptideMassWindows)
+bool ProNovoConfig::getPeptideMassWindows(
+	double peptideMass,
+	std::vector<std::pair<double, double>> &peptideMassWindows)
 {
-	bool bReVal = true;
-	double dCurrentLowerBound, dCurrentUpperBound;
-	int i;
-	for (i = 0; i < (int)vpPeptideMassWindowOffset.size(); i++)
+	for (const auto &offset : vpPeptideMassWindowOffset)
 	{
-		dCurrentLowerBound = dPeptideMass + vpPeptideMassWindowOffset.at(i).first;
-		dCurrentUpperBound = dPeptideMass + vpPeptideMassWindowOffset.at(i).second;
-		vpPeptideMassWindows.push_back(pair<double, double>(dCurrentLowerBound, dCurrentUpperBound));
+		peptideMassWindows.push_back(
+			{peptideMass + offset.first, peptideMass + offset.second});
 	}
-	return bReVal;
+	return !vpPeptideMassWindowOffset.empty();
 }
 
-// compute deduction coefficient in score function
-// only suitbale for carbon and nitrogen SIP now
-void ProNovoConfig::setDeductionCoefficient(bool readConfigElement)
+void ProNovoConfig::setDeductionCoefficient()
 {
-    if (readConfigElement)
-    {
-        std::string configuredAtom;
-        if (!getConfigValue(
-                "[Stable_Isotope_Probing]SIP_Element",
-                configuredAtom))
-        {
-            throw std::runtime_error(
-                "Missing SIP_Element in configuration.");
-        }
-        getSetSIPelement() = configuredAtom;
-    }
+	if (!configLoaded)
+		throw std::logic_error("Built-in Sipros configuration is not initialized.");
+	if (SIPelement.size() != 1)
+		throw std::runtime_error("Unsupported SIP target.");
 
-    const std::string selected = getSetSIPelement();
-    if (selected.size() != 1)
-    {
-        throw std::runtime_error(
-            "Unsupported SIP isotope in configuration. "
-            "Use C13,H2,N15,O18,S34.");
-    }
-    const char atom = static_cast<char>(std::toupper(
-        static_cast<unsigned char>(selected[0])));
-    int massNumber = 0;
-    int isotopeIndex = -1;
-    int nominalShift = 0;
-    if (!supportedSipTarget(
-            atom, massNumber, isotopeIndex, nominalShift))
-    {
-        throw std::runtime_error(
-            "Unsupported SIP isotope in configuration. "
-            "Use C13,H2,N15,O18,S34.");
-    }
-
-    if (readConfigElement)
-    {
-        std::string configuredMassText;
-        if (!getConfigValue(
-                "[Stable_Isotope_Probing]SIP_Element_Isotope",
-                configuredMassText))
-        {
-            throw std::runtime_error(
-                "Missing SIP_Element_Isotope in configuration.");
-        }
-        size_t consumed = 0;
-        int configuredMassNumber = 0;
-        try
-        {
-            configuredMassNumber =
-                std::stoi(configuredMassText, &consumed);
-        }
-        catch (const std::exception &)
-        {
-            throw std::runtime_error(
-                "Invalid SIP_Element_Isotope in configuration: " +
-                configuredMassText);
-        }
-        if (consumed != configuredMassText.size() ||
-            configuredMassNumber != massNumber)
-        {
-            throw std::runtime_error(
-                "Unsupported SIP isotope in configuration: " +
-                std::string(1, atom) + configuredMassText +
-                ". Use C13,H2,N15,O18,S34.");
-        }
-        SIPisotopeMassNumber = configuredMassNumber;
-    }
-    else
-    {
-        SIPisotopeMassNumber = massNumber;
-    }
-    getSetSIPelement() = std::string(1, atom);
-
-    const int atomIx = atomIndex(atom);
-    const auto &distribution =
-        configIsotopologue.vAtomIsotopicDistribution[
-            static_cast<size_t>(atomIx)];
-    neutronMass =
-        (distribution.vMass[static_cast<size_t>(isotopeIndex)] -
-         distribution.vMass[0]) /
-        nominalShift;
-
-    string minValueStr;
-    string foldStr;
-    getConfigValue(
-        "[Stable_Isotope_Probing]minValue", minValueStr);
-    getSetMinValue() = stod(minValueStr);
-    getConfigValue(
-        "[Stable_Isotope_Probing]fold", foldStr);
-    getSetFold() = stod(foldStr);
-    deductionCoefficient =
-        -(getSetMinValue() +
-          getSetFold() *
-              std::pow(
-                  distribution.vProb[
-                      static_cast<size_t>(isotopeIndex)] -
-                      0.5,
-                  8));
+	const char atom = static_cast<char>(
+		std::toupper(static_cast<unsigned char>(SIPelement[0])));
+	int massNumber = 0;
+	int isotopeIndex = -1;
+	int nominalShift = 0;
+	if (!supportedSipTarget(atom, massNumber, isotopeIndex, nominalShift))
+	{
+		throw std::runtime_error(
+			"Unsupported SIP isotope. Use C13,H2,N15,O18,S34.");
+	}
+	const int index = atomIndex(atom);
+	if (index < 0 ||
+		index >= static_cast<int>(configIsotopologue.vAtomIsotopicDistribution.size()))
+	{
+		throw std::runtime_error("Built-in SIP target distribution is unavailable.");
+	}
+	const auto &distribution =
+		configIsotopologue.vAtomIsotopicDistribution[static_cast<size_t>(index)];
+	if (isotopeIndex >= static_cast<int>(distribution.vMass.size()) ||
+		isotopeIndex >= static_cast<int>(distribution.vProb.size()))
+	{
+		throw std::runtime_error("Built-in SIP target distribution is incomplete.");
+	}
+	SIPelement = std::string(1, atom);
+	neutronMass =
+		(distribution.vMass[static_cast<size_t>(isotopeIndex)] -
+		 distribution.vMass[0]) /
+		static_cast<double>(nominalShift);
+	deductionCoefficient =
+		-(activeConfig.deductionMinValue +
+		  activeConfig.deductionFold *
+			  std::pow(
+				  distribution.vProb[static_cast<size_t>(isotopeIndex)] - 0.5,
+				  8));
 }

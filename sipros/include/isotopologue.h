@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <iostream>
 #include "proNovoConfig.h"
-
 using namespace std;
 
 /**/
@@ -40,8 +39,11 @@ public:
 	Isotopologue();
 	~Isotopologue();
 
-	// setup all variables from configuration
-	bool setupIsotopologue(const string &sTable, const string &AtomNameInput);
+	// Initialize chemistry from the built-in, strongly typed profile.
+	bool setupIsotopologue(
+		const map<string, sipros::SourcedComposition> &residueAtomicComposition,
+		const vector<IsotopeDistribution> &atomIsotopicDistribution,
+		const string &atomNames);
 
 	// get the MostAbundant masses of  residues
 	bool getSingleResidueMostAbundantMasses(vector<string> &vsResidues, vector<double> &vdMostAbundantMasses, double &dTerminusMassN,
@@ -53,8 +55,11 @@ public:
 	double computeMonoisotopicMass(string sSequence);
 
 	// variables for this isotopologue
-	map<string, vector<int>> mResidueAtomicComposition;
+	map<string, sipros::SourcedComposition> mResidueSourcedComposition;
+	// Active distributions apply only to biosynthetic atoms. Natural-source
+	// atoms always use this immutable natural-distribution snapshot.
 	vector<IsotopeDistribution> vAtomIsotopicDistribution;
+	vector<IsotopeDistribution> vNaturalAtomIsotopicDistribution;
 	map<string, IsotopeDistribution> vResidueIsotopicDistribution;
 
 	// emass functions for IsotopeDistribution's arithmetic
@@ -71,12 +76,18 @@ public:
 	// compute isotoptic distribution for an amino acid sequence
 	bool computeIsotopicDistribution(string sSequence, IsotopeDistribution &myIsotopeDistribution);
 
-	// compute isotoptic distribution for a given atomic composition,
-	// which can be that of a residue's or a amino acid sequence's
-	bool computeIsotopicDistribution(vector<int> AtomicComposition, IsotopeDistribution &myIsotopeDistribution);
+	// Compute the full precursor distribution for Sipros' decorated peptide
+	// syntax, including terminal PTMs outside the square brackets.
+	bool computePeptideIsotopicDistribution(
+		string decoratedSequence,
+		IsotopeDistribution &myIsotopeDistribution);
 
-	// compute the atomic composition for an amino acid sequence
-	bool computeAtomicComposition(string sSequence, vector<int> &myAtomicComposition);
+	// Compute an isotope distribution while preserving atom provenance.
+	bool computeIsotopicDistribution(const sipros::SourcedComposition &composition,
+									 IsotopeDistribution &myIsotopeDistribution);
+
+	bool computeSourcedComposition(string sSequence,
+								  sipros::SourcedComposition &composition);
 
 	vector<IsotopeDistribution> &get_vAtomIsotopicDistribution()
 	{
@@ -110,7 +121,7 @@ private:
 	// the name of atoms
 	string AtomName;
 
-	// the number of natural CHONPS and enriched CHONPS
+	// Number of real CHONPS elements.
 	unsigned int AtomNumber;
 
 	

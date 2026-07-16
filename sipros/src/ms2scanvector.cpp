@@ -6,15 +6,13 @@
 #include <cstdlib>
 #include <utility>
 
-MS2ScanVector::MS2ScanVector(const string &sScanFilenameInput, const string &sOutputDirectory,
-							 const string &sConfigFilename)
+MS2ScanVector::MS2ScanVector(const string &sScanFilenameInput,
+							 const string &sOutputDirectory)
 {
 	unsigned int n;
 	vector<string> vsSingleResidueNames = ProNovoConfig::vsSingleResidueNames;
 	vector<double> vdSingleResidueMasses = ProNovoConfig::vdSingleResidueMasses;
 	sScanFilename = sScanFilenameInput;
-	sConfigFile = sConfigFilename;
-	// mass_w = ProNovoConfig::getParentMassWindows();
 	setOutputFile(sScanFilenameInput, sOutputDirectory);
 	for (n = 0; n < vsSingleResidueNames.size(); ++n)
 		mapResidueMass[vsSingleResidueNames[n][0]] = vdSingleResidueMasses[n];
@@ -151,7 +149,6 @@ bool MS2ScanVector::loadMassData()
 	{
 		fileNameSuffix = filenameStr.substr(dot + 1);
 	}
-	ProNovoConfig::getSetFileNameSuffix() = fileNameSuffix;
 
 	if (fileNameSuffix == "h5" || fileNameSuffix == "hdf5")
 	{
@@ -766,6 +763,21 @@ void MS2ScanVector::startProcessingMvhTask()
 
 void MS2ScanVector::startProcessingWdpSip()
 {
+	// SIP abundance changes the modal masses of biosynthetic residues and PTMs.
+	// Refresh the low-resolution fragment lookup for every abundance iteration.
+	mapResidueMass.clear();
+	for (size_t index = 0;
+		 index < ProNovoConfig::vsSingleResidueNames.size();
+		 ++index)
+	{
+		const std::string &name = ProNovoConfig::vsSingleResidueNames[index];
+		if (name.size() == 1 &&
+			index < ProNovoConfig::vdSingleResidueMasses.size())
+		{
+			mapResidueMass[name.front()] =
+				ProNovoConfig::vdSingleResidueMasses[index];
+		}
+	}
 
 	// Preprocessing all MS2 scans by multi-threading
 	preProcessAllMs2WdpSip();

@@ -1,34 +1,42 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
-#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <omp.h>
-#include <utility>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
+#include <H5Cpp.h>
 #include "SiprosWorkflows.h"
 #include "SiprosSearchRunner.h"
+#include "isotopologue.h"
 #include "proNovoConfig.h"
+
+namespace fs = std::filesystem;
 
 namespace
 {
+constexpr int kSpectraHdf5FormatVersion = 2;
+
 enum class SipAbundanceMode
 {
 	InputRow,
-	Config,
 	FixedUser
 };
 
 struct Args
 {
-	std::string configPath;
 	std::string inputPath;
 	std::string outputPath;
 	char sipAtom = '\0';
@@ -37,6 +45,7 @@ struct Args
 	double fixedSipAbundancePct = 0.0;
 	double probCutoff = 0.01;
 	int threads = 0;
+	std::vector<std::string> fixedPtmSelectors;
 };
 
 struct PsmRow
@@ -45,15 +54,22 @@ struct PsmRow
 	double sipPct = 0.0;
 	std::string peptide;
 	int precursorCharge = 1;
+	std::string retention = "0";
+	std::string proteins = "{UNKNOWN}";
+	double probability = 0.0;
+	double expectation = std::numeric_limits<double>::infinity();
+	double hyperscore = -std::numeric_limits<double>::infinity();
+	size_t order = 0;
 };
-
 
 void printUsage(const char *prog)
 {
 	std::cerr << "Usage: " << prog
-			  << " -c <config.cfg> -i <input.tsv|input.pin> -o <output.txt> [-a <SIP atom/isotope, e.g. C13,H2,O18,N15,S34>] [-b [pct]] [-p <prob cutoff>] [-t <threads>]\n";
-	std::cerr << "Required columns in input: (PSMId or SpecId), Peptide";
+			  << " -i <input.tsv|fragpipe_dir> -o <output.h5> -a <SIP atom/isotope, e.g. C13,H2,O18,N15,S34> [-b <pct>] [-p <prob cutoff>] [--fixed-ptm <name|default|none|all>] [-t <threads>]\n";
+	std::cerr << "Required columns in input: (PSMId, SpecId, or FragPipe Spectrum), Peptide";
 	std::cerr << " [MS2IsotopicAbundances required unless -b/--sip-abundance is set]\n";
+	std::cerr << "Directory input recursively combines files named psm.tsv. Output uses the search-spectra HDF5 schema.\n";
+	std::cerr << "--fixed-ptm is repeatable; omit it to use the compiled default (carbamidomethyl C).\n";
 }
 
 bool parseArgs(int argc, char **argv, Args &args)
@@ -66,16 +82,7 @@ bool parseArgs(int argc, char **argv, Args &args)
 			printUsage(argv[0]);
 			return false;
 		}
-		if (opt == "-c")
-		{
-			if (i + 1 >= argc)
-			{
-				std::cerr << "Missing value for option: " << opt << "\n";
-				return false;
-			}
-			args.configPath = argv[++i];
-		}
-		else if (opt == "-i")
+		if (opt == "-i")
 		{
 			if (i + 1 >= argc)
 			{
@@ -110,32 +117,21 @@ bool parseArgs(int argc, char **argv, Args &args)
 		}
 		else if (opt == "-b" || opt == "--sip-abundance")
 		{
-			args.sipAbundanceMode = SipAbundanceMode::Config;
 			if (i + 1 >= argc)
 			{
-				continue;
+				std::cerr << "Missing numeric value for option: " << opt << "\n";
+				return false;
 			}
-			const std::string abundanceSpec = sipros::TextUtils::trim(argv[i + 1]);
-			if (abundanceSpec.empty() || abundanceSpec[0] == '-')
-			{
-				continue;
-			}
-			const std::string abundanceSpecLower = sipros::TextUtils::toLower(abundanceSpec);
-			if (abundanceSpecLower == "config" || abundanceSpecLower == "cfg")
-			{
-				++i;
-				continue;
-			}
+			const std::string abundanceSpec = sipros::TextUtils::trim(argv[++i]);
 			try
 			{
 				args.fixedSipAbundancePct = std::stod(abundanceSpec);
 				args.sipAbundanceMode = SipAbundanceMode::FixedUser;
-				++i;
 			}
 			catch (const std::exception &)
 			{
 				std::cerr << "Invalid SIP abundance value: " << abundanceSpec
-						  << ". Use -b by itself or provide a percentage in [0, 100].\n";
+						  << ". Provide a percentage in [0, 100].\n";
 				return false;
 			}
 			if (args.fixedSipAbundancePct < 0.0 || args.fixedSipAbundancePct > 100.0)
@@ -161,6 +157,21 @@ bool parseArgs(int argc, char **argv, Args &args)
 				return false;
 			}
 		}
+		else if (opt == "--fixed-ptm")
+		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Missing value for option: " << opt << "\n";
+				return false;
+			}
+			const std::string selector = sipros::TextUtils::trim(argv[++i]);
+			if (selector.empty())
+			{
+				std::cerr << "Fixed PTM selector must not be empty.\n";
+				return false;
+			}
+			args.fixedPtmSelectors.push_back(selector);
+		}
 		else if (opt == "-t" || opt == "--threads")
 		{
 			if (i + 1 >= argc)
@@ -185,7 +196,7 @@ bool parseArgs(int argc, char **argv, Args &args)
 		}
 	}
 
-	if (args.configPath.empty() || args.inputPath.empty() || args.outputPath.empty())
+	if (args.inputPath.empty() || args.outputPath.empty() || args.sipAtom == '\0')
 	{
 		printUsage(argv[0]);
 		return false;
@@ -217,6 +228,55 @@ double parseFirstDouble(const std::string &s)
 		throw std::runtime_error("Invalid MS2IsotopicAbundances value: " + s);
 	}
 	return v;
+}
+
+bool parseDoubleField(const std::string &text, double &value)
+{
+	try
+	{
+		const std::string trimmed = sipros::TextUtils::trim(text);
+		if (trimmed.empty())
+		{
+			return false;
+		}
+		size_t consumed = 0;
+		value = std::stod(trimmed, &consumed);
+		return consumed > 0;
+	}
+	catch (const std::exception &)
+	{
+		return false;
+	}
+}
+
+bool parseIntField(const std::string &text, int &value)
+{
+	try
+	{
+		const std::string trimmed = sipros::TextUtils::trim(text);
+		if (trimmed.empty())
+		{
+			return false;
+		}
+		size_t consumed = 0;
+		value = std::stoi(trimmed, &consumed);
+		return consumed > 0;
+	}
+	catch (const std::exception &)
+	{
+		return false;
+	}
+}
+
+bool convertModifiedPeptide(const std::string &plainPeptide,
+							const std::string &modifiedPeptide,
+							const std::string &assignedModifications,
+							std::string &normalizedPeptide,
+							std::string &reason)
+{
+	return ProNovoConfig::translatePsmPeptide(
+		plainPeptide, modifiedPeptide, assignedModifications,
+		normalizedPeptide, reason);
 }
 
 std::string normalizePeptide(const std::string &raw)
@@ -251,18 +311,132 @@ std::string normalizePeptide(const std::string &raw)
 	return "[" + p + "]";
 }
 
-std::vector<PsmRow> readInputRows(const std::string &path, bool requireSipPct)
+size_t optionalColumn(const std::unordered_map<std::string, size_t> &columns,
+					  const std::vector<std::string> &names)
+{
+	for (const std::string &name : names)
+	{
+		const auto found = columns.find(name);
+		if (found != columns.end())
+		{
+			return found->second;
+		}
+	}
+	return std::string::npos;
+}
+
+std::vector<fs::path> collectInputFiles(const std::string &inputPath)
+{
+	const fs::path path(inputPath);
+	if (!fs::exists(path))
+	{
+		throw std::runtime_error("Input path does not exist: " + inputPath);
+	}
+
+	std::vector<fs::path> files;
+	if (fs::is_regular_file(path))
+	{
+		files.push_back(path);
+	}
+	else if (fs::is_directory(path))
+	{
+		for (const auto &entry : fs::recursive_directory_iterator(path))
+		{
+			if (entry.is_regular_file() && entry.path().filename() == "psm.tsv")
+			{
+				files.push_back(entry.path());
+			}
+		}
+	}
+	std::sort(files.begin(), files.end());
+	if (files.empty())
+	{
+		throw std::runtime_error("No input TSV files found under: " + inputPath);
+	}
+	return files;
+}
+
+std::vector<std::string> splitProteinList(const std::string &proteins)
+{
+	std::string inner = sipros::TextUtils::trim(proteins);
+	if (inner.size() >= 2 && inner.front() == '{' && inner.back() == '}')
+	{
+		inner = inner.substr(1, inner.size() - 2);
+	}
+	std::vector<std::string> output;
+	std::stringstream stream(inner);
+	std::string protein;
+	while (std::getline(stream, protein, ','))
+	{
+		protein = sipros::TextUtils::trim(protein);
+		if (!protein.empty())
+		{
+			output.push_back(protein);
+		}
+	}
+	return output;
+}
+
+std::string formatProteinList(const std::vector<std::string> &proteins)
+{
+	std::string output = "{";
+	for (const std::string &protein : proteins)
+	{
+		if (protein.empty())
+		{
+			continue;
+		}
+		if (output.size() > 1)
+		{
+			output += ',';
+		}
+		output += protein;
+	}
+	output += '}';
+	return output;
+}
+
+std::string mergeProteinLists(const std::string &left, const std::string &right)
+{
+	std::set<std::string> seen;
+	std::vector<std::string> merged;
+	for (const std::string &protein : splitProteinList(left))
+	{
+		if (seen.insert(protein).second)
+		{
+			merged.push_back(protein);
+		}
+	}
+	for (const std::string &protein : splitProteinList(right))
+	{
+		if (seen.insert(protein).second)
+		{
+			merged.push_back(protein);
+		}
+	}
+	return merged.empty() ? "{UNKNOWN}" : formatProteinList(merged);
+}
+
+std::string combineProteins(const std::string &primary, const std::string &mapped)
+{
+	return mergeProteinLists(primary, mapped);
+}
+
+void readInputFile(const fs::path &path,
+				   bool requireSipPct,
+				   std::vector<PsmRow> &rows,
+				   size_t &skippedUnsupportedMods)
 {
 	std::ifstream in(path);
 	if (!in)
 	{
-		throw std::runtime_error("Cannot open input file: " + path);
+		throw std::runtime_error("Cannot open input file: " + path.string());
 	}
 
 	std::string headerLine;
 	if (!std::getline(in, headerLine))
 	{
-		throw std::runtime_error("Input file is empty: " + path);
+		throw std::runtime_error("Input file is empty: " + path.string());
 	}
 	const std::vector<std::string> headers = sipros::TextUtils::splitTab(headerLine);
 	std::unordered_map<std::string, size_t> col;
@@ -271,48 +445,42 @@ std::vector<PsmRow> readInputRows(const std::string &path, bool requireSipPct)
 		col[sipros::TextUtils::trim(headers[i])] = i;
 	}
 
-	const auto getRequired = [&](const std::string &name) -> size_t
-	{
-		const auto it = col.find(name);
-		if (it == col.end())
-		{
-			throw std::runtime_error("Missing required column: " + name);
-		}
-		return it->second;
-	};
-
-	size_t idxPSMId = std::string::npos;
-	auto itPSMId = col.find("PSMId");
-	if (itPSMId != col.end())
-	{
-		idxPSMId = itPSMId->second;
-	}
-	else
-	{
-		auto itSpecId = col.find("SpecId");
-		if (itSpecId != col.end())
-		{
-			idxPSMId = itSpecId->second;
-		}
-	}
+	const size_t idxPSMId = optionalColumn(col, {"PSMId", "SpecId", "Spectrum"});
 	if (idxPSMId == std::string::npos)
 	{
-		throw std::runtime_error("Missing required ID column: PSMId or SpecId");
+		throw std::runtime_error(
+			"Missing required ID column PSMId, SpecId, or Spectrum in " + path.string());
 	}
-	const size_t idxPeptide = getRequired("Peptide");
+	const size_t idxPeptide = optionalColumn(col, {"Peptide"});
+	if (idxPeptide == std::string::npos)
+	{
+		throw std::runtime_error("Missing required column Peptide in " + path.string());
+	}
 	size_t idxMS2Pct = std::string::npos;
 	if (requireSipPct)
 	{
-		idxMS2Pct = getRequired("MS2IsotopicAbundances");
+		idxMS2Pct = optionalColumn(col, {"MS2IsotopicAbundances"});
+		if (idxMS2Pct == std::string::npos)
+		{
+			throw std::runtime_error(
+				"Missing required column MS2IsotopicAbundances in " + path.string());
+		}
 	}
-	size_t idxCharge = std::string::npos;
-	const auto itCharge = col.find("parentCharges");
-	if (itCharge != col.end())
-	{
-		idxCharge = itCharge->second;
-	}
+	const size_t idxCharge = optionalColumn(col, {"parentCharges", "Charge"});
+	const size_t idxModifiedPeptide = optionalColumn(col, {"Modified Peptide"});
+	const size_t idxAssignedModifications =
+		optionalColumn(col, {"Assigned Modifications"});
+	const size_t idxRetention = optionalColumn(
+		col, {"Retention", "RetentionTime", "retentionTime"});
+	const size_t idxProteins = optionalColumn(
+		col, {"Proteins", "ProteinNames", "proteinNames", "ProteinName",
+			  "proteinName", "Protein", "protein"});
+	const size_t idxMappedProteins = optionalColumn(col, {"Mapped Proteins"});
+	const size_t idxProbability = optionalColumn(col, {"Probability"});
+	const size_t idxExpectation = optionalColumn(col, {"Expectation"});
+	const size_t idxHyperscore = optionalColumn(col, {"Hyperscore"});
+	const bool fragpipeInput = col.find("Spectrum") != col.end();
 
-	std::vector<PsmRow> rows;
 	std::string line;
 	size_t lineNo = 1;
 	while (std::getline(in, line))
@@ -328,13 +496,44 @@ std::vector<PsmRow> readInputRows(const std::string &path, bool requireSipPct)
 		{
 			need = std::max(need, idxMS2Pct);
 		}
+		for (const size_t optional : {idxCharge, idxModifiedPeptide,
+									  idxAssignedModifications, idxRetention,
+									  idxProteins, idxMappedProteins, idxProbability,
+									  idxExpectation, idxHyperscore})
+		{
+			if (optional != std::string::npos)
+			{
+				need = std::max(need, optional);
+			}
+		}
 		if (f.size() <= need)
 		{
 			continue;
 		}
 		PsmRow row;
 		row.psmId = sipros::TextUtils::trim(f[idxPSMId]);
-		row.peptide = normalizePeptide(f[idxPeptide]);
+		if (fragpipeInput)
+		{
+			const std::string modified = idxModifiedPeptide == std::string::npos
+										 ? std::string()
+										 : f[idxModifiedPeptide];
+			const std::string assignedModifications =
+				idxAssignedModifications == std::string::npos
+					? std::string()
+					: f[idxAssignedModifications];
+			std::string reason;
+			if (!convertModifiedPeptide(
+					f[idxPeptide], modified, assignedModifications,
+					row.peptide, reason))
+			{
+				++skippedUnsupportedMods;
+				continue;
+			}
+		}
+		else
+		{
+			row.peptide = normalizePeptide(f[idxPeptide]);
+		}
 		if (row.psmId.empty() || row.peptide.empty())
 		{
 			continue;
@@ -345,69 +544,147 @@ std::vector<PsmRow> readInputRows(const std::string &path, bool requireSipPct)
 			{
 				row.sipPct = parseFirstDouble(f[idxMS2Pct]);
 			}
-			if (idxCharge != std::string::npos && f.size() > idxCharge)
+			if (idxCharge != std::string::npos)
 			{
-				const std::string chargeText = sipros::TextUtils::trim(f[idxCharge]);
-				if (!chargeText.empty())
+				int charge = 0;
+				if (parseIntField(f[idxCharge], charge) && charge > 0)
 				{
-					row.precursorCharge = std::max(1, std::stoi(chargeText));
+					row.precursorCharge = charge;
 				}
+			}
+			if (idxRetention != std::string::npos)
+			{
+				const std::string retention = sipros::TextUtils::trim(f[idxRetention]);
+				if (!retention.empty())
+				{
+					row.retention = retention;
+				}
+			}
+			const std::string primary = idxProteins == std::string::npos
+										? std::string()
+										: f[idxProteins];
+			const std::string mapped = idxMappedProteins == std::string::npos
+									   ? std::string()
+									   : f[idxMappedProteins];
+			row.proteins = combineProteins(primary, mapped);
+			if (idxProbability != std::string::npos)
+			{
+				(void)parseDoubleField(f[idxProbability], row.probability);
+			}
+			if (idxExpectation != std::string::npos)
+			{
+				(void)parseDoubleField(f[idxExpectation], row.expectation);
+			}
+			if (idxHyperscore != std::string::npos)
+			{
+				(void)parseDoubleField(f[idxHyperscore], row.hyperscore);
 			}
 		}
 		catch (const std::exception &)
 		{
 			if (requireSipPct)
 			{
-				std::cerr << "Skipping line " << lineNo << ": invalid MS2IsotopicAbundances or parentCharges.\n";
+				std::cerr << "Skipping " << path << ':' << lineNo
+						  << ": invalid MS2IsotopicAbundances or charge.\n";
 			}
 			else
 			{
-				std::cerr << "Skipping line " << lineNo << ": invalid parentCharges.\n";
+				std::cerr << "Skipping " << path << ':' << lineNo << ": invalid charge.\n";
 			}
 			continue;
 		}
+		row.order = rows.size();
 		rows.push_back(std::move(row));
+	}
+}
+
+std::vector<PsmRow> readInputRows(const std::string &inputPath,
+								  bool requireSipPct,
+								  size_t &inputFiles,
+								  size_t &skippedUnsupportedMods)
+{
+	const std::vector<fs::path> paths = collectInputFiles(inputPath);
+	inputFiles = paths.size();
+	std::vector<PsmRow> rows;
+	for (const fs::path &path : paths)
+	{
+		readInputFile(path, requireSipPct, rows, skippedUnsupportedMods);
 	}
 	return rows;
 }
 
-void appendChargeSeriesLine(std::ostream &out,
-							const std::vector<std::vector<double>> &masses,
-							const std::vector<std::vector<double>> &probs,
-							int charge,
-							double probCutoff)
+std::string peptideMassClassKey(const std::string &peptide)
 {
-	const double proton = ProNovoConfig::getProtonMass();
-	std::vector<std::pair<double, double>> peaks;
-	peaks.reserve(256);
-	for (size_t i = 0; i < masses.size(); ++i)
+	std::string key = peptide;
+	for (char &residue : key)
 	{
-		for (size_t j = 0; j < masses[i].size() && j < probs[i].size(); ++j)
+		if (residue == 'I')
 		{
-			if (probs[i][j] < probCutoff)
+			residue = 'L';
+		}
+	}
+	return key;
+}
+
+bool isBetterPsm(const PsmRow &candidate, const PsmRow &current)
+{
+	constexpr double epsilon = 1e-15;
+	if (candidate.probability > current.probability + epsilon)
+	{
+		return true;
+	}
+	if (std::abs(candidate.probability - current.probability) <= epsilon)
+	{
+		if (candidate.expectation < current.expectation - epsilon)
+		{
+			return true;
+		}
+		if (std::abs(candidate.expectation - current.expectation) <= epsilon)
+		{
+			if (candidate.hyperscore > current.hyperscore + epsilon)
 			{
-				continue;
+				return true;
 			}
-			const double mz = masses[i][j] / static_cast<double>(charge) + proton;
-			peaks.emplace_back(mz, probs[i][j]);
+			if (std::abs(candidate.hyperscore - current.hyperscore) <= epsilon)
+			{
+				return candidate.order < current.order;
+			}
 		}
 	}
+	return false;
+}
 
-	std::sort(peaks.begin(), peaks.end(),
-			  [](const std::pair<double, double> &a, const std::pair<double, double> &b)
-			  { return a.first < b.first; });
-
-	bool first = true;
-	for (const auto &peak : peaks)
+std::vector<PsmRow> selectBestRowsByPeptideCharge(const std::vector<PsmRow> &rows)
+{
+	std::unordered_map<std::string, size_t> bestIndex;
+	std::vector<PsmRow> selected;
+	selected.reserve(rows.size());
+	for (const PsmRow &row : rows)
 	{
-		if (!first)
+		const std::string key = peptideMassClassKey(row.peptide) + '\t' +
+								std::to_string(row.precursorCharge);
+		const auto found = bestIndex.find(key);
+		if (found == bestIndex.end())
 		{
-			out << ' ';
+			bestIndex[key] = selected.size();
+			selected.push_back(row);
+			continue;
 		}
-		out << std::setprecision(10) << peak.first << ' ' << std::setprecision(10) << peak.second;
-		first = false;
+
+		PsmRow &current = selected[found->second];
+		const std::string mergedProteins =
+			mergeProteinLists(current.proteins, row.proteins);
+		if (isBetterPsm(row, current))
+		{
+			current = row;
+		}
+		current.proteins = mergedProteins;
 	}
-	out << '\n';
+
+	std::sort(selected.begin(), selected.end(),
+			  [](const PsmRow &left, const PsmRow &right)
+			  { return left.order < right.order; });
+	return selected;
 }
 
 struct FragmentEntry
@@ -416,13 +693,49 @@ struct FragmentEntry
 	double intensity = 0.0;
 	char ionKind = 'b';
 	size_t position = 0;
-	int isMostAbundant = 0;
 };
 
-void appendPrecursorChargeLine(std::ostream &out,
-							   const IsotopeDistribution &dist,
+struct SpectrumRecord
+{
+	std::string psmId;
+	std::string retention;
+	int charge = 1;
+	std::string peptide;
+	std::string proteins;
+	double sipAbundancePct = 0.0;
+	std::vector<double> precursorMz;
+	std::vector<double> precursorIntensity;
+	std::vector<double> fragmentMz;
+	std::vector<double> theoreticalIntensity;
+	std::vector<char> ionKinds;
+	std::vector<uint64_t> ionPositions;
+};
+
+struct Hdf5OutputData
+{
+	std::vector<std::string> psmIds;
+	std::vector<std::string> retentions;
+	std::vector<int> charges;
+	std::vector<std::string> peptides;
+	std::vector<std::string> proteins;
+	std::vector<double> sipAbundancePct;
+	std::vector<double> precursorMz;
+	std::vector<double> precursorIntensity;
+	std::vector<uint64_t> precursorOffset;
+	std::vector<uint64_t> precursorCount;
+	std::vector<double> fragmentMz;
+	std::vector<double> theoreticalIntensity;
+	std::vector<char> ionKind;
+	std::vector<uint64_t> ionPosition;
+	std::vector<uint64_t> fragmentOffset;
+	std::vector<uint64_t> fragmentCount;
+};
+
+void buildPrecursorChargePeaks(const IsotopeDistribution &dist,
 							   int charge,
-							   double probCutoff)
+							   double probCutoff,
+							   std::vector<double> &mzValues,
+							   std::vector<double> &intensities)
 {
 	const double proton = ProNovoConfig::getProtonMass();
 	std::vector<std::pair<double, double>> peaks;
@@ -439,34 +752,27 @@ void appendPrecursorChargeLine(std::ostream &out,
 	std::sort(peaks.begin(), peaks.end(),
 			  [](const std::pair<double, double> &a, const std::pair<double, double> &b)
 			  { return a.first < b.first; });
-
-	for (size_t i = 0; i < peaks.size(); ++i)
+	double maximumIntensity = 0.0;
+	for (const auto &peak : peaks)
 	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << std::setprecision(10) << peaks[i].first;
+		maximumIntensity = std::max(maximumIntensity, peak.second);
 	}
-	out << '\n';
-
-	for (size_t i = 0; i < peaks.size(); ++i)
+	mzValues.reserve(peaks.size());
+	intensities.reserve(peaks.size());
+	for (const auto &peak : peaks)
 	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << std::setprecision(10) << peaks[i].second;
+		mzValues.push_back(peak.first);
+		intensities.push_back(
+			maximumIntensity > 0.0 ? peak.second / maximumIntensity : 0.0);
 	}
-	out << '\n';
 }
 
-void appendChargeOneFragmentBlock(std::ostream &out,
-								  const std::vector<std::vector<double>> &bMass,
-								  const std::vector<std::vector<double>> &bProb,
-								  const std::vector<std::vector<double>> &yMass,
-								  const std::vector<std::vector<double>> &yProb,
-								  double probCutoff)
+void buildChargeOneFragments(const std::vector<std::vector<double>> &bMass,
+							 const std::vector<std::vector<double>> &bProb,
+							 const std::vector<std::vector<double>> &yMass,
+							 const std::vector<std::vector<double>> &yProb,
+							 double probCutoff,
+							 SpectrumRecord &record)
 {
 	const double proton = ProNovoConfig::getProtonMass();
 	std::vector<FragmentEntry> entries;
@@ -482,10 +788,11 @@ void appendChargeOneFragmentBlock(std::ostream &out,
 			{
 				continue;
 			}
-			double localMaxProb = probs[i][0];
-			for (size_t j = 1; j < probs[i].size(); ++j)
+			const double maximumProbability = *std::max_element(
+				probs[i].begin(), probs[i].end());
+			if (!(maximumProbability > 0.0))
 			{
-				localMaxProb = std::max(localMaxProb, probs[i][j]);
+				continue;
 			}
 			for (size_t j = 0; j < masses[i].size() && j < probs[i].size(); ++j)
 			{
@@ -495,11 +802,10 @@ void appendChargeOneFragmentBlock(std::ostream &out,
 				}
 					FragmentEntry entry;
 					entry.mz = masses[i][j] + proton; // charge 1 only
-					entry.intensity = probs[i][j];
-					entry.ionKind = ionKind;
-					entry.position = i + 1;
-					entry.isMostAbundant = (std::abs(probs[i][j] - localMaxProb) <= 1e-12) ? 1 : 0;
-					entries.push_back(entry);
+				entry.intensity = probs[i][j] / maximumProbability;
+				entry.ionKind = ionKind;
+				entry.position = i + 1;
+				entries.push_back(entry);
 				}
 		}
 	};
@@ -510,66 +816,302 @@ void appendChargeOneFragmentBlock(std::ostream &out,
 	std::sort(entries.begin(), entries.end(),
 			  [](const FragmentEntry &a, const FragmentEntry &b)
 			  { return a.mz < b.mz; });
-
-	for (size_t i = 0; i < entries.size(); ++i)
+	record.fragmentMz.reserve(entries.size());
+	record.theoreticalIntensity.reserve(entries.size());
+	record.ionKinds.reserve(entries.size());
+	record.ionPositions.reserve(entries.size());
+	for (const FragmentEntry &entry : entries)
 	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << std::setprecision(10) << entries[i].mz;
+		record.fragmentMz.push_back(entry.mz);
+		record.theoreticalIntensity.push_back(entry.intensity);
+		record.ionKinds.push_back(entry.ionKind);
+		record.ionPositions.push_back(static_cast<uint64_t>(entry.position));
 	}
-	out << '\n';
-
-	for (size_t i = 0; i < entries.size(); ++i)
-	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << std::setprecision(10) << entries[i].intensity;
-	}
-	out << '\n';
-
-	for (size_t i = 0; i < entries.size(); ++i)
-	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << entries[i].ionKind;
-	}
-	out << '\n';
-
-	for (size_t i = 0; i < entries.size(); ++i)
-	{
-		if (i > 0)
-		{
-			out << ' ';
-		}
-		out << entries[i].position;
-	}
-	out << '\n';
-
 }
 
-bool buildPrecursorDistributionFromProductIons(Isotopologue &iso,
-											   const std::vector<std::vector<double>> &yMass,
-											   const std::vector<std::vector<double>> &yProb,
-											   const std::vector<std::vector<double>> &bMass,
-											   const std::vector<std::vector<double>> &bProb,
-											   IsotopeDistribution &precursorDist)
+H5::DataSpace createDataspace(size_t count)
 {
-	if (bMass.empty() || bProb.empty() || yMass.empty() || yProb.empty())
+	const hsize_t dimension = static_cast<hsize_t>(count);
+	return H5::DataSpace(1, &dimension);
+}
+
+H5::DataSpace createScalarDataspace()
+{
+	return H5::DataSpace(H5S_SCALAR);
+}
+
+H5::DSetCreatPropList createCompressedDatasetProperties(size_t count,
+												 size_t chunkSize = 262144)
+{
+	H5::DSetCreatPropList properties;
+	if (count > 0)
 	{
+		const hsize_t chunk = static_cast<hsize_t>(std::min(count, chunkSize));
+		properties.setChunk(1, &chunk);
+		properties.setShuffle();
+		properties.setDeflate(6);
+	}
+	return properties;
+}
+
+template <typename T>
+void writeVectorDataset(const H5::Group &group,
+						const char *name,
+						const H5::DataType &type,
+						const std::vector<T> &values)
+{
+	H5::DataSpace space = createDataspace(values.size());
+	H5::DataSet dataset = values.empty()
+							 ? group.createDataSet(name, type, space)
+							 : group.createDataSet(
+								   name, type, space,
+								   createCompressedDatasetProperties(values.size()));
+	if (!values.empty())
+	{
+		dataset.write(values.data(), type);
+	}
+}
+
+void writeZeroDoubleDataset(const H5::Group &group, const char *name, size_t count)
+{
+	H5::DataSpace space = createDataspace(count);
+	if (count == 0)
+	{
+		group.createDataSet(name, H5::PredType::NATIVE_DOUBLE, space);
+		return;
+	}
+	H5::DSetCreatPropList properties = createCompressedDatasetProperties(count);
+	const double fillValue = 0.0;
+	properties.setFillValue(H5::PredType::NATIVE_DOUBLE, &fillValue);
+	group.createDataSet(name, H5::PredType::NATIVE_DOUBLE, space, properties);
+}
+
+void writeStringDataset(const H5::Group &group,
+						const char *name,
+						const std::vector<std::string> &values)
+{
+	size_t width = 1;
+	for (const std::string &value : values)
+	{
+		width = std::max(width, value.size() + 1);
+	}
+	H5::StrType type(H5::PredType::C_S1, width);
+	type.setStrpad(H5T_STR_NULLTERM);
+	type.setCset(H5T_CSET_UTF8);
+
+	std::vector<char> flat(values.size() * width, '\0');
+	for (size_t i = 0; i < values.size(); ++i)
+	{
+		std::memcpy(flat.data() + i * width,
+					values[i].c_str(),
+					std::min(values[i].size(), width - 1));
+	}
+	H5::DataSpace space = createDataspace(values.size());
+	H5::DataSet dataset = values.empty()
+							 ? group.createDataSet(name, type, space)
+							 : group.createDataSet(
+								   name, type, space,
+								   createCompressedDatasetProperties(values.size()));
+	if (!values.empty())
+	{
+		dataset.write(flat.data(), type);
+	}
+}
+
+void writeStringAttribute(const H5::H5Object &object,
+						  const char *name,
+						  const std::string &value)
+{
+	H5::StrType type(H5::PredType::C_S1, std::max<size_t>(1, value.size() + 1));
+	type.setStrpad(H5T_STR_NULLTERM);
+	type.setCset(H5T_CSET_UTF8);
+	H5::DataSpace space = createScalarDataspace();
+	H5::Attribute attribute = object.createAttribute(name, type, space);
+	attribute.write(type, value.c_str());
+}
+
+template <typename T>
+void writeScalarAttribute(const H5::H5Object &object,
+						  const char *name,
+						  const H5::DataType &type,
+						  const T &value)
+{
+	H5::DataSpace space = createScalarDataspace();
+	H5::Attribute attribute = object.createAttribute(name, type, space);
+	attribute.write(type, &value);
+}
+
+Hdf5OutputData flattenRecords(const std::vector<SpectrumRecord> &records,
+							  const std::vector<char> &ok)
+{
+	Hdf5OutputData output;
+	size_t recordCount = 0;
+	size_t precursorValues = 0;
+	size_t fragmentValues = 0;
+	for (size_t i = 0; i < records.size() && i < ok.size(); ++i)
+	{
+		if (ok[i])
+		{
+			++recordCount;
+			precursorValues += records[i].precursorMz.size();
+			fragmentValues += records[i].fragmentMz.size();
+		}
+	}
+
+	output.psmIds.reserve(recordCount);
+	output.retentions.reserve(recordCount);
+	output.charges.reserve(recordCount);
+	output.peptides.reserve(recordCount);
+	output.proteins.reserve(recordCount);
+	output.sipAbundancePct.reserve(recordCount);
+	output.precursorOffset.reserve(recordCount);
+	output.precursorCount.reserve(recordCount);
+	output.fragmentOffset.reserve(recordCount);
+	output.fragmentCount.reserve(recordCount);
+	output.precursorMz.reserve(precursorValues);
+	output.precursorIntensity.reserve(precursorValues);
+	output.fragmentMz.reserve(fragmentValues);
+	output.theoreticalIntensity.reserve(fragmentValues);
+	output.ionKind.reserve(fragmentValues);
+	output.ionPosition.reserve(fragmentValues);
+
+	for (size_t i = 0; i < records.size() && i < ok.size(); ++i)
+	{
+		if (!ok[i])
+		{
+			continue;
+		}
+		const SpectrumRecord &record = records[i];
+		output.psmIds.push_back(record.psmId);
+		output.retentions.push_back(record.retention);
+		output.charges.push_back(record.charge);
+		output.peptides.push_back(record.peptide);
+		output.proteins.push_back(record.proteins);
+		output.sipAbundancePct.push_back(record.sipAbundancePct);
+		output.precursorOffset.push_back(static_cast<uint64_t>(output.precursorMz.size()));
+		output.precursorCount.push_back(static_cast<uint64_t>(record.precursorMz.size()));
+		output.fragmentOffset.push_back(static_cast<uint64_t>(output.fragmentMz.size()));
+		output.fragmentCount.push_back(static_cast<uint64_t>(record.fragmentMz.size()));
+		output.precursorMz.insert(output.precursorMz.end(),
+							  record.precursorMz.begin(), record.precursorMz.end());
+		output.precursorIntensity.insert(output.precursorIntensity.end(),
+									 record.precursorIntensity.begin(),
+									 record.precursorIntensity.end());
+		output.fragmentMz.insert(output.fragmentMz.end(),
+							 record.fragmentMz.begin(), record.fragmentMz.end());
+		output.theoreticalIntensity.insert(output.theoreticalIntensity.end(),
+									   record.theoreticalIntensity.begin(),
+									   record.theoreticalIntensity.end());
+		output.ionKind.insert(output.ionKind.end(),
+						  record.ionKinds.begin(), record.ionKinds.end());
+		output.ionPosition.insert(output.ionPosition.end(),
+							  record.ionPositions.begin(), record.ionPositions.end());
+	}
+	return output;
+}
+
+fs::path resolvedOutputPath(const std::string &outputPath)
+{
+	fs::path path(outputPath);
+	const std::string extension = sipros::TextUtils::toLower(path.extension().string());
+	if (extension != ".h5" && extension != ".hdf5")
+	{
+		path += ".h5";
+	}
+	return path;
+}
+
+bool writeSpectraHdf5(const fs::path &path,
+					  const Hdf5OutputData &data,
+					  char sipAtom,
+					  int sipIsotopeMassNumber,
+					  double targetSipAbundancePct,
+					  const std::string &abundanceSource,
+					  double probCutoff)
+{
+	try
+	{
+		if (!path.parent_path().empty())
+		{
+			fs::create_directories(path.parent_path());
+		}
+		H5::H5File file(path.string(), H5F_ACC_TRUNC);
+		const int formatVersion = kSpectraHdf5FormatVersion;
+		writeScalarAttribute(file, "format_version", H5::PredType::NATIVE_INT,
+							 formatVersion);
+		writeStringAttribute(file, "chemistry_profile_id",
+						 ProNovoConfig::getChemistryProfileId());
+		writeStringAttribute(file, "record_kind", "theoretical");
+		writeScalarAttribute(file, "target_sip_abundance_pct",
+							 H5::PredType::NATIVE_DOUBLE, targetSipAbundancePct);
+		writeStringAttribute(file, "sip_abundance_source", abundanceSource);
+		writeStringAttribute(file, "sip_atom", std::string(1, sipAtom));
+		writeScalarAttribute(file, "sip_isotope_mass_number",
+							 H5::PredType::NATIVE_INT, sipIsotopeMassNumber);
+		writeScalarAttribute(file, "prob_cutoff", H5::PredType::NATIVE_DOUBLE,
+							 probCutoff);
+		const double ppmTolerance = 0.0;
+		const uint64_t minimumMatchedEnvelopes = 0;
+		writeScalarAttribute(file, "ppm_tolerance", H5::PredType::NATIVE_DOUBLE,
+							 ppmTolerance);
+		writeScalarAttribute(file, "min_matched_envelopes",
+							 H5::PredType::NATIVE_UINT64, minimumMatchedEnvelopes);
+
+		H5::Group records = file.createGroup("records");
+		H5::Group precursor = file.createGroup("precursor");
+		H5::Group fragments = file.createGroup("fragments");
+		writeStringDataset(records, "psm_id", data.psmIds);
+		writeStringDataset(records, "retention", data.retentions);
+		writeVectorDataset(records, "charge", H5::PredType::NATIVE_INT, data.charges);
+		writeStringDataset(records, "peptide", data.peptides);
+		writeStringDataset(records, "proteins", data.proteins);
+		writeVectorDataset(records, "sip_abundance_pct", H5::PredType::NATIVE_DOUBLE,
+						   data.sipAbundancePct);
+
+		writeVectorDataset(precursor, "mz", H5::PredType::NATIVE_DOUBLE,
+						   data.precursorMz);
+		writeVectorDataset(precursor, "intensity", H5::PredType::NATIVE_DOUBLE,
+						   data.precursorIntensity);
+		writeVectorDataset(precursor, "offset", H5::PredType::NATIVE_UINT64,
+						   data.precursorOffset);
+		writeVectorDataset(precursor, "count", H5::PredType::NATIVE_UINT64,
+						   data.precursorCount);
+
+		writeVectorDataset(fragments, "mz", H5::PredType::NATIVE_DOUBLE,
+						   data.fragmentMz);
+		writeVectorDataset(fragments, "theoretical_intensity",
+						   H5::PredType::NATIVE_DOUBLE, data.theoreticalIntensity);
+		writeZeroDoubleDataset(fragments, "experimental_intensity",
+						   data.fragmentMz.size());
+		writeVectorDataset(fragments, "ion_kind", H5::PredType::NATIVE_CHAR,
+						   data.ionKind);
+		writeVectorDataset(fragments, "ion_position", H5::PredType::NATIVE_UINT64,
+						   data.ionPosition);
+		writeVectorDataset(fragments, "offset", H5::PredType::NATIVE_UINT64,
+						   data.fragmentOffset);
+		writeVectorDataset(fragments, "count", H5::PredType::NATIVE_UINT64,
+						   data.fragmentCount);
+		file.close();
+		return true;
+	}
+	catch (const H5::Exception &exception)
+	{
+		std::cerr << exception.getDetailMsg() << '\n';
 		return false;
 	}
-	const size_t bLast = bMass.size() - 1;
-	const size_t yFirst = 0;
-	IsotopeDistribution bLastDist(bMass[bLast], bProb[bLast]);
-	IsotopeDistribution y1Dist(yMass[yFirst], yProb[yFirst]);
-	precursorDist = iso.sum(bLastDist, y1Dist);
-	return true;
+	catch (const std::exception &exception)
+	{
+		std::cerr << exception.what() << '\n';
+		return false;
+	}
+}
+
+bool buildPrecursorDistribution(Isotopologue &iso,
+								const std::string &decoratedPeptide,
+								IsotopeDistribution &precursorDist)
+{
+	return iso.computePeptideIsotopicDistribution(
+		decoratedPeptide, precursorDist);
 }
 } // namespace
 
@@ -590,40 +1132,26 @@ int TheoreticalSpectraWorkflow::run(int argc, char **argv)
 		return 1;
 	}
 
-	if (!ProNovoConfig::setFilename(args.configPath))
+	if (!ProNovoConfig::load(ProNovoConfig::Profile::Sip))
 	{
-		std::cerr << "Could not load config file: " << args.configPath << "\n";
+		std::cerr << "Could not initialize the built-in SIP profile.\n";
 		return 1;
 	}
-
-	const std::string cfgAtom = ProNovoConfig::getSetSIPelement();
+	std::string fixedPtmError;
+	if (!ProNovoConfig::configureFixedPtms(
+			args.fixedPtmSelectors, fixedPtmError))
+	{
+		std::cerr << "Invalid fixed PTM selection: " << fixedPtmError << "\n";
+		return 1;
+	}
 	char sipAtom = args.sipAtom;
 	int sipIsotopeMassNumber = args.sipIsotopeMassNumber;
-	if (args.sipAbundanceMode == SipAbundanceMode::Config)
+	std::string chemistryError;
+	if (!ProNovoConfig::validatePreparationChemistry(
+			ProNovoConfig::configIsotopologue, chemistryError))
 	{
-		if (cfgAtom.size() != 1)
-		{
-			std::cerr << "Invalid SIP_Element in config. Pass -a explicitly.\n";
-			return 1;
-		}
-		if (args.sipAbundanceMode != SipAbundanceMode::InputRow && args.sipAtom != '\0')
-		{
-			std::cerr << "Ignoring -a/--sip-atom because -b/--sip-abundance uses SIP_Element from config.cfg.\n";
-		}
-		sipAtom = static_cast<char>(std::toupper(static_cast<unsigned char>(cfgAtom[0])));
-		sipIsotopeMassNumber =
-			ProNovoConfig::getSipIsotopeMassNumber();
-	}
-	else if (sipAtom == '\0')
-	{
-		if (cfgAtom.size() != 1)
-		{
-			std::cerr << "Invalid SIP_Element in config. Pass -a explicitly.\n";
-			return 1;
-		}
-		sipAtom = static_cast<char>(std::toupper(static_cast<unsigned char>(cfgAtom[0])));
-		sipIsotopeMassNumber =
-			ProNovoConfig::getSipIsotopeMassNumber();
+		std::cerr << chemistryError << "\n";
+		return 1;
 	}
 
 	if (ProNovoConfig::atomIndex(sipAtom) < 0)
@@ -643,23 +1171,7 @@ int TheoreticalSpectraWorkflow::run(int argc, char **argv)
 		return 1;
 	}
 
-	double fixedSipAbundancePct = 0.0;
-	if (args.sipAbundanceMode == SipAbundanceMode::Config)
-	{
-		try
-		{
-			fixedSipAbundancePct = ProNovoConfig::getIsotopeAbundancePct(ProNovoConfig::configIsotopologue, sipAtom, sipIsotopeIndex);
-		}
-		catch (const std::exception &ex)
-		{
-			std::cerr << ex.what() << "\n";
-			return 1;
-		}
-	}
-	else if (args.sipAbundanceMode == SipAbundanceMode::FixedUser)
-	{
-		fixedSipAbundancePct = args.fixedSipAbundancePct;
-	}
+	const double fixedSipAbundancePct = args.fixedSipAbundancePct;
 
 	std::cout << "SIP atom: " << sipAtom;
 	if (sipIsotopeMassNumber > 0)
@@ -670,10 +1182,6 @@ int TheoreticalSpectraWorkflow::run(int argc, char **argv)
 	if (args.sipAbundanceMode == SipAbundanceMode::InputRow)
 	{
 		std::cout << "SIP abundance source: input MS2IsotopicAbundances\n";
-	}
-	else if (args.sipAbundanceMode == SipAbundanceMode::Config)
-	{
-		std::cout << "SIP abundance source: " << args.configPath << " (" << fixedSipAbundancePct << "%)\n";
 	}
 	else
 	{
@@ -686,31 +1194,32 @@ int TheoreticalSpectraWorkflow::run(int argc, char **argv)
 	}
 
 	std::vector<PsmRow> rows;
+	size_t inputFileCount = 0;
+	size_t skippedUnsupportedMods = 0;
 	try
 	{
-		rows = readInputRows(args.inputPath, args.sipAbundanceMode == SipAbundanceMode::InputRow);
+		rows = readInputRows(args.inputPath,
+						 args.sipAbundanceMode == SipAbundanceMode::InputRow,
+						 inputFileCount,
+						 skippedUnsupportedMods);
 	}
 	catch (const std::exception &ex)
 	{
 		std::cerr << ex.what() << "\n";
 		return 1;
 	}
+	const size_t inputRowCount = rows.size();
+	rows = selectBestRowsByPeptideCharge(rows);
 
-	std::ofstream out(args.outputPath);
-	if (!out)
+	std::cout << "Input files: " << inputFileCount
+			  << "; PSM rows read: " << inputRowCount
+			  << "; retained peptide/charge rows: " << rows.size();
+	if (skippedUnsupportedMods > 0)
 	{
-		std::cerr << "Cannot open output file: " << args.outputPath << "\n";
-		return 1;
+		std::cout << "; unsupported modified peptides skipped: "
+				  << skippedUnsupportedMods;
 	}
-	out << "# Theoretical precursor peaks and theoretical monocharge fragment ion peaks \n";
-	out << "# Per PSM block format:\n";
-	out << "# > <PSM id>\n";
-	out << "# line1: precursor m/z values\n";
-	out << "# line2: precursor intensities\n";
-	out << "# line3: fragment m/z values\n";
-	out << "# line4: fragment intensities\n";
-	out << "# line5: fragment ion kinds (b or y)\n";
-	out << "# line6: fragment ion positions (1-based)\n";
+	std::cout << '\n';
 
 	Isotopologue baseIso = ProNovoConfig::configIsotopologue;
 	if (args.sipAbundanceMode == SipAbundanceMode::FixedUser)
@@ -725,9 +1234,8 @@ int TheoreticalSpectraWorkflow::run(int argc, char **argv)
 			return 1;
 		}
 	}
-	std::vector<std::string> blocks(rows.size());
+	std::vector<SpectrumRecord> records(rows.size());
 	std::vector<char> ok(rows.size(), 0);
-	size_t written = 0;
 
 	const size_t targetAtomIndex = static_cast<size_t>(
 		ProNovoConfig::atomIndex(sipAtom));
@@ -760,23 +1268,36 @@ int TheoreticalSpectraWorkflow::run(int argc, char **argv)
 					continue;
 				}
 				IsotopeDistribution precursorDist;
-				if (!buildPrecursorDistributionFromProductIons(localIso, yMass, yProb, bMass, bProb, precursorDist))
+				if (!buildPrecursorDistribution(
+						localIso, row.peptide, precursorDist))
 				{
 #pragma omp critical
 					{
-						std::cerr << "Skipping PSM " << row.psmId << ": precursor reconstruction from product ions failed.\n";
+						std::cerr << "Skipping PSM " << row.psmId << ": direct precursor convolution failed.\n";
 					}
 					continue;
 				}
 
-					std::ostringstream ss;
-					ss << "> " << row.psmId << '\n';
-					appendPrecursorChargeLine(ss, precursorDist, row.precursorCharge, args.probCutoff);
-					appendChargeOneFragmentBlock(ss, bMass, bProb, yMass, yProb, args.probCutoff);
-
-					blocks[static_cast<size_t>(i)] = ss.str();
-					ok[static_cast<size_t>(i)] = 1;
-				}
+				SpectrumRecord record;
+				record.psmId = row.psmId;
+				record.retention = row.retention;
+				record.charge = row.precursorCharge;
+				record.peptide = row.peptide;
+				record.proteins = row.proteins;
+				record.sipAbundancePct =
+					args.sipAbundanceMode == SipAbundanceMode::InputRow
+						? row.sipPct
+						: fixedSipAbundancePct;
+				buildPrecursorChargePeaks(precursorDist,
+								  row.precursorCharge,
+								  args.probCutoff,
+								  record.precursorMz,
+								  record.precursorIntensity);
+				buildChargeOneFragments(
+					bMass, bProb, yMass, yProb, args.probCutoff, record);
+				records[static_cast<size_t>(i)] = std::move(record);
+				ok[static_cast<size_t>(i)] = 1;
+			}
 			catch (const std::exception &ex)
 			{
 #pragma omp critical
@@ -787,16 +1308,28 @@ int TheoreticalSpectraWorkflow::run(int argc, char **argv)
 		}
 	}
 
-	for (size_t i = 0; i < blocks.size(); ++i)
+	const Hdf5OutputData output = flattenRecords(records, ok);
+	const fs::path outputPath = resolvedOutputPath(args.outputPath);
+	const double fileAbundance =
+		args.sipAbundanceMode == SipAbundanceMode::InputRow
+			? std::numeric_limits<double>::quiet_NaN()
+			: fixedSipAbundancePct;
+	const std::string abundanceSource =
+		args.sipAbundanceMode == SipAbundanceMode::InputRow
+			? "input-row"
+			: "fixed-user";
+	if (!writeSpectraHdf5(outputPath,
+						  output,
+						  sipAtom,
+						  sipIsotopeMassNumber,
+						  fileAbundance,
+						  abundanceSource,
+						  args.probCutoff))
 	{
-		if (!ok[i])
-		{
-			continue;
-		}
-		out << blocks[i];
-		++written;
+		return 1;
 	}
 
-	std::cerr << "Wrote theoretical spectra for " << written << " PSMs to " << args.outputPath << "\n";
+	std::cerr << "Wrote theoretical spectra for " << output.psmIds.size()
+			  << " PSMs to " << outputPath << "\n";
 	return 0;
 }

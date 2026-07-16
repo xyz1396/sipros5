@@ -33,6 +33,121 @@ static std::string formatElapsedSeconds(double seconds)
 	return out.str();
 }
 
+static std::string enabledPtmSummary()
+{
+	std::map<std::string, std::string> enabledPtms;
+	if (!ProNovoConfig::getPTMinfo(enabledPtms) || enabledPtms.empty())
+	{
+		return "none";
+	}
+
+	std::ostringstream out;
+	bool first = true;
+	std::set<std::string> reportedKeys;
+	const auto append = [&](const std::string &text)
+	{
+		if (!first)
+		{
+			out << ", ";
+		}
+		out << text;
+		first = false;
+	};
+	for (const ProNovoConfig::PtmDefinition &definition :
+		 ProNovoConfig::getPtmCatalog())
+	{
+		for (const auto &ptm : enabledPtms)
+		{
+			if (ptm.first.substr(0, 1) != definition.token)
+			{
+				continue;
+			}
+			std::ostringstream item;
+			item << definition.name << " [token " << std::quoted(definition.token)
+				 << ", sites " << ptm.second << "]";
+			append(item.str());
+			reportedKeys.insert(ptm.first);
+			break;
+		}
+	}
+	for (const auto &ptm : enabledPtms)
+	{
+		if (reportedKeys.find(ptm.first) == reportedKeys.end())
+		{
+			append(ptm.first + " [sites " + ptm.second + "]");
+		}
+	}
+	return out.str();
+}
+
+static std::string enabledFixedPtmSummary()
+{
+	const std::vector<std::string> enabled =
+		ProNovoConfig::getEnabledFixedPtmNames();
+	if (enabled.empty())
+	{
+		return "none";
+	}
+
+	std::ostringstream out;
+	for (size_t index = 0; index < enabled.size(); ++index)
+	{
+		if (index > 0)
+		{
+			out << ", ";
+		}
+		out << enabled[index];
+	}
+	return out.str();
+}
+
+static void printPtmCatalog(std::ostream &out)
+{
+	out << "Built-in fixed PTMs:\n";
+	out << "  " << std::left << std::setw(24) << "Name"
+		<< std::setw(10) << "Sites" << std::right << std::setw(14)
+		<< "Mass shift" << "  Notes\n";
+	for (const ProNovoConfig::FixedPtmDefinition &ptm :
+		 ProNovoConfig::getFixedPtmCatalog())
+	{
+		std::ostringstream notes;
+		notes << ptm.description;
+		if (ptm.profileDefault)
+		{
+			notes << " [profile default]";
+		}
+		out << "  " << std::left << std::setw(24) << ptm.name
+			<< std::setw(10) << ptm.sites << std::right << std::setw(14)
+			<< std::fixed << std::setprecision(6)
+			<< ptm.externalMonoisotopicShift << "  " << notes.str() << "\n";
+	}
+	out << "\n";
+
+	out << "Built-in variable PTMs:\n";
+	out << "  " << std::left << std::setw(36) << "Name"
+		<< std::setw(8) << "Token" << std::setw(10) << "Sites"
+		<< std::right << std::setw(14) << "Mass shift" << "  Notes\n";
+	for (const ProNovoConfig::PtmDefinition &ptm : ProNovoConfig::getPtmCatalog())
+	{
+		std::ostringstream notes;
+		notes << ptm.description;
+		if (ptm.regularDefault)
+		{
+			notes << " [Regular default]";
+		}
+		if (!ptm.selectable)
+		{
+			notes << " [not selectable]";
+		}
+		out << "  " << std::left << std::setw(36) << ptm.name
+			<< std::setw(8) << ptm.token << std::setw(10) << ptm.sites
+			<< std::right << std::setw(14) << std::fixed << std::setprecision(6)
+			<< ptm.externalMonoisotopicShift << "  " << notes.str() << "\n";
+	}
+	out << "\nUse names with --fixed-ptm and --ptm. Variable-PTM tokens are also\n"
+		<< "accepted when quoted for the shell.\n";
+}
+
 
 std::string TextUtils::toLower(std::string value)
 {
@@ -368,12 +483,12 @@ static sipPSM buildSipPsm(const std::string &sampleName,
 void SiprosSearchRunner::printUsage(std::ostream &out, const std::string &prog)
 {
 	out << "Usage:\n";
-	out << "  " << prog << " -f sample.h5 -c config.cfg -fasta proteins.fasta -o out "
+	out << "  " << prog << " -f sample.h5 -fasta proteins.fasta -o out "
 		<< "[-a C13 -b 1-5 -s 1] [--pin-label 1|-1] [--pin-output name.pin]\n";
-	out << "  " << prog << " -w hdf5_directory -c config.cfg -fasta proteins.fasta -o out "
-		<< "[-a C13 -b 1-5 -s 1] [--pin-label 1|-1]\n\n";
+	out << "  " << prog << " -w hdf5_directory -fasta proteins.fasta -o out "
+		<< "[-a C13 -b 1-5 -s 1] [--pin-label 1|-1]\n";
+	out << "  " << prog << " --list-ptms\n\n";
 	out << "Parameters:\n";
-	out << "  -c <config.cfg>             one base configuration file\n";
 	out << "  -f <sample.h5>              one Raxport HDF5 scan file\n";
 	out << "  -w <directory>              directory of Raxport HDF5 scan files\n";
 	out << "  -fasta <proteins.fasta>     one FASTA database; target/decoy orchestration is external\n";
@@ -382,8 +497,18 @@ void SiprosSearchRunner::printUsage(std::ostream &out, const std::string &prog)
 	out << "  -a <SIP atom/isotope>       SIP isotope: C13, H2, N15, O18, or S34\n";
 	out << "  -b <pct|lower-upper>        SIP percentage or inclusive range\n";
 	out << "  -s, --step <pct>            SIP percentage step\n";
+	out << "  --tolerance-ms1 <Da>        parent mass tolerance (default: 0.01 Da)\n";
+	out << "  --tolerance-ms2 <Da>        fragment mass tolerance (default: 0.01 Da)\n";
+	out << "  --fixed-ptm <name>          exact fixed-PTM selection; repeat to select several\n";
+	out << "                              special values: default, none, all\n";
+	out << "  --ptm <name>                exact variable-PTM selection; repeat to select several\n";
+	out << "                              use names when possible; special values: default, none, all\n";
+	out << "  --max-ptm-count <N>         maximum variable PTMs per peptide\n";
+	out << "  --list-ptms                 list built-in PTM names, tokens, and sites, then exit\n";
 	out << "  --pin-label <1|-1>          label written to PIN rows; default: 1\n";
 	out << "  --top-psms-per-scan <N>     final WDP-ranked PSMs retained per scan across SIP pct\n";
+	out << "\nWithout --fixed-ptm, compiled fixed CAM is used. Without --ptm, the compiled\n"
+		<< "profile defaults are used (Regular: oxidation and deamidation; SIP: none).\n";
 }
 
 bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
@@ -414,10 +539,6 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 		if (option == "-w")
 		{
 			args.workingDirectory = requireValue(i, option);
-		}
-		else if (option == "-c")
-		{
-			args.configFile = requireValue(i, option);
 		}
 		else if (option == "-f")
 		{
@@ -451,6 +572,68 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 				err << "Invalid SIP step: " << value << "\n";
 				return false;
 			}
+			args.sipStepProvided = true;
+		}
+		else if (option == "--tolerance-ms1" || option == "--tolerance-ms2")
+		{
+			double tolerance = 0.0;
+			const std::string value = requireValue(i, option);
+			if (valid && (!parseDouble(value, tolerance) || tolerance <= 0.0))
+			{
+				err << option << " must be a positive number in Da\n";
+				return false;
+			}
+			if (option == "--tolerance-ms1")
+			{
+				args.toleranceMs1Da = tolerance;
+				args.toleranceMs1Provided = true;
+			}
+			else
+			{
+				args.toleranceMs2Da = tolerance;
+				args.toleranceMs2Provided = true;
+			}
+		}
+		else if (option == "--fixed-ptm" || option == "--ptm")
+		{
+			const std::string value = requireValue(i, option);
+			if (!valid)
+			{
+				return false;
+			}
+			const std::string selector = TextUtils::trim(value);
+			if (selector.empty())
+			{
+				err << option << " requires a non-empty name";
+				if (option == "--ptm")
+				{
+					err << ", token";
+				}
+				err << ", or special value\n";
+				return false;
+			}
+			if (option == "--fixed-ptm")
+			{
+				args.fixedPtmSelectors.push_back(selector);
+			}
+			else
+			{
+				args.ptmSelectors.push_back(selector);
+			}
+		}
+		else if (option == "--max-ptm-count")
+		{
+			const std::string value = requireValue(i, option);
+			if (valid && (!parseInt(value, args.maxPtmCountOverride) ||
+				args.maxPtmCountOverride < 0))
+			{
+				err << "--max-ptm-count must be a non-negative integer\n";
+				return false;
+			}
+		}
+		else if (option == "--list-ptms")
+		{
+			args.listPtms = true;
 		}
 		else if (option == "--pin-label")
 		{
@@ -469,11 +652,6 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 				err << "--top-psms-per-scan must be a positive integer\n";
 				return false;
 			}
-		}
-		else if (option == "-g")
-		{
-			err << "-g config-directory input was removed; use -c plus -a/-b/-s for SIP percentage search\n";
-			return false;
 		}
 		else if ((option == "-h") || (option == "--help"))
 		{
@@ -500,9 +678,24 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 	{
 		return false;
 	}
-	if (args.configFile.empty())
+	if (args.listPtms)
 	{
-		err << "One base configuration file is required with -c\n";
+		printPtmCatalog(out);
+		args.showHelp = true;
+		return true;
+	}
+	if (args.fastaFile.empty())
+	{
+		err << "One FASTA database is required with -fasta\n";
+		return false;
+	}
+	const bool anySipControl = !args.sipElementSpec.empty() ||
+		!args.sipRangeSpec.empty() || args.sipStepProvided;
+	const bool allSipControls = !args.sipElementSpec.empty() &&
+		!args.sipRangeSpec.empty() && args.sipStepProvided;
+	if (anySipControl && !allSipControls)
+	{
+		err << "SIP search requires -a, -b, and -s together; no values are inferred\n";
 		return false;
 	}
 	if (args.workingDirectory.empty() && args.singleWorkingFile.empty())
@@ -559,37 +752,81 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 int SiprosSearchRunner::runScan(const std::string &scanFile,
 							  const DatabaseSearchArguments &args) const
 {
-	if (!ProNovoConfig::setFilename(args.configFile))
+	const bool directSipMode = !args.sipElementSpec.empty();
+	if (!ProNovoConfig::load(directSipMode
+			? ProNovoConfig::Profile::Sip
+			: ProNovoConfig::Profile::Regular))
 	{
-		std::cerr << "Could not load config file " << args.configFile << std::endl;
+		std::cerr << "Could not initialize the built-in Sipros profile.\n";
 		return 1;
 	}
-	if (!args.fastaFile.empty())
+	std::string ptmError;
+	if (!ProNovoConfig::configureFixedPtms(args.fixedPtmSelectors, ptmError))
 	{
-		ProNovoConfig::setFASTAfilename(args.fastaFile);
+		std::cerr << "Invalid fixed PTM selection: " << ptmError << "\n";
+		return 1;
+	}
+	if (!ProNovoConfig::configureVariablePtms(
+			args.ptmSelectors, args.maxPtmCountOverride, ptmError))
+	{
+		std::cerr << "Invalid PTM selection: " << ptmError << "\n";
+		return 1;
+	}
+	ProNovoConfig::setFASTAfilename(args.fastaFile);
+	if (args.toleranceMs1Provided || args.toleranceMs2Provided)
+	{
+		ProNovoConfig::setMassAccuracy(
+			args.toleranceMs1Provided
+				? args.toleranceMs1Da
+				: ProNovoConfig::getMassAccuracyParentIon(),
+			args.toleranceMs2Provided
+				? args.toleranceMs2Da
+				: ProNovoConfig::getMassAccuracyFragmentIon());
 	}
 	const int topKeep = args.topPsmsPerScan > 0 ? args.topPsmsPerScan : ProNovoConfig::INTTOPKEEP;
-	const bool configIsSip = ProNovoConfig::getSearchType() == "SIP";
-	const bool hasSipControls = !args.sipElementSpec.empty();
-	const bool directSipMode = hasSipControls || configIsSip;
 	const bool isDecoyLabel = args.pinLabel < 0;
+	char sipAtom = 0;
+	int sipIsotopeMassNumber = -1;
+	if (directSipMode)
+	{
+		if (!TextUtils::parseSipAtomSpec(
+				args.sipElementSpec, sipAtom, sipIsotopeMassNumber))
+		{
+			std::cerr << "Unsupported SIP element/isotope: "
+					  << args.sipElementSpec << "\n";
+			return 1;
+		}
+		std::string chemistryError;
+		if (!ProNovoConfig::validatePreparationChemistry(
+				ProNovoConfig::configIsotopologue, chemistryError))
+		{
+			std::cerr << chemistryError << "\n";
+			return 1;
+		}
+	}
 	fs::create_directories(args.outputDirectory);
 
-	MS2ScanVector scanVector(scanFile, args.outputDirectory, args.configFile);
+	MS2ScanVector scanVector(scanFile, args.outputDirectory);
 	if (directSipMode)
 	{
 		std::cout << "\nSipros FASTA SIP search\n";
 		std::cout << "  Scan file : " << scanFile << "\n";
 		std::cout << "  FASTA     : " << ProNovoConfig::getFASTAfilename() << (isDecoyLabel ? " (decoy)" : " (target)") << "\n";
-		std::cout << "  Config    : " << args.configFile << "\n";
+		std::cout << "  Profile   : built-in SIP\n";
 		std::cout << "  SIP       : " << args.sipElementSpec << " " << args.sipRangeSpec << " step " << args.sipStepPct << "\n";
+		std::cout << "  Fixed PTMs: " << enabledFixedPtmSummary() << "\n";
+		std::cout << "  Var PTMs  : " << enabledPtmSummary()
+				  << " (max " << ProNovoConfig::getMaxPTMcount() << " per peptide)\n";
 		std::cout << "  TopN      : " << topKeep << " unique peptides per scan across SIP pct\n";
 	}
 	else
 	{
 		std::cout << "Reading Raxport HDF5 scan file: " << scanFile << "\n";
 		std::cout << "Using fasta file: " << ProNovoConfig::getFASTAfilename() << "\n";
-		std::cout << "Using Configuration file: " << args.configFile << "\n";
+		std::cout << "Using built-in Regular profile\n";
+		std::cout << "Enabled fixed PTMs: " << enabledFixedPtmSummary() << "\n";
+		std::cout << "Enabled variable PTMs: " << enabledPtmSummary()
+				  << " (max " << ProNovoConfig::getMaxPTMcount() << " per peptide)\n";
 	}
 
 	bool loadedScans = scanVector.loadMassData();
@@ -600,25 +837,8 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 	}
 
 	std::vector<ScoredPsmRow> scoredRows;
-	if (hasSipControls || configIsSip)
+	if (directSipMode)
 	{
-		if (!hasSipControls)
-		{
-			std::cerr << "SIP search requires -a <SIP atom/isotope>, -b <pct|lower-upper>, and -s <step>\n";
-			return 1;
-		}
-		if (!configIsSip)
-		{
-			std::cerr << "SIP controls require a SIP Search_Type config file\n";
-			return 1;
-		}
-		char sipAtom = 0;
-		int sipIsotopeMassNumber = -1;
-		if (!TextUtils::parseSipAtomSpec(args.sipElementSpec, sipAtom, sipIsotopeMassNumber))
-		{
-			std::cerr << "Unsupported SIP element/isotope: " << args.sipElementSpec << "\n";
-			return 1;
-		}
 		std::vector<double> pctValues;
 		try
 		{

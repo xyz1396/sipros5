@@ -1,18 +1,140 @@
 #ifndef PRONOVOCONFIG_H_
 #define PRONOVOCONFIG_H_
 
-#include <string>
-#include <iostream>
+#include <array>
+#include <cmath>
+#include <cstddef>
 #include <fstream>
-#include <sstream>
-#include <vector>
+#include <iostream>
 #include <map>
-#include <stdlib.h>
-#include <math.h>
-#include <stdio.h>
-#include "isotopologue.h"
-#include <limits>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "omp.h"
+
+namespace sipros
+{
+
+constexpr std::size_t ElementCount = 6;
+constexpr std::size_t IsotopeSourceCount = 3;
+
+enum class Element : std::size_t
+{
+	Carbon = 0,
+	Hydrogen = 1,
+	Oxygen = 2,
+	Nitrogen = 3,
+	Phosphorus = 4,
+	Sulfur = 5
+};
+
+// Atom provenance is part of the compiled ProNovo chemistry. Only
+// Biosynthetic atoms follow the selected SIP abundance. ReagentNatural and
+// DigestionSolvent atoms retain the natural isotope distribution of the real
+// element when isotope envelopes are convolved.
+enum class IsotopeSource : std::size_t
+{
+	Biosynthetic = 0,
+	ReagentNatural = 1,
+	DigestionSolvent = 2
+};
+
+using AtomCounts = std::array<int, ElementCount>;
+
+struct SourcedComposition
+{
+	std::array<AtomCounts, IsotopeSourceCount> atoms{};
+
+	AtomCounts &operator[](IsotopeSource source)
+	{
+		return atoms[static_cast<std::size_t>(source)];
+	}
+
+	const AtomCounts &operator[](IsotopeSource source) const
+	{
+		return atoms[static_cast<std::size_t>(source)];
+	}
+
+	SourcedComposition &operator+=(const SourcedComposition &other)
+	{
+		for (std::size_t source = 0; source < IsotopeSourceCount; ++source)
+		{
+			for (std::size_t element = 0; element < ElementCount; ++element)
+			{
+				atoms[source][element] += other.atoms[source][element];
+			}
+		}
+		return *this;
+	}
+
+	SourcedComposition &operator-=(const SourcedComposition &other)
+	{
+		for (std::size_t source = 0; source < IsotopeSourceCount; ++source)
+		{
+			for (std::size_t element = 0; element < ElementCount; ++element)
+			{
+				atoms[source][element] -= other.atoms[source][element];
+			}
+		}
+		return *this;
+	}
+
+	AtomCounts total() const
+	{
+		AtomCounts result{};
+		for (std::size_t source = 0; source < IsotopeSourceCount; ++source)
+		{
+			for (std::size_t element = 0; element < ElementCount; ++element)
+			{
+				result[element] += atoms[source][element];
+			}
+		}
+		return result;
+	}
+
+	AtomCounts naturalSourceTotal() const
+	{
+		AtomCounts result{};
+		for (std::size_t source =
+				 static_cast<std::size_t>(IsotopeSource::ReagentNatural);
+			 source < IsotopeSourceCount;
+			 ++source)
+		{
+			for (std::size_t element = 0; element < ElementCount; ++element)
+			{
+				result[element] += atoms[source][element];
+			}
+		}
+		return result;
+	}
+};
+
+inline SourcedComposition operator+(SourcedComposition left,
+									const SourcedComposition &right)
+{
+	left += right;
+	return left;
+}
+
+inline SourcedComposition operator-(SourcedComposition left,
+									const SourcedComposition &right)
+{
+	left -= right;
+	return left;
+}
+
+inline SourcedComposition compositionFrom(IsotopeSource source,
+										const AtomCounts &counts)
+{
+	SourcedComposition composition;
+	composition[source] = counts;
+	return composition;
+}
+
+} // namespace sipros
+
+class Isotopologue;
 
 using namespace std;
 
@@ -59,8 +181,6 @@ inline unsigned int checkMemoryUsage()
 	return (count / 1024);
 };
 
-class Isotopologue;
-
 //--------------Comet Begin------------
 #define PROTON_MASS 1.00727646688
 #define NUM_ION_SERIES 9
@@ -81,22 +201,12 @@ class Isotopologue;
 
 struct Options // output parameters
 {
-	int iNumStored; // # of search results to store for xcorr analysis
-	int iStartCharge;
-	int iEndCharge;
-	int iMaxFragmentCharge;
-	int iMaxPrecursorCharge;
 	int iRemovePrecursor; // 0=no, 1=yes, 2=ETD precursors
 	double dMinIntensity;
 	double dRemovePrecursorTol;
 
 	Options()
 	{
-		iNumStored = 0; // # of search results to store for xcorr analysis
-		iStartCharge = 0;
-		iEndCharge = 0;
-		iMaxFragmentCharge = 0;
-		iMaxPrecursorCharge = 0;
 		iRemovePrecursor = 0; // 0=no, 1=yes, 2=ETD precursors
 		dMinIntensity = 0;
 		dRemovePrecursorTol = 0;
@@ -129,7 +239,6 @@ struct PrecalcMasses
 	double dNtermProton;		 // dAddNterminusPeptide + PROTON_MASS
 	double dCtermOH2Proton;		 // dAddCterminusPeptide + dOH2fragment + PROTON_MASS
 	double dCtermOH2;			 // dAddCterminusPeptide + dOHfragment
-	double dOH2ProtonCtermNterm; // dOH2parent + PROTON_MASS + dAddCterminusPeptide + dAddNterminusPeptide
 	int iMinus17HighRes;		 // BIN'd value of mass(NH3)
 	int iMinus17LowRes;
 	int iMinus18HighRes; // BIN'd value of mass(H2O)
@@ -167,23 +276,71 @@ public:
 class ProNovoConfig
 {
 public:
+	enum class Profile
+	{
+		Regular,
+		Sip
+	};
+
+	struct PtmDefinition
+	{
+		string name;
+		string token;
+		string sites;
+		string description;
+		double externalMonoisotopicShift;
+		bool selectable;
+		bool regularDefault;
+	};
+
+	struct FixedPtmDefinition
+	{
+		string name;
+		string sites;
+		string description;
+		double externalMonoisotopicShift;
+		bool profileDefault;
+	};
+
+	// Initialize session-wide state from a compiled profile.
+	static bool load(Profile profile);
+
+	// Return every compiled legacy PTM. The selectable flag reflects the active
+	// fixed chemistry for conditional compatibility tokens such as variable IAA.
+	static const vector<PtmDefinition> &getPtmCatalog();
+	static const vector<FixedPtmDefinition> &getFixedPtmCatalog();
+	static vector<string> getEnabledFixedPtmNames();
+	// Convert FragPipe-style bracketed masses to the compiled one-character
+	// chemistry tokens before any theoretical mass or spectrum calculation.
+	static bool translatePsmPeptide(
+		const string &plainPeptide,
+		const string &modifiedPeptide,
+		string &translatedPeptide,
+		string &error);
+	static bool translatePsmPeptide(
+		const string &plainPeptide,
+		const string &modifiedPeptide,
+		const string &assignedModifications,
+		string &translatedPeptide,
+		string &error);
+	static bool configureFixedPtms(
+		const vector<string> &selectors,
+		string &error);
+
 	/*
-	 * Sets up sessionwide configuration
-	 * the configurations are loaded in to memory as static variables
+	 * Configure the exact variable-PTM set after loading a profile. An empty
+	 * selector list preserves the loaded profile defaults; -1 leaves the maximum
+	 * PTM count unspecified. Selectors accept catalog names, one-character
+	 * peptide tokens, and the special values default, none, and all.
 	 */
-
-	static bool setFilename(const string &sConfigFileName);
-
-	static bool setWorkingDirectory(const string &sDirectoryName);
+	static bool configureVariablePtms(
+		const vector<string> &selectors,
+		int maxPtmCountOverride,
+		string &error);
 
 	static vector<pair<string, string>> getNeutralLossList()
 	{
 		return vpNeutralLossList;
-	}
-
-	static string getWorkingDirectory()
-	{
-		return sWorkingDirectory;
 	}
 
 	static string getSearchName()
@@ -201,20 +358,22 @@ public:
 		return sSearchType;
 	}
 
+	static string getChemistryProfileId();
+	// Apply the exact compiled fixed-PTM state named by spectra-library
+	// metadata. Unknown or obsolete profile IDs are rejected; there is no
+	// compatibility fallback.
+	static bool configureChemistryProfileId(
+		const string &profileId,
+		string &error);
+
 	static char getSeparator();
 
-	// set <FASTA_Database>
+	// Set the active FASTA database path.
 	static void setFASTAfilename(const string &fastaFilename);
-	// retrieve <FASTA_Database>
+	// Return the active FASTA database path.
 	static string getFASTAfilename()
 	{
 		return sFASTAFilename;
-	}
-
-	// retrieve <Fragmentation_Method>
-	static string getFragmentationMethod()
-	{
-		return sFragmentationMethod;
 	}
 
 	// retrieve the Minimum length of a peptide
@@ -229,13 +388,13 @@ public:
 		return iMaxPeptideLength;
 	}
 
-	// retrieve <Mass_Accuracy>	<Parent_Ion>
+	// Return the parent-ion mass tolerance in Da.
 	static double getMassAccuracyParentIon()
 	{
 		return dMassAccuracyParentIon;
 	}
 
-	// retrieve <Mass_Accuracy>	<Fragment_Ions>
+	// Return the fragment-ion mass tolerance in Da.
 	static double getMassAccuracyFragmentIon()
 	{
 		return dMassAccuracyFragmentIon;
@@ -243,22 +402,17 @@ public:
 
 	static void setMassAccuracy(double parentIonToleranceDa, double fragmentIonToleranceDa);
 
-	// retrieve <Parent_Mass_Windows>
-	static vector<int> getParentMassWindows()
-	{
-		return viParentMassWindows;
-	}
-
+	// Expand a peptide mass into the compiled parent-mass windows.
 	static bool getPeptideMassWindows(double dPeptideMass,
 									  vector<pair<double, double>> &vpPeptideMassWindows);
 
-	// retrieve <Max_PTM_Count>
+	// Return the active maximum number of variable PTMs per peptide.
 	static int getMaxPTMcount()
 	{
 		return iMaxPTMcount;
 	}
 
-	// retrieve <Cleavage_Rules>
+	// Return the active compiled cleavage rules.
 	static string getCleavageAfterResidues()
 	{
 		return sCleavageAfterResidues;
@@ -277,11 +431,6 @@ public:
 	}
 
 	static bool getPTMinfo(map<string, string> &mPTMinfo);
-
-	// retrieve <ATOM_ISOTOPIC_COMPOSITION>
-	// the input character is the atom name CHONPS
-	static bool getAtomIsotopicComposition(char cAtom,
-										   vector<double> &vdAtomicMass, vector<double> &vdComposition);
 
 	static Isotopologue configIsotopologue;
 	static vector<vector<double>> naturalAtomIsotopeProbabilities;
@@ -308,16 +457,7 @@ public:
 
 	static double getNeutronMass()
 	{
-		// return 1.003355;
-		// adjust for 15N and 13C
 		return neutronMass;
-	}
-
-	static double dnorm(double mean, double sd, double x)
-	{
-		double SQRT2PI = 2.506628;
-		double a = (x - mean) / sd;
-		return exp(-a * a / 2) / (SQRT2PI * sd);
 	}
 
 	static double pnorm(double dMean, double dStandardDeviation,
@@ -334,39 +474,29 @@ public:
 		//	pnorm function
 		return (1.0 - pnorm(0, (getMassAccuracyFragmentIon() / 2), fabs(dMassError))) * 2.0;
 
-		//	dnorm function
-		//	return  ( dnorm( 0, (getMassAccuracyFragmentIon() / 2.0), fabs(dMassError) ) ) /
-		//			( dnorm( 0, (getMassAccuracyFragmentIon() / 2.0), 0 ) )	;
-
 		//  sigmoid function
 		//	return ( 1/(1+exp(dMassError*600-3)));
 	}
-	// for MS2 file format
-	static string &getSetFileNameSuffix() { return fileNameSuffix; }
 	static string &getSetSIPelement() { return SIPelement; }
-	static int getSipIsotopeMassNumber()
-	{
-		return SIPisotopeMassNumber;
-	}
-	static double &getSetMinValue() { return minValue; }
-	static double &getSetFold() { return fold; }
-	// compute deduction coefficient in score function
-	// only suitbale for carbon and nitrogen SIP now
-	static void setDeductionCoefficient(bool readConfigElement = true);
+	// Compute the score deduction coefficient for the active SIP target.
+	static void setDeductionCoefficient();
 	static int atomIndex(char sipAtom);
+	static bool validatePreparationChemistry(const Isotopologue &iso,
+										 std::string &error);
 	static bool refreshResidueDistributions(Isotopologue &iso);
 	static int resolveSipIsotopeIndex(const Isotopologue &iso, char sipAtom, int isotopeMassNumber);
 	static void setSipAbundance(Isotopologue &iso, char sipAtom, int isotopeIndex, double sipPct);
 	static double getIsotopeAbundancePct(const Isotopologue &iso, char sipAtom, int isotopeIndex);
+	// Select the isotope spacing used by precursor-window and library matching
+	// without changing the current isotope abundances.
+	static bool selectSipTarget(char sipAtom, int isotopeMassNumber,
+								std::string &error);
 	static bool applySipAbundance(char sipAtom, double fraction);
 	// get deduction coefficient in score function
 	static double getDeductionCoefficient() { return deductionCoefficient; }
 
 	//---------------Comet Begin---------------------
-	static bool bXcorrEnable;
 	static Options options;
-	static double dInverseBinWidth;	  // this is used in BIN() many times so use inverse binWidth to do multiply vs. divide
-	static double dOneMinusBinOffset; // this is used in BIN() many times so calculate once
 	static IonInfo ionInformation;
 	static int iXcorrProcessingOffset;
 	static PrecalcMasses precalcMasses;
@@ -374,10 +504,6 @@ public:
 	static double dMaxPeptideMass;
 	// static map<char, double> pdAAMassFragment;
 	static AminoAcidMasses pdAAMassFragment;
-	static double dHighResFragmentBinSize;
-	static double dHighResFragmentBinStartOffset;
-	static double dLowResFragmentBinSize;
-	static double dLowResFragmentBinStartOffset;
 	static double dHighResInverseBinWidth;
 	static double dLowResInverseBinWidth;
 	static double dHighResOneMinusBinOffset;
@@ -386,7 +512,6 @@ public:
 	//---------------Comet End-----------------------
 
 	//---------------Myrimatch Begin-----------------
-	static bool bMvhEnable;
 	static double ClassSizeMultiplier;
 	static int NumIntensityClasses;
 	static int minIntensityClassCount;
@@ -398,38 +523,15 @@ public:
 	//---------------Myrimatch End-------------------
 
 	//---------------Sipros Score Begin--------------
-	static bool bWeightDotSumEnable;
-	static bool bLessIsotopicDistribution;
-	static bool bMultiScores;
-	static string sDecoyPrefix;
 	static int INTTOPKEEP; // the top n PSM for calculation of other two scores
 	static int iRank;
 	//---------------Sipros Score End----------------
 	static string sCleavageAfterResidues;
 	static string sCleavageBeforeResidues;
-	static int num_threads;
-
-protected:
-	ProNovoConfig();
 
 private:
-	static ProNovoConfig *ProNovoConfigSingleton;
-
-	// the filename of the configuration file
-	static string sFilename;
-
-	string sSectionName;
-
-	// the working directory
-	static string sWorkingDirectory;
-
-	// replace delimitor in a line
-	static void replaceDelimitor(string &sLine, char cOldDelimitor,
-								 char cNewDelimitor);
-
-	// variables from the PEPTIDE_IDENTIFICATION element
+	// Active search-session state.
 	static string sFASTAFilename;
-	static string sFragmentationMethod;
 	static string sSearchType;
 	static string sSearchName;
 
@@ -452,47 +554,12 @@ private:
 	static double dTerminusMassN;
 	static double dTerminusMassC;
 
-	static string sElementList;
-
 	static string SIPelement;
-	static int SIPisotopeMassNumber;
-	static string fileNameSuffix;
 	// for deductionCoefficient compute in SIP search
-	static double neutronMass, deductionCoefficient, minValue, fold;
+	static double neutronMass, deductionCoefficient;
 
-	// this is used to setup configIsotopologue
-	// retrieve Elemental composition of amino acid residues
-	static bool getResidueElementalComposition(
-		string &sResidueElementalComposition);
-
+	static bool refreshSessionMassCaches();
 	static bool calculatePeptideMassWindowOffset();
-
-	/*
-	 * New functions for cfg config files
-	 */
-
-	// all parameters in key-value pairs
-	static map<string, string> mapConfigKeyValues;
-
-	// parse the cfg file to populate mapConfigKeyValues
-	bool parseConfigKeyValues();
-
-	bool parseConfigLine(const string &sLine);
-
-	// get the value of a key;
-	// return false, if can't find the key in the mapConfigKeyValues
-	static bool getConfigValue(string sConfigKey, string &sConfigValue);
-
-	// get a set of key-value pairs, given a master key
-	// return false, if can't find the key in the mapConfigKeyValues
-	static bool getConfigMasterKeyValue(string sMasterKey,
-										map<string, string> &mapKeyValueSet);
-
-	// new version based on cfg config files
-	bool getParameters();
-
-	// handle neural loss
-	static void NeutralLoss();
 };
 
 #endif /*PRONOVOCONFIG_H_*/

@@ -28,6 +28,7 @@
 #include <H5Cpp.h>
 #include "SiprosWorkflows.h"
 #include "SiprosSearchRunner.h"
+#include "isotopologue.h"
 #include "proNovoConfig.h"
 #include "RaxportHdf5Reader.h"
 #include "ms2scan.h"
@@ -44,6 +45,8 @@ namespace fs = std::filesystem;
 
 namespace
 {
+constexpr int kSpectraHdf5FormatVersion = 2;
+
 double timevalSeconds(const timeval &tv)
 {
 	return static_cast<double>(tv.tv_sec) + static_cast<double>(tv.tv_usec) / 1.0e6;
@@ -206,7 +209,6 @@ struct TimingLogger
 
 struct Args
 {
-	std::string configPath;
 	std::string inputPath;
 	std::string hdf5Path;
 	std::string outputPath;
@@ -223,6 +225,7 @@ struct Args
 	int threads = 0;
 	bool writeDecoy = false;
 	unsigned int decoySeed = 1;
+	std::vector<std::string> fixedPtmSelectors;
 };
 
 struct PsmRow
@@ -332,6 +335,7 @@ struct Hdf5OutputData
 struct Hdf5OutputMetadata
 {
 	std::string recordKind;
+	std::string chemistryProfileId;
 	double targetSipAbundancePct = 0.0;
 	char sipAtom = '\0';
 	int sipIsotopeMassNumber = -1;
@@ -396,15 +400,17 @@ std::string peptideMassClassKey(const std::string &peptide);
 void printUsage(const char *prog)
 {
 	std::cerr << "Usage: " << prog
-			  << " -c <config.cfg> -i <psm.tsv|frag_dir> -f <h5_file|h5_dir> -o <output.h5|output_dir/>"
-			  << " [-a <SIP atom/isotope, e.g. C13,H2,O18,N15,S34>]"
+			  << " -i <psm.tsv|frag_dir> -f <h5_file|h5_dir> -o <output.h5|output_dir/>"
+			  << " -a <SIP atom/isotope, e.g. C13,H2,O18,N15,S34>"
 			  << " [-b <fixed SIP pct|lower-upper, default 1.0>] [-s|--step <pct, default 1.0>]"
 			  << " [-p <prob cutoff, default 0.01>]"
 			  << " [--ppm <match tolerance, default 10>] [--min-matched-envelopes <N, default 3>]"
-			  << " [--decoy] [--decoy-seed <N, default 1>] [-t <threads>]\n";
-	std::cerr << "HDF5 MS2 matching is always performed at the baseline 1% C13 abundance; -b controls shifted output abundance(s).\n";
+			  << " [--decoy] [--decoy-seed <N, default 1>]"
+			  << " [--fixed-ptm <name|default|none|all>] [-t <threads>]\n";
+	std::cerr << "HDF5 MS2 matching is always performed at the natural-abundance C13 baseline; -b controls shifted output abundance(s).\n";
 	std::cerr << "When one file is produced, -o is used as the output file and .h5 is appended if needed.\n";
 	std::cerr << "When multiple files are produced, -o is used as an output directory unless it already names one.\n";
+	std::cerr << "--fixed-ptm is repeatable; omit it to use the compiled default (carbamidomethyl C).\n";
 }
 
 bool parseDoubleStrict(const std::string &text, double &value)
@@ -478,15 +484,7 @@ bool parseArgs(int argc, char **argv, Args &args)
 			printUsage(argv[0]);
 			return false;
 		}
-		if (opt == "-c")
-		{
-			if (!requireValue(opt))
-			{
-				return false;
-			}
-			args.configPath = argv[++i];
-		}
-		else if (opt == "-i")
+		if (opt == "-i")
 		{
 			if (!requireValue(opt))
 			{
@@ -597,6 +595,20 @@ bool parseArgs(int argc, char **argv, Args &args)
 				return false;
 			}
 		}
+		else if (opt == "--fixed-ptm")
+		{
+			if (!requireValue(opt))
+			{
+				return false;
+			}
+			const std::string selector = sipros::TextUtils::trim(argv[++i]);
+			if (selector.empty())
+			{
+				std::cerr << "Fixed PTM selector must not be empty.\n";
+				return false;
+			}
+			args.fixedPtmSelectors.push_back(selector);
+		}
 		else if (opt == "-t" || opt == "--threads")
 		{
 			if (!requireValue(opt))
@@ -646,7 +658,8 @@ bool parseArgs(int argc, char **argv, Args &args)
 		}
 	}
 
-	if (args.configPath.empty() || args.inputPath.empty() || args.hdf5Path.empty() || args.outputPath.empty())
+	if (args.inputPath.empty() || args.hdf5Path.empty() || args.outputPath.empty() ||
+		args.sipAtom == '\0')
 	{
 		printUsage(argv[0]);
 		return false;
@@ -736,138 +749,15 @@ bool parseIntField(const std::string &s, int &value)
 	}
 }
 
-bool isApprox(double value, double target, double tolerance)
-{
-	return std::abs(value - target) <= tolerance;
-}
-
-bool parseModificationMass(const std::string &text, double &value)
-{
-	std::string t = sipros::TextUtils::trim(text);
-	if (!t.empty() && t.front() == '+')
-	{
-		t.erase(t.begin());
-	}
-	return parseDoubleField(t, value);
-}
-
-bool applyResidueModification(char residue, const std::string &modText, std::string &body, std::string &reason)
-{
-	double mass = 0.0;
-	if (!parseModificationMass(modText, mass))
-	{
-		reason = "invalid modification mass " + modText;
-		return false;
-	}
-
-	if (residue == 'M' && (isApprox(mass, 147.0, 0.5) || isApprox(mass, 15.9949, 0.05)))
-	{
-		body.push_back('~');
-		return true;
-	}
-	if (residue == 'C' && (isApprox(mass, 160.0, 0.5) || isApprox(mass, 57.0215, 0.05)))
-	{
-		return true;
-	}
-	if ((residue == 'N' || residue == 'Q') &&
-		(isApprox(mass, residue == 'N' ? 115.0 : 129.0, 0.5) || isApprox(mass, 0.984, 0.05)))
-	{
-		body.push_back('!');
-		return true;
-	}
-
-	reason = std::string("unsupported modification ") + residue + "[" + modText + "]";
-	return false;
-}
-
-bool applyNTermModification(const std::string &modText, std::string &body, std::string &reason)
-{
-	double mass = 0.0;
-	if (!parseModificationMass(modText, mass))
-	{
-		reason = "invalid N-terminal modification mass " + modText;
-		return false;
-	}
-	if (isApprox(mass, 43.0, 0.5) || isApprox(mass, 42.0106, 0.05))
-	{
-		body.push_back('%');
-		return true;
-	}
-
-	reason = "unsupported N-terminal modification n[" + modText + "]";
-	return false;
-}
-
 bool convertModifiedPeptide(const std::string &plainPeptide,
 							const std::string &modifiedPeptide,
+							const std::string &assignedModifications,
 							std::string &normalizedPeptide,
 							std::string &reason)
 {
-	const std::string source = sipros::TextUtils::trim(modifiedPeptide).empty() ? sipros::TextUtils::trim(plainPeptide) : sipros::TextUtils::trim(modifiedPeptide);
-	if (source.empty())
-	{
-		reason = "empty peptide";
-		return false;
-	}
-
-	std::string body;
-	for (size_t i = 0; i < source.size();)
-	{
-		const char raw = source[i];
-		if (i == 0 && raw == 'n' && i + 1 < source.size() && source[i + 1] == '[')
-		{
-			const size_t rb = source.find(']', i + 2);
-			if (rb == std::string::npos)
-			{
-				reason = "unterminated N-terminal modification";
-				return false;
-			}
-			const std::string modText = source.substr(i + 2, rb - i - 2);
-			if (!applyNTermModification(modText, body, reason))
-			{
-				return false;
-			}
-			i = rb + 1;
-			continue;
-		}
-		if (std::isspace(static_cast<unsigned char>(raw)) != 0)
-		{
-			++i;
-			continue;
-		}
-		if (!std::isalpha(static_cast<unsigned char>(raw)))
-		{
-			reason = "unsupported peptide character";
-			return false;
-		}
-
-		const char residue = static_cast<char>(std::toupper(static_cast<unsigned char>(raw)));
-		body.push_back(residue);
-		++i;
-		if (i < source.size() && source[i] == '[')
-		{
-			const size_t rb = source.find(']', i + 1);
-			if (rb == std::string::npos)
-			{
-				reason = "unterminated modification";
-				return false;
-			}
-			const std::string modText = source.substr(i + 1, rb - i - 1);
-			if (!applyResidueModification(residue, modText, body, reason))
-			{
-				return false;
-			}
-			i = rb + 1;
-		}
-	}
-
-	if (body.empty())
-	{
-		reason = "empty peptide";
-		return false;
-	}
-	normalizedPeptide = "[" + body + "]";
-	return true;
+	return ProNovoConfig::translatePsmPeptide(
+		plainPeptide, modifiedPeptide, assignedModifications,
+		normalizedPeptide, reason);
 }
 
 std::vector<std::string> splitDot(const std::string &s)
@@ -1140,6 +1030,8 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 	const size_t idxRetention = getRequiredColumn(columns, "Retention");
 	const size_t idxProbability = getRequiredColumn(columns, "Probability");
 	const size_t idxModifiedPeptide = getOptionalColumn(columns, "Modified Peptide");
+	const size_t idxAssignedModifications =
+		getOptionalColumn(columns, "Assigned Modifications");
 	const size_t idxExpectation = getOptionalColumn(columns, "Expectation");
 	const size_t idxHyperscore = getOptionalColumn(columns, "Hyperscore");
 	const size_t idxMappedProteins = getOptionalColumn(columns, "Mapped Proteins");
@@ -1150,6 +1042,10 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 	if (idxModifiedPeptide != std::string::npos)
 	{
 		requiredMax = std::max(requiredMax, idxModifiedPeptide);
+	}
+	if (idxAssignedModifications != std::string::npos)
+	{
+		requiredMax = std::max(requiredMax, idxAssignedModifications);
 	}
 
 	std::string line;
@@ -1220,8 +1116,15 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 		const std::string modified = (idxModifiedPeptide != std::string::npos && fields.size() > idxModifiedPeptide)
 										 ? fields[idxModifiedPeptide]
 										 : std::string();
+		const std::string assignedModifications =
+			(idxAssignedModifications != std::string::npos &&
+			 fields.size() > idxAssignedModifications)
+				? fields[idxAssignedModifications]
+				: std::string();
 		std::string reason;
-		if (!convertModifiedPeptide(fields[idxPeptide], modified, row.peptide, reason))
+		if (!convertModifiedPeptide(
+				fields[idxPeptide], modified, assignedModifications,
+				row.peptide, reason))
 		{
 			++stats.unsupportedMods;
 			continue;
@@ -1396,7 +1299,7 @@ std::unordered_map<int, ObservedScan> readRequestedScans(const fs::path &hdf5Fil
 			peak.mz = scan->vdMZ[i];
 			peak.intensity = i < scan->vdIntensity.size() ? scan->vdIntensity[i] : 0.0;
 			const int charge = i < scan->viCharge.size() ? scan->viCharge[i] : 0;
-			peak.charge = charge > 0 ? charge : 1;
+			peak.charge = charge;
 			observed.peaks.push_back(peak);
 		}
 		scans[scan->iScanId] = std::move(observed);
@@ -1445,16 +1348,6 @@ std::vector<Hdf5SampleTask> buildHdf5SampleTasks(const std::vector<PsmRow> &rows
 		tasks.push_back(std::move(task));
 	}
 	return tasks;
-}
-
-void ensureDefaultNTermAcetylation(Isotopologue &iso)
-{
-	if (iso.mResidueAtomicComposition.find("%") != iso.mResidueAtomicComposition.end())
-	{
-		return;
-	}
-	// Element_List is CHONPS in Sipros configs; % is acetylation C2H2O.
-	iso.mResidueAtomicComposition["%"] = {2, 2, 1, 0, 0, 0};
 }
 
 double effectiveTargetSipAbundancePct(const Isotopologue &iso,
@@ -1509,28 +1402,21 @@ void buildPrecursorChargePeaks(const IsotopeDistribution &dist,
 	}
 }
 
-bool buildPrecursorDistributionFromProductIons(Isotopologue &iso,
-											   const std::vector<std::vector<double>> &yMass,
-											   const std::vector<std::vector<double>> &yProb,
-											   const std::vector<std::vector<double>> &bMass,
-											   const std::vector<std::vector<double>> &bProb,
-											   IsotopeDistribution &precursorDist)
+bool buildPrecursorDistribution(Isotopologue &iso,
+								const std::string &decoratedPeptide,
+								IsotopeDistribution &precursorDist)
 {
-	if (bMass.empty() || bProb.empty() || yMass.empty() || yProb.empty())
-	{
-		return false;
-	}
-	const size_t bLast = bMass.size() - 1;
-	const size_t yFirst = 0;
-	IsotopeDistribution bLastDist(bMass[bLast], bProb[bLast]);
-	IsotopeDistribution y1Dist(yMass[yFirst], yProb[yFirst]);
-	precursorDist = iso.sum(bLastDist, y1Dist);
-	return true;
+	// Convolve the complete decorated composition directly. Reconstructing
+	// from independently pruned b_(n-1) and y1 envelopes can introduce small
+	// order-dependent probability and centroid differences.
+	return iso.computePeptideIsotopicDistribution(
+		decoratedPeptide, precursorDist);
 }
 
 bool findMatchedPeak(const std::vector<ObservedPeak> &peaks,
 					 double targetMz,
 					 double ppmTolerance,
+					 int theoreticalCharge,
 					 ObservedPeak &matchedPeak)
 {
 	const double tolerance = targetMz * ppmTolerance / 1000000.0;
@@ -1544,6 +1430,11 @@ bool findMatchedPeak(const std::vector<ObservedPeak> &peaks,
 	double bestError = std::numeric_limits<double>::infinity();
 	for (; it != peaks.end() && it->mz <= upperMz; ++it)
 	{
+		if (!sipros::observedPeakChargeMatches(
+				it->charge, theoreticalCharge))
+		{
+			continue;
+		}
 		const double error = std::abs(it->mz - targetMz);
 		if (!found || error < bestError ||
 			(std::abs(error - bestError) <= 1e-12 && it->intensity > matchedPeak.intensity))
@@ -1613,7 +1504,8 @@ bool collectMatchedEnvelopeApexIntensities(const std::vector<std::vector<double>
 				continue;
 			}
 
-			const bool matchedEnvelope = findMatchedPeak(scan.peaks, envelope[apexIndex].mz, ppmTolerance, matched);
+			const bool matchedEnvelope = findMatchedPeak(
+				scan.peaks, envelope[apexIndex].mz, ppmTolerance, 1, matched);
 			if (matchedEnvelope)
 			{
 				++matchedSet.matchedEnvelopes;
@@ -2389,7 +2281,8 @@ void writeDoubleAttribute(const H5::H5Object &object, const char *name, double v
 
 void writeSpectraAttributes(const H5::H5Object &file, const Hdf5OutputMetadata &metadata)
 {
-	writeIntAttribute(file, "format_version", 1);
+	writeIntAttribute(file, "format_version", kSpectraHdf5FormatVersion);
+	writeStringAttribute(file, "chemistry_profile_id", metadata.chemistryProfileId);
 	writeStringAttribute(file, "record_kind", metadata.recordKind);
 	writeDoubleAttribute(file, "target_sip_abundance_pct", metadata.targetSipAbundancePct);
 	writeStringAttribute(file, "sip_atom", std::string(1, metadata.sipAtom));
@@ -2593,7 +2486,8 @@ bool generateAndWriteOutputFileJob(OutputFileJob &job,
 				}
 
 				IsotopeDistribution precursorDist;
-				if (!buildPrecursorDistributionFromProductIons(localIso, yMass, yProb, bMass, bProb, precursorDist))
+				if (!buildPrecursorDistribution(
+						localIso, row.peptide, precursorDist))
 				{
 					++jobStats.targetFailed;
 					continue;
@@ -2645,8 +2539,8 @@ bool generateAndWriteOutputFileJob(OutputFileJob &job,
 			}
 
 			IsotopeDistribution decoyPrecursorDist;
-			if (!buildPrecursorDistributionFromProductIons(localIso, decoyYMass, decoyYProb,
-															decoyBMass, decoyBProb, decoyPrecursorDist))
+			if (!buildPrecursorDistribution(
+					localIso, decoyPeptides[rowIndex], decoyPrecursorDist))
 			{
 				++jobStats.decoyComputeFailed;
 				continue;
@@ -2987,26 +2881,21 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 		return 1;
 	}
 
-	if (!ProNovoConfig::setFilename(args.configPath))
+	if (!ProNovoConfig::load(ProNovoConfig::Profile::Sip))
 	{
-		std::cerr << "Could not load config file: " << args.configPath << "\n";
+		std::cerr << "Could not initialize the built-in SIP profile.\n";
+		return 1;
+	}
+	std::string fixedPtmError;
+	if (!ProNovoConfig::configureFixedPtms(
+			args.fixedPtmSelectors, fixedPtmError))
+	{
+		std::cerr << "Invalid fixed PTM selection: " << fixedPtmError << "\n";
 		return 1;
 	}
 
 	char sipAtom = args.sipAtom;
 	int sipIsotopeMassNumber = args.sipIsotopeMassNumber;
-	if (sipAtom == '\0')
-	{
-		const std::string cfgAtom = ProNovoConfig::getSetSIPelement();
-		if (cfgAtom.size() != 1)
-		{
-			std::cerr << "Invalid SIP_Element in config. Pass -a explicitly.\n";
-			return 1;
-		}
-		sipAtom = static_cast<char>(std::toupper(static_cast<unsigned char>(cfgAtom[0])));
-		sipIsotopeMassNumber =
-			ProNovoConfig::getSipIsotopeMassNumber();
-	}
 
 	int targetSipIsotopeIndex = 1;
 	try
@@ -3031,16 +2920,13 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 	}
 
 	Isotopologue pristineIso = ProNovoConfig::configIsotopologue;
-	try
+	std::string chemistryError;
+	if (!ProNovoConfig::validatePreparationChemistry(
+			pristineIso, chemistryError))
 	{
-		ensureDefaultNTermAcetylation(pristineIso);
-	}
-	catch (const std::exception &ex)
-	{
-		std::cerr << "Failed to initialize isotopologue configuration: " << ex.what() << "\n";
+		std::cerr << chemistryError << "\n";
 		return 1;
 	}
-
 	Isotopologue baselineIso = pristineIso;
 	try
 	{
@@ -3226,6 +3112,7 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 			pristineIso, sipAtom, targetSipIsotopeIndex, targetAbundancePct);
 		Hdf5OutputMetadata outputMetadata;
 		outputMetadata.recordKind = "target";
+		outputMetadata.chemistryProfileId = ProNovoConfig::getChemistryProfileId();
 		outputMetadata.targetSipAbundancePct = effectiveAbundancePct;
 		outputMetadata.sipAtom = sipAtom;
 		outputMetadata.sipIsotopeMassNumber = sipIsotopeMassNumber;

@@ -1,51 +1,45 @@
 #pragma once
-#include "proNovoConfig.h"
-#include <numeric>
-#include <functional>
+#include "isotopologue.h"
 #include <array>
 
 class averagine
 {
 private:
+	static double lightMass(size_t element);
+	static double baseMass(const sipros::SourcedComposition &composition);
 public:
-    double *C12Mass, *C13Mass, *C13Abundance, *H1Mass, *H2Mass, *H2Abundance;
-    double *O16Mass, *O17Mass, *O17Abundance, *O18Mass, *O18Abundance;
-    double *N14Mass, *N15Mass, *N15Abundance, *PfakeLowMass, *PfakeMass, *PfakeAbundance;
-    double *S32Mass, *S33Mass, *S33Abundance, *S34Mass, *S34Abundance, *S36Mass, *S36Abundance;
-    const string averagineResidue = "a";
-    const string SIPatoms = "CHONPS";
-    // C,H,O,N,P,S count of averagine residue
-    vector<int> averagineAtomCounts;
-    // C,H,O,N,P,S count of averagine peptides at different length
-    vector<vector<int>> averaginePepAtomCountss;
-    // C,H,O,N,P,S Atom count of peptides
-    std::array<int, 6> pepAtomCounts = {0};
-    // C,H,O,N,P,S Atom count of BYions
-    std::vector<std::array<int, 6>> BionsAtomCounts;
-    std::vector<std::array<int, 6>> YionsAtomCounts;
+	 const string averagineResidue = "a";
+	 const string SIPatoms = "CHONS";
+	 sipros::SourcedComposition averagineComposition;
+	 vector<sipros::SourcedComposition> averaginePepCompositions;
+	 // Biosynthetic counts are the SIP-labelable counts. The complete sourced
+	 // composition is retained so natural reagent/solvent background is not lost.
+	 sipros::SourcedComposition pepComposition;
+	 // C,H,O,N,P,S Atom count of BYions
+	 std::vector<sipros::SourcedComposition> BionsCompositions;
+	 std::vector<sipros::SourcedComposition> YionsCompositions;
     std::vector<double> BionsBaseMasses;
     std::vector<double> YionsBaseMasses;
     // Atom count difference bettween averagine and peptide
-    vector<int> diffAtomCounts;
-    IsotopeDistribution averagineSIPdistribution;
+	 IsotopeDistribution averagineSIPdistribution;
     vector<IsotopeDistribution> averaginePepSIPdistributions;
-    int minPepLen, maxPepLen, pepLenRange, SIPatomIX;
+	 int minPepLen = 0, maxPepLen = 0, pepLenRange = 0;
     averagine(const int minPepLen, const int maxPepLen);
     averagine();
     ~averagine();
     static bool changeAtomProbability(std::vector<double> &probs, char atom, const double pct);
     void changeAtomSIPabundance(const char SIPatom, const double pct);
-    double weighted_mean(const std::vector<double> &values, const std::vector<double> &weights);
+    // Effective mass per nominal-neutron shift for the estimated precursor
+    // isotopologue. O18/S34 contribute their full +2 isotope delta before
+    // this value is normalized; use calPrecursorMass when an exact peak mass
+    // rather than a nominal mass-window spacing is required.
     double calNetronMass(const string &pepSeq);
     void calAveraginePepAtomCounts();
-    vector<int> *getAveraginePepAtomCounts(const int pepLen);
+	 sipros::SourcedComposition *getAveraginePepComposition(const int pepLen);
     void calAveraginePepSIPdistributions();
     IsotopeDistribution *getAveraginePepSIPdistribution(const int pepLen);
     void calPepAtomCounts(const string &pepSeq);
     void calBYionsAtomCounts(const string &pepSeq);
-    // init it in init function and changeAtomSIPabundance
-    void adjustEstimatePrecursorMassbyNP(); 
-    std::function<double(double, int, double)> estimatePrecursorMassbyNP;
     // for peptide base mass without isotope
     double calPrecursorBaseMass(const string &pepSeq);
     void calBYionBaseMasses(const string &pepSeq);

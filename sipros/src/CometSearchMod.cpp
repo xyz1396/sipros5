@@ -42,12 +42,10 @@ bool CometSearchMod::Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, d
 		dInverseBinWidth = ProNovoConfig::dHighResInverseBinWidth;
 		iMinus17 = ProNovoConfig::precalcMasses.iMinus17HighRes;
 		iMinus18 = ProNovoConfig::precalcMasses.iMinus18HighRes;
-		// dFragmentBinSize = ProNovoConfig::dHighResFragmentBinSize;
 	} else {
 		dInverseBinWidth = ProNovoConfig::dLowResInverseBinWidth;
 		iMinus17 = ProNovoConfig::precalcMasses.iMinus17LowRes;
 		iMinus18 = ProNovoConfig::precalcMasses.iMinus18LowRes;
-		// dFragmentBinSize = ProNovoConfig::dLowResFragmentBinSize;
 	}
 	pPre.iHighestIon = 0;
 	pPre.dHighestIntensity = 0;
@@ -679,7 +677,7 @@ bool CometSearchMod::ScorePeptides(string * currentPeptide, bool *pbDuplFragment
 		currentPTM = sSequence->at(j);
 		iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
 		if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
-			cerr << "ERROR: cannot find this PTM in the config file " << currentPTM << endl;
+			cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 			exit(1);
 			return false;
 		}
@@ -692,7 +690,7 @@ bool CometSearchMod::ScorePeptides(string * currentPeptide, bool *pbDuplFragment
 		currentPTM = sSequence->at(k);
 		iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
 		if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
-			cerr << "ERROR: cannot find this PTM in the config file " << currentPTM << endl;
+			cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 			exit(1);
 			return false;
 		}
@@ -725,7 +723,7 @@ bool CometSearchMod::ScorePeptides(string * currentPeptide, bool *pbDuplFragment
 			currentPTM = sSequence->at(j);
 			iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
 			if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
-				cerr << "ERROR: cannot find this PTM in the config file " << currentPTM << endl;
+				cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 				exit(1);
 				return false;
 			}
@@ -744,7 +742,7 @@ bool CometSearchMod::ScorePeptides(string * currentPeptide, bool *pbDuplFragment
 			currentPTM = sSequence->at(k);
 			iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
 			if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
-				cerr << "ERROR: cannot find this PTM in the config file " << currentPTM << endl;
+				cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 				exit(1);
 				return false;
 			}
@@ -759,7 +757,7 @@ bool CometSearchMod::ScorePeptides(string * currentPeptide, bool *pbDuplFragment
 		currentPTM = sSequence->at(k);
 		iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
 		if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
-			cerr << "ERROR: cannot find this PTM in the config file" << currentPTM << endl;
+			cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 			exit(1);
 			return false;
 		}
@@ -803,7 +801,7 @@ bool CometSearchMod::ScorePeptides(string * currentPeptide, bool *pbDuplFragment
 			cout << k << ": " << currentPTM << endl;
 			iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
 			if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
-				cerr << "ERROR: cannot find this PTM in the config file " << currentPTM << endl;
+				cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 				return false;
 			}
 			dYion += iterResidueMonoMass;
@@ -823,7 +821,7 @@ bool CometSearchMod::ScorePeptides(string * currentPeptide, bool *pbDuplFragment
 				cout << k << ": " << currentPTM << endl;
 				iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
 				if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
-					cerr << "ERROR: cannot find this PTM in the config file " << currentPTM << endl;
+					cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 					return false;
 				}
 				dYion += iterResidueMonoMass;
@@ -838,7 +836,7 @@ bool CometSearchMod::ScorePeptides(string * currentPeptide, bool *pbDuplFragment
 			cout << k << ": " << currentPTM << endl;
 			iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
 			if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
-				cerr << "ERROR: cannot find this PTM in the config file" << currentPTM << endl;
+				cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 				return false;
 			}
 			dYion += iterResidueMonoMass;

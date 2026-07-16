@@ -213,43 +213,59 @@ int PSMfeatureExtractor::sipNominalShiftPerAtom(const std::string &sipAtom)
 }
 
 double PSMfeatureExtractor::expectedNaturalNominalShiftExceptTarget(
-    const std::array<int, 6> &atomCounts,
+    const sipros::SourcedComposition &composition,
     int targetAtomIndex,
     int targetIsotopeIndex,
     double targetFraction)
 {
     double expectedShift = 0.0;
     const auto &atomDistributions =
-        ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution;
-    const size_t atomCount = std::min(atomCounts.size(), atomDistributions.size());
+        ProNovoConfig::configIsotopologue.vNaturalAtomIsotopicDistribution;
     static const std::string atomLetters = "CHONPS";
 
-    for (size_t atomIdx = 0; atomIdx < atomCount; ++atomIdx)
+    for (size_t source = 0; source < sipros::IsotopeSourceCount; ++source)
     {
-        if (atomCounts[atomIdx] <= 0)
-            continue;
-
-        std::vector<double> probabilities =
-            ProNovoConfig::getNaturalAtomIsotopeProbabilities(atomIdx);
-        if (static_cast<int>(atomIdx) == targetAtomIndex &&
-            std::isfinite(targetFraction))
+        const bool biosynthetic =
+            source == static_cast<size_t>(sipros::IsotopeSource::Biosynthetic);
+        for (size_t atomIdx = 0;
+             atomIdx < sipros::ElementCount &&
+             atomIdx < atomDistributions.size();
+             ++atomIdx)
         {
-            if (!averagine::changeAtomProbability(
-                    probabilities, atomLetters[atomIdx], targetFraction))
-                return std::numeric_limits<double>::quiet_NaN();
-        }
-
-        const auto &masses = atomDistributions[atomIdx].vMass;
-        const size_t isotopeCount = std::min(probabilities.size(), masses.size());
-        for (size_t isotopeIdx = 1; isotopeIdx < isotopeCount; ++isotopeIdx)
-        {
-            if (static_cast<int>(atomIdx) == targetAtomIndex &&
-                static_cast<int>(isotopeIdx) == targetIsotopeIndex)
+            const int count = composition.atoms[source][atomIdx];
+            if (count <= 0)
                 continue;
-            const int nominalShift = static_cast<int>(std::lround(
-                masses[isotopeIdx] - masses[0]));
-            expectedShift += static_cast<double>(atomCounts[atomIdx]) *
-                             nominalShift * probabilities[isotopeIdx];
+
+            std::vector<double> probabilities =
+                ProNovoConfig::getNaturalAtomIsotopeProbabilities(atomIdx);
+            if (biosynthetic &&
+                static_cast<int>(atomIdx) == targetAtomIndex &&
+                std::isfinite(targetFraction))
+            {
+                if (!averagine::changeAtomProbability(
+                        probabilities, atomLetters[atomIdx], targetFraction))
+                    return std::numeric_limits<double>::quiet_NaN();
+            }
+
+            const auto &masses = atomDistributions[atomIdx].vMass;
+            const size_t isotopeCount =
+                std::min(probabilities.size(), masses.size());
+            for (size_t isotopeIdx = 1;
+                 isotopeIdx < isotopeCount;
+                 ++isotopeIdx)
+            {
+                // The fitted target contribution is only the selected isotope
+                // on biosynthetic atoms. Natural-source atoms of the same
+                // element remain part of the background subtraction.
+                if (biosynthetic &&
+                    static_cast<int>(atomIdx) == targetAtomIndex &&
+                    static_cast<int>(isotopeIdx) == targetIsotopeIndex)
+                    continue;
+                const int nominalShift = static_cast<int>(std::lround(
+                    masses[isotopeIdx] - masses[0]));
+                expectedShift += static_cast<double>(count) *
+                                 nominalShift * probabilities[isotopeIdx];
+            }
         }
     }
     return expectedShift;
@@ -312,7 +328,7 @@ struct NominalEnvelopeModel
 };
 
 static NominalEnvelopeModel theoreticalSipEnvelope(
-    const std::array<int, 6> &atomCounts,
+    const sipros::SourcedComposition &composition,
     const SupportedSipIsotope &spec,
     double targetFraction);
 
@@ -344,7 +360,7 @@ std::vector<isotopicPeak> PSMfeatureExtractor::findMs1IsotopicPeaks(
     int precursorCharge,
     double monoPrecursorMz,
     double matchedPrecursorMz,
-    const std::array<int, 6> &atomCounts,
+    const sipros::SourcedComposition &composition,
     const std::string &sipAtom,
     double expectedEnrichmentPct,
     const std::function<double(double)> &mzToleranceDaAt)
@@ -354,7 +370,8 @@ std::vector<isotopicPeak> PSMfeatureExtractor::findMs1IsotopicPeaks(
     if (!ms1Data || precursorCharge <= 0 ||
         !resolveSupportedSipIsotope(sipAtom, spec) ||
         spec.atomIndex < 0 ||
-        atomCounts[static_cast<size_t>(spec.atomIndex)] <= 0 ||
+        composition[sipros::IsotopeSource::Biosynthetic]
+                   [static_cast<size_t>(spec.atomIndex)] <= 0 ||
         !std::isfinite(expectedEnrichmentPct))
         return peaks;
 
@@ -365,7 +382,7 @@ std::vector<isotopicPeak> PSMfeatureExtractor::findMs1IsotopicPeaks(
     const double targetFraction =
         std::max(0.0, std::min(1.0, expectedEnrichmentPct / 100.0));
     const NominalEnvelopeModel model =
-        theoreticalSipEnvelope(atomCounts, spec, targetFraction);
+        theoreticalSipEnvelope(composition, spec, targetFraction);
     if (model.probability.empty() ||
         model.massDelta.size() != model.probability.size())
         return peaks;
@@ -420,7 +437,8 @@ std::vector<isotopicPeak> PSMfeatureExtractor::findMs1IsotopicPeaks(
         model.massDelta[static_cast<size_t>(assignedIndex)] / precursorCharge;
     const double anchorResidual = scan.mz[anchorIdx] - anchorModelMz;
     const int targetAtomCount =
-        atomCounts[static_cast<size_t>(spec.atomIndex)];
+        composition[sipros::IsotopeSource::Biosynthetic]
+                   [static_cast<size_t>(spec.atomIndex)];
     const int halfWindow = isotopeHalfWindow(
         targetAtomCount, spec.nominalShift, assignedIndex);
     const int firstIsotopeIndex = std::max(0, assignedIndex - halfWindow);
@@ -699,7 +717,7 @@ static EnvelopeComponent targetElementEnvelope(
 }
 
 static EnvelopeComponent naturalBackgroundEnvelope(
-    const std::array<int, 6> &atomCounts,
+    const sipros::SourcedComposition &composition,
     int excludedAtomIndex,
     int maxNominalShift)
 {
@@ -708,36 +726,45 @@ static EnvelopeComponent naturalBackgroundEnvelope(
         static_cast<size_t>(maximum + 1), 0.0);
     std::vector<double> massLambda(
         static_cast<size_t>(maximum + 1), 0.0);
-    const auto &atomDistributions =
-        ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution;
-    const size_t atomLimit =
-        std::min(atomCounts.size(), atomDistributions.size());
+    const auto &atomDistributions = ProNovoConfig::configIsotopologue
+                                        .vNaturalAtomIsotopicDistribution;
 
-    for (size_t atom = 0; atom < atomLimit; ++atom)
+    for (size_t source = 0; source < sipros::IsotopeSourceCount; ++source)
     {
-        if (static_cast<int>(atom) == excludedAtomIndex ||
-            atomCounts[atom] <= 0)
-            continue;
-        const auto &probabilities =
-            ProNovoConfig::getNaturalAtomIsotopeProbabilities(atom);
-        const auto &masses = atomDistributions[atom].vMass;
-        const size_t isotopeLimit =
-            std::min(probabilities.size(), masses.size());
-        for (size_t isotope = 1;
-             isotope < isotopeLimit;
-             ++isotope)
+        const bool biosynthetic =
+            source == static_cast<size_t>(sipros::IsotopeSource::Biosynthetic);
+        for (size_t atom = 0;
+             atom < sipros::ElementCount && atom < atomDistributions.size();
+             ++atom)
         {
-            const double massDelta = masses[isotope] - masses[0];
-            const int nominalShift =
-                static_cast<int>(std::lround(massDelta));
-            if (nominalShift <= 0 || nominalShift > maximum)
+            // The full active distribution for biosynthetic target atoms is
+            // supplied by targetElementEnvelope. Same-element reagent and
+            // solvent atoms intentionally remain here at natural abundance.
+            if ((biosynthetic &&
+                 static_cast<int>(atom) == excludedAtomIndex) ||
+                composition.atoms[source][atom] <= 0)
                 continue;
-            const double eventRate =
-                static_cast<double>(atomCounts[atom]) *
-                probabilities[isotope];
-            lambda[static_cast<size_t>(nominalShift)] += eventRate;
-            massLambda[static_cast<size_t>(nominalShift)] +=
-                eventRate * massDelta;
+            const auto &probabilities =
+                ProNovoConfig::getNaturalAtomIsotopeProbabilities(atom);
+            const auto &masses = atomDistributions[atom].vMass;
+            const size_t isotopeLimit =
+                std::min(probabilities.size(), masses.size());
+            for (size_t isotope = 1;
+                 isotope < isotopeLimit;
+                 ++isotope)
+            {
+                const double massDelta = masses[isotope] - masses[0];
+                const int nominalShift =
+                    static_cast<int>(std::lround(massDelta));
+                if (nominalShift <= 0 || nominalShift > maximum)
+                    continue;
+                const double eventRate =
+                    static_cast<double>(composition.atoms[source][atom]) *
+                    probabilities[isotope];
+                lambda[static_cast<size_t>(nominalShift)] += eventRate;
+                massLambda[static_cast<size_t>(nominalShift)] +=
+                    eventRate * massDelta;
+            }
         }
     }
 
@@ -785,22 +812,23 @@ static EnvelopeComponent naturalBackgroundEnvelope(
 }
 
 static NominalEnvelopeModel theoreticalSipEnvelope(
-    const std::array<int, 6> &atomCounts,
+    const sipros::SourcedComposition &composition,
     const SupportedSipIsotope &spec,
     double targetFraction)
 {
     constexpr int naturalTail = 32;
     NominalEnvelopeModel model;
     if (spec.atomIndex < 0 ||
-        spec.atomIndex >= static_cast<int>(atomCounts.size()))
+        spec.atomIndex >= static_cast<int>(sipros::ElementCount))
         return model;
 
     const int targetAtomCount =
-        atomCounts[static_cast<size_t>(spec.atomIndex)];
+        composition[sipros::IsotopeSource::Biosynthetic]
+                   [static_cast<size_t>(spec.atomIndex)];
     EnvelopeComponent target = targetElementEnvelope(
         targetAtomCount, spec, targetFraction);
     EnvelopeComponent background = naturalBackgroundEnvelope(
-        atomCounts, spec.atomIndex, naturalTail);
+        composition, spec.atomIndex, naturalTail);
     if (target.probability.empty() ||
         background.probability.empty())
         return model;
@@ -892,10 +920,11 @@ PSMfeatureExtractor::getSIPelementAbundanceFromMS1Peaks(
     averagine avg;
     avg.calPepAtomCounts(peptideBodyWithPtms(peptide));
     if (spec.atomIndex < 0 ||
-        spec.atomIndex >= static_cast<int>(avg.pepAtomCounts.size()))
+        spec.atomIndex >= static_cast<int>(sipros::ElementCount))
         return result;
     const double atomNumber =
-        avg.pepAtomCounts[static_cast<size_t>(spec.atomIndex)];
+        avg.pepComposition[sipros::IsotopeSource::Biosynthetic]
+                          [static_cast<size_t>(spec.atomIndex)];
     if (atomNumber <= 0.0)
         return result;
 
@@ -928,7 +957,7 @@ PSMfeatureExtractor::getSIPelementAbundanceFromMS1Peaks(
     {
         const double naturalOtherShift =
             expectedNaturalNominalShiftExceptTarget(
-                avg.pepAtomCounts,
+                avg.pepComposition,
                 spec.atomIndex,
                 spec.isotopeIndex,
                 targetFraction);
@@ -967,7 +996,7 @@ PSMfeatureExtractor::getSIPelementAbundanceFromMS1Peaks(
         const double modelFraction = fittedPct / 100.0;
         const NominalEnvelopeModel model =
             theoreticalSipEnvelope(
-                avg.pepAtomCounts, spec, modelFraction);
+                avg.pepComposition, spec, modelFraction);
         if (model.probability.empty())
             break;
         const double modelMaximum =
@@ -1149,7 +1178,7 @@ void PSMfeatureExtractor::extractFeaturesOfEachPSM()
                 precursorCharge,
                 monoPrecursorMz,
                 matchedPrecursorMz,
-                mAveragine.pepAtomCounts,
+                mAveragine.pepComposition,
                 sipIsotope,
                 mSipPSM->MS2IsotopicAbundances[i],
                 mzToleranceDaAt);

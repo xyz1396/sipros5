@@ -202,7 +202,7 @@ bool MVH::CalculateSequenceIons(string & sSequence, int maxIonCharge, bool useSm
 		currentPTM = sSequence.at(j);
 		iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
 		if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
-			cerr << "ERROR: cannot find this PTM in the config file " << currentPTM << endl;
+			cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 			return false;
 		}
 		dBion += iterResidueMonoMass;
@@ -214,7 +214,7 @@ bool MVH::CalculateSequenceIons(string & sSequence, int maxIonCharge, bool useSm
 		currentPTM = sSequence.at(k);
 		iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
 		if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
-			cerr << "ERROR: cannot find this PTM in the config file " << currentPTM << endl;
+			cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 			return false;
 		}
 		dYion += iterResidueMonoMass;
@@ -246,7 +246,7 @@ bool MVH::CalculateSequenceIons(string & sSequence, int maxIonCharge, bool useSm
 			currentPTM = sSequence.at(j);
 			iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
 			if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
-				cerr << "ERROR: cannot find this PTM in the config file " << currentPTM << endl;
+				cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 				return false;
 			}
 			dBion += iterResidueMonoMass;
@@ -258,7 +258,7 @@ bool MVH::CalculateSequenceIons(string & sSequence, int maxIonCharge, bool useSm
 			currentPTM = sSequence.at(k);
 			iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
 			if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
-				cerr << "ERROR: cannot find this PTM in the config file " << currentPTM << endl;
+				cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 				exit(1);
 				return false;
 			}
@@ -273,7 +273,7 @@ bool MVH::CalculateSequenceIons(string & sSequence, int maxIonCharge, bool useSm
 		currentPTM = sSequence.at(k);
 		iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
 		if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
-			cerr << "ERROR: cannot find this PTM in the config file" << currentPTM << endl;
+			cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 			exit(1);
 			return false;
 		}
@@ -655,4 +655,3 @@ bool MVH::ScoreSequenceVsSpectrumSIP(string & currentPeptide, int precursorCharg
 	}
 	return true;
 }
-

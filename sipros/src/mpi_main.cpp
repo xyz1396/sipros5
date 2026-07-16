@@ -92,7 +92,7 @@ void slaveProcess(const std::vector<UnitOfWork> &workload, const sipros::Databas
 		}
 		const UnitOfWork &work = workload.at(static_cast<size_t>(currentWorkId));
 		std::cout << "Slave process " << rank << " started " << work.scanFile
-				  << " (config: " << args.configFile << ")" << std::endl;
+				  << std::endl;
 		ProNovoConfig::iRank = rank;
 		sipros::SiprosSearchRunner runner;
 		const int result = runner.runScan(work.scanFile, args);

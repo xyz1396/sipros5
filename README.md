@@ -56,6 +56,62 @@ siproswf -i raw -f db.faa -e C13 -o sip_output
 siproswf -i raw -f db.faa -e C13 --negative_control Pan_062822_X1iso5 -o sip2_output
 ```
 
+#### Search chemistry and defaults
+
+The Regular and SIP search profiles, residue/PTM chemistry, isotope
+distributions, digestion rules, and default tolerances live in
+`sipros/src/proNovoConfig.cpp`. Runtime inputs such as the FASTA database,
+mass-tolerance overrides, SIP isotope, abundance range, and abundance step are
+passed explicitly on the command line. Missing SIP controls are rejected.
+
+Regular FASTA search enables oxidation (`~`, M) and deamidation (`!`, N/Q) by
+default, with at most three variable PTMs per peptide. Use a repeatable
+`--ptm` option to replace that default set with compiled PTMs, and
+`--max-ptm-count` to change the per-peptide limit. The `default` selector adds
+the Regular defaults to an explicit list; `none` disables all variable PTMs;
+and `all` selects every compatible variable PTM. Descriptive names avoid shell
+quoting problems with symbols such as `>`, `&`, and `$`.
+
+Carbamidomethyl-Cys is the default fixed PTM. A repeatable `--fixed-ptm`
+option replaces the fixed default set: use `--fixed-ptm none` for natural Cys,
+or `--fixed-ptm carbamidomethyl` to open it explicitly.
+
+```bash
+# Defaults: oxidation + deamidation
+siproswf -i sample.h5 -f proteins.fasta -o regular_output
+
+# Defaults plus phosphorylation and acetylation
+siproswf -i sample.h5 -f proteins.fasta -o ptm_output \
+  --ptm default --ptm phosphorylation --ptm acetylation \
+  --max-ptm-count 3
+
+# Natural Cys: close the default fixed carbamidomethyl PTM
+siproswf -i sample.h5 -f proteins.fasta -o natural_cys_output \
+  --fixed-ptm none
+
+# Show every compiled selector, token, and site
+tools/sipros search-fasta --list-ptms
+```
+
+The restored catalog contains phosphorylation and its two deterministic
+neutral-loss forms, acetylation, mono/di/trimethylation, S-nitrosylation,
+nitration, and beta-methylthiolation in addition to the two defaults. IAA
+carbamidomethylation uses the `/` token when natural Cys is selected; it is
+excluded from variable search while the equivalent fixed PTM is open.
+FragPipe bracketed absolute or delta modification masses are translated through
+this same catalog before theoretical or experimental spectrum masses are
+calculated.
+
+Elemental formulas also retain isotope-source provenance. Amino-acid atoms are
+`Biosynthetic` and follow the selected SIP abundance; carbamidomethyl atoms are
+`ReagentNatural`, and peptide-terminal H2O is `DigestionSolvent`. Both natural
+sources always use the natural isotope distribution of the real CHONPS element.
+Generated spectra libraries record this contract in `chemistry_profile_id`, and
+`search-spectra` rejects libraries made with a different or legacy chemistry.
+Precursor estimates retain each target isotope's exact mass defect: C13, H2,
+and N15 use their element-specific one-neutron shifts, while each O18 or S34
+atom contributes its full two-neutron isotope mass difference.
+
 ### 5. Output Files
 
 - `SIP_filtered_psms.tsv`: PSMs from all samples that pass the unlabeled negative-control filter (1% FDR), with SIP element labeling percentages (`MS1IsotopicAbundances`, `MS2IsotopicAbundances`). `isotopicPeakNumbers` is the raw number of extracted MS1 isotope peaks. `MS1IsotopeFitScore` is the theoretical-envelope coverage from `0` to `1`, set to `0` unless at least two compatible peaks are present; scores of at least `0.02` pass the MS1 abundance-fit validity threshold. MS1IsotopicAbundances are more sensitive; MS2IsotopicAbundances are more accurate.

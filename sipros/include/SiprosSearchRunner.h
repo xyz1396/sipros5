@@ -20,7 +20,6 @@ public:
 struct DatabaseSearchArguments
 {
 	std::vector<std::string> scanFiles;
-	std::string configFile;
 	std::string workingDirectory;
 	std::string singleWorkingFile;
 	std::string fastaFile;
@@ -28,9 +27,18 @@ struct DatabaseSearchArguments
 	std::string pinOutputFile;
 	std::string sipElementSpec;
 	std::string sipRangeSpec;
+	std::vector<std::string> fixedPtmSelectors;
+	std::vector<std::string> ptmSelectors;
 	double sipStepPct = 1.0;
+	double toleranceMs1Da = 0.0;
+	double toleranceMs2Da = 0.0;
 	int pinLabel = 1;
 	int topPsmsPerScan = 0;
+	int maxPtmCountOverride = -1;
+	bool sipStepProvided = false;
+	bool toleranceMs1Provided = false;
+	bool toleranceMs2Provided = false;
+	bool listPtms = false;
 	bool showHelp = false;
 };
 

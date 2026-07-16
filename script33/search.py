@@ -18,20 +18,20 @@ from thread_allocation import (
 class search:
     def __init__(self, toleranceMS1: float, toleranceMS2: float,
                  sipRange: str, step: str,
-                 configTemplatePath: str, raxportPath: str,
-                 siprosPath: str, fastaPath: str,
+                 raxportPath: str, siprosPath: str, fastaPath: str,
                  inputPath: str, outputPath: str, negative_control: str,
                  threadNumber: int, logger: Logger, element="R",
                  nPrecursor=6, dryrun=False, psmTsv: str | None = None,
                  unlabeledInput: str | None = None, spectraDir: str | None = None,
-                 topPsmsPerScan: int = 8) -> None:
+                 topPsmsPerScan: int = 8, ptms: list[str] | None = None,
+                 fixedPtms: list[str] | None = None,
+                 maxPtmCount: int | None = None) -> None:
         self.core_count = available_cpu_count()
         self.element = element
         self.toleranceMS1 = toleranceMS1
         self.toleranceMS2 = toleranceMS2
         self.sipRange = sipRange
         self.step = step
-        self.configTemplatePath = configTemplatePath
         self.raxportPath = raxportPath
         self.siprosPath = siprosPath
         self.fastaPath = fastaPath
@@ -53,6 +53,9 @@ class search:
         self.unlabeledInput = unlabeledInput
         self.spectraDir = spectraDir
         self.topPsmsPerScan = topPsmsPerScan
+        self.ptms = None if ptms is None else list(ptms)
+        self.fixedPtms = None if fixedPtms is None else list(fixedPtms)
+        self.maxPtmCount = maxPtmCount
         self.generatedSpectraDir = f'{outputPath}/spectra'
         self.decoyPrefix = 'DECOY_' if (self.psmTsv or self.unlabeledInput or self.spectraDir) else 'Decoy_'
 
@@ -150,70 +153,6 @@ class search:
                     sequence += line.strip()
             if header:
                 output.write(header + '\n' + sequence[::-1] + '\n')
-
-    def sip_element_symbol(self) -> str:
-        if self.element == "R" or not self.element:
-            return "C"
-        return self.element[0].upper()
-
-    def sip_isotope_number(self) -> str:
-        if self.element == "R" or not self.element:
-            return "13"
-        supported = {
-            "C13": "13",
-            "H2": "2",
-            "N15": "15",
-            "O18": "18",
-            "S34": "34",
-        }
-        try:
-            return supported[self.element]
-        except KeyError as exc:
-            raise ValueError(
-                f"Unsupported SIP isotope {self.element}; "
-                "use C13, H2, N15, O18, or S34") from exc
-
-    def update_config_line(self, line: str, replacements: dict[str, str]) -> str:
-        stripped = line.lstrip()
-        active = stripped.split("#", 1)[0]
-        if "=" not in active:
-            return line
-        line_key = active.split("=", 1)[0].strip()
-        if line_key not in replacements:
-            return line
-        indent = line[:len(line) - len(stripped)]
-        suffix = ""
-        if "#" in stripped:
-            suffix = "  #" + stripped.split("#", 1)[1].rstrip("\n")
-        return f"{indent}{line_key} = {replacements[line_key]}{suffix}\n"
-
-    def write_workflow_config(self) -> str:
-        cfgTempName = "Regular.cfg" if self.element == "R" else "SIP.cfg"
-        template_path = Path(self.configTemplatePath) / cfgTempName
-        if not template_path.exists():
-            self.logger.error(f"Config template does not exist: {template_path}")
-            raise SystemExit(1)
-        output_path = Path(self.outPutPath) / cfgTempName
-        self.logger.info(f"Writing workflow config to {output_path}")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        toleranceMS1 = self.toleranceMS1 if self.toleranceMS1 is not None else 0.01
-        toleranceMS2 = self.toleranceMS2 if self.toleranceMS2 is not None else 0.01
-        search_type = "Regular" if self.element == "R" else "SIP"
-        search_name = "SE" if self.element == "R" else "SIP"
-        replacements = {
-            "Search_Name": search_name,
-            "Search_Type": search_type,
-            "FASTA_Database": self.fastaPath,
-            "Search_Mass_Tolerance_Parent_Ion": str(toleranceMS1),
-            "Mass_Tolerance_Fragment_Ions": str(toleranceMS2),
-            "SIP_Element": self.sip_element_symbol(),
-            "SIP_Element_Isotope": self.sip_isotope_number(),
-        }
-        with open(template_path, "r") as source, open(output_path, "w") as output:
-            for line in source:
-                output.write(self.update_config_line(line, replacements))
-        self.logger.info(f"Wrote config file: {output_path}")
-        return str(output_path)
 
     def input_entries(self, input_path: str) -> list[str]:
         path = Path(input_path)
@@ -321,6 +260,18 @@ class search:
         return (f' -a {self.q(self.element)} -b {self.q(sip_range)}'
                 f' -s {self.q(sip_step)}')
 
+    def direct_ptm_args(self) -> str:
+        args = ''.join(f' --ptm {self.q(ptm)}' for ptm in (self.ptms or []))
+        args += self.fixed_ptm_args()
+        if self.maxPtmCount is not None:
+            args += f' --max-ptm-count {self.maxPtmCount}'
+        return args
+
+    def fixed_ptm_args(self) -> str:
+        return ''.join(
+            f' --fixed-ptm {self.q(ptm)}' for ptm in (self.fixedPtms or [])
+        )
+
     def pin_score_value(self, row: list[str], score_idx: int) -> float:
         try:
             return float(row[score_idx])
@@ -395,8 +346,13 @@ class search:
             for row in merged_rows:
                 merged.write("\t".join(row) + "\n")
 
-    def sipros_search(self, config: str):
+    def sipros_search(self):
         sip_args = self.direct_sip_args()
+        ptm_args = self.direct_ptm_args()
+        tolerance_args = (
+            f' --tolerance-ms1 {self.q(self.toleranceMS1)}'
+            f' --tolerance-ms2 {self.q(self.toleranceMS2)}'
+        )
         direct_top_psms_per_scan = self.topPsmsPerScan
         commands: list[str] = []
         merge_jobs: list[tuple[str, str, str]] = []
@@ -409,14 +365,14 @@ class search:
             decoy_pin = f'{sample_dir}/{decoy_pin_name}'
             final_pin = f'{sample_dir}/{base_name}.pin'
             commands.append(
-                f'{self.q(self.siprosPath)} search-fasta -c {self.q(config)} -fasta {self.q(self.fastaPath)} '
+                f'{self.q(self.siprosPath)} search-fasta -fasta {self.q(self.fastaPath)} '
                 f'-f {self.q(hdf5_path)} -o {self.q(sample_dir)} --pin-output {self.q(target_pin_name)}{sip_args} '
-                f'--pin-label 1 --top-psms-per-scan {direct_top_psms_per_scan}'
+                f'--pin-label 1 --top-psms-per-scan {direct_top_psms_per_scan}{tolerance_args}{ptm_args}'
             )
             commands.append(
-                f'{self.q(self.siprosPath)} search-fasta -c {self.q(config)} -fasta {self.q(self.decoyPath)} '
+                f'{self.q(self.siprosPath)} search-fasta -fasta {self.q(self.decoyPath)} '
                 f'-f {self.q(hdf5_path)} -o {self.q(sample_dir)} --pin-output {self.q(decoy_pin_name)}{sip_args} '
-                f'--pin-label -1 --top-psms-per-scan {direct_top_psms_per_scan}'
+                f'--pin-label -1 --top-psms-per-scan {direct_top_psms_per_scan}{tolerance_args}{ptm_args}'
             )
             merge_jobs.append((target_pin, decoy_pin, final_pin))
         allocation = allocate_threads(
@@ -463,8 +419,14 @@ class search:
             )
         return expected
 
-    def generate_or_reuse_spectra_library(self, config: str) -> str:
+    def generate_or_reuse_spectra_library(self) -> str:
         if self.spectraDir:
+            if self.fixedPtms:
+                self.logger.error(
+                    '--fixed-ptm cannot be used with --spectra-dir; the reused '
+                    "spectra library's chemistry metadata is authoritative"
+                )
+                raise SystemExit(1)
             spectra_dir = os.path.realpath(self.spectraDir)
             if not os.path.isdir(spectra_dir):
                 self.logger.error(f'--spectra-dir does not exist or is not a directory: {spectra_dir}')
@@ -482,10 +444,11 @@ class search:
         os.makedirs(self.generatedSpectraDir, exist_ok=True)
         sip_range = self.sipRange if self.sipRange is not None else '0-100'
         sip_step = self.step if self.step is not None else '1'
-        cmd = (f'{self.q(self.siprosPath)} experimental-spectra -c {self.q(config)} '
+        cmd = (f'{self.q(self.siprosPath)} experimental-spectra '
                f'-i {self.q(self.psmTsv)} -f {self.q(unlabeled_hdf5)} '
                f'-o {self.q(self.generatedSpectraDir)} -a {self.element} '
-               f'-b {sip_range} -s {sip_step} --decoy -t {self.threadNumber}')
+               f'-b {sip_range} -s {sip_step} --decoy -t {self.threadNumber}'
+               f'{self.fixed_ptm_args()}')
         if not self.dryrun:
             self.run_command(cmd, threads=self.threadNumber)
             spectra_files = list(Path(self.generatedSpectraDir).glob('*.h5')) + list(Path(self.generatedSpectraDir).glob('*.hdf5'))
@@ -499,7 +462,7 @@ class search:
                 raise SystemExit(1)
         return self.generatedSpectraDir
 
-    def search_spectra_samples(self, config: str, spectra_dir: str):
+    def search_spectra_samples(self, spectra_dir: str):
         commands: list[tuple[str, int]] = []
         samples: list[tuple[str, str, str]] = []
         for base_name in self.base_names:
@@ -518,7 +481,7 @@ class search:
         for (_, hdf5_path, sample_dir), threads in zip(
                 samples, allocation.task_threads):
             cmd = (f'{self.q(self.siprosPath)} search-spectra -f {self.q(hdf5_path)} '
-                   f'-c {self.q(config)} -h5 {self.q(spectra_dir)} -o {self.q(sample_dir)} '
+                   f'-h5 {self.q(spectra_dir)} -o {self.q(sample_dir)} '
                    f'-t {threads} --tolerance-ms1 {self.toleranceMS1} --tolerance-ms1-unit da '
                    f'--tolerance-ms2 {self.toleranceMS2} --tolerance-ms2-unit da --top-psms-per-scan {self.topPsmsPerScan}')
             commands.append((cmd, threads))
@@ -536,7 +499,6 @@ class search:
             self.logger.error('search-spectra mode requires a SIP element such as C13')
             raise SystemExit(1)
         self.reverse_fasta_sequences()
-        config = self.write_workflow_config()
         self.logger.info(
             f'Workflow CPU allocation: {self.threadNumber} cores '
             f'({self.core_count} available)'
@@ -546,12 +508,11 @@ class search:
         self.create_sample_directories()
         if not self.dryrun:
             self.prepare_hdf5_inputs()
-            spectra_dir = self.generate_or_reuse_spectra_library(config)
-            self.search_spectra_samples(config, spectra_dir)
+            spectra_dir = self.generate_or_reuse_spectra_library()
+            self.search_spectra_samples(spectra_dir)
 
     def run(self) -> None:
         self.reverse_fasta_sequences()
-        config = self.write_workflow_config()
         self.logger.info(
             f'Workflow CPU allocation: {self.threadNumber} cores '
             f'({self.core_count} available)'
@@ -561,4 +522,4 @@ class search:
         self.create_sample_directories()
         if not self.dryrun:
             self.prepare_hdf5_inputs()
-            self.sipros_search(config)
+            self.sipros_search()

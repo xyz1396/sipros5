@@ -1,6 +1,5 @@
 import os
 import sys
-import configparser
 import argparse
 import logging
 from logging import Logger
@@ -24,7 +23,6 @@ class SIPROSWorkflow:
         self.upper_path = upper_path
         # Default paths for tools
         self.defaultToolsPaths: dict[str, str] = {
-            'configTemplates': f'{upper_path}/configTemplates',
             'raxport': f'{upper_path}/tools/Raxport-linux-x64',
             'sipros': f'{upper_path}/tools/sipros',
             'filter': f'{upper_path}/tools/percolator',
@@ -33,27 +31,13 @@ class SIPROSWorkflow:
             'metaLP': f'{upper_path}/tools/metaLP',
             'quantification': f'{upper_path}/tools/ionquant'
         }
-
-        # Initialize paths from config file if available
-        self.cfg_file = 'workflow.cfg'
-        self.toolsPaths: dict[str, str] = self.load_paths()
+        self.toolsPaths: dict[str, str] = self.defaultToolsPaths.copy()
         self.args: Namespace = self.parse_arguments()
         if not os.path.exists(self.args.output):
             os.makedirs(self.args.output)
         else:
             warnings.warn(message=f'{self.args.output} exists and will be overwritten')
         self.logger: Logger = self.initLogger(self.args.output)
-
-    def load_paths(self) -> dict[str, str]:
-        paths: dict[str, str] = self.defaultToolsPaths.copy()
-        cfg_path = os.path.join(self.upper_path, self.cfg_file)
-        if os.path.exists(path=cfg_path):
-            config = configparser.ConfigParser()
-            config.read(filenames=cfg_path)
-            for key in paths:
-                if config.has_option(section='Paths', option=key):
-                    paths[key] = config.get(section='Paths', option=key)
-        return paths
 
     def parse_arguments(self) -> Namespace:
         epilog = """
@@ -74,16 +58,26 @@ citation:
             formatter_class=argparse.RawTextHelpFormatter)
         parser.add_argument('-i', '--input', required=True,
                             help="Input raw/.d/.d.zip/HDF5 file path or directory, e.g., 'data/raw', 'A.raw,B.h5,C.raw'")
-        parser.add_argument('--sPTM', required=False, type=str, help=(
-            "Static PTM for regular search. Example: 'C|5,8,2,2,0,1'\n"
-            "This means a static modification (e.g., alkylation) on residue C, "
-            "with new element composition: C,H,O,N,P,S = 5,8,2,2,0,1."
-        ))
-        parser.add_argument('--vPTM', required=False, type=str, help=(
-            "Variable PTM for regular search, e.g., '~|M|0,0,1,0,0,0;!|NQ|0,-1,1,-1,0,0'.\n"
-            "This means a variable modification on residue M (Oxidation or Hydroxylation, element composition change: 0,0,1,0,0,0 for C,H,O,N,P,S),\n"
-            "and on N/Q (Deamidation or Citrullination, element composition change: 0,-1,1,-1,0,0 for C,H,O,N,P,S)."
-        ))
+        parser.add_argument(
+            '--ptm', action='append', default=None,
+            metavar='NAME_OR_TOKEN|default|none|all',
+            help=("Replace the variable-PTM selection for FASTA search. Repeat "
+                  "the option to select multiple PTMs; include 'default' to add "
+                  "the profile defaults. 'none' disables all and 'all' selects "
+                  "every compatible PTM. If omitted, profile defaults are used."),
+        )
+        parser.add_argument(
+            '--fixed-ptm', action='append', default=None,
+            metavar='NAME|default|none|all',
+            help=("Replace the fixed-PTM selection for FASTA search or spectra-"
+                  "library generation. Repeat to select multiple fixed PTMs; "
+                  "'none' closes fixed CAM. If omitted, profile defaults are used."),
+        )
+        parser.add_argument(
+            '--max-ptm-count', type=int, default=None, metavar='N',
+            help=("Maximum variable PTMs allowed per peptide for FASTA search. "
+                  "If omitted, the compiled search-profile default is used."),
+        )
         parser.add_argument('--toleranceMS1', required=False, type=float, default=0.01,
             help="MS1 mass tolerance in Da (default: 0.01).")
         parser.add_argument('--toleranceMS2', required=False, type=float, default=0.01,
@@ -146,8 +140,21 @@ citation:
             parser.error('--topN must be a positive integer')
         if args.nPrecursor <= 0:
             parser.error('--nPrecursor must be a positive integer')
+        if args.max_ptm_count is not None and args.max_ptm_count < 0:
+            parser.error('--max-ptm-count must be a non-negative integer')
         
         spectra_mode = bool(args.psm_tsv or args.unlabeled_input or args.spectra_dir)
+        if spectra_mode and (
+                args.ptm is not None or args.max_ptm_count is not None):
+            parser.error(
+                "--ptm and --max-ptm-count apply only to FASTA search; "
+                "search-spectra uses the PTMs already encoded in its spectra library"
+            )
+        if args.spectra_dir and args.fixed_ptm is not None:
+            parser.error(
+                "--fixed-ptm cannot be used with --spectra-dir; the reused "
+                "spectra library's chemistry metadata is authoritative"
+            )
         if not args.element:
             args.element = "C13" if spectra_mode else "R"
         elif args.element != "R":
@@ -185,7 +192,6 @@ citation:
                                toleranceMS2=self.args.toleranceMS2,
                                sipRange=self.args.range,
                                step=self.args.precision,
-                               configTemplatePath=self.toolsPaths['configTemplates'],
                                raxportPath=self.toolsPaths['raxport'],
                                siprosPath=self.toolsPaths['sipros'],
                                fastaPath=self.args.fasta,
@@ -199,7 +205,10 @@ citation:
                                psmTsv=self.args.psm_tsv,
                                unlabeledInput=self.args.unlabeled_input,
                                spectraDir=self.args.spectra_dir,
-                               topPsmsPerScan=self.args.topN)
+                               topPsmsPerScan=self.args.topN,
+                               ptms=self.args.ptm,
+                               fixedPtms=self.args.fixed_ptm,
+                               maxPtmCount=self.args.max_ptm_count)
         if spectra_mode:
             sipros_search.run_search_spectra()
         else:

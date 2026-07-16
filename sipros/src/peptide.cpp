@@ -1,4 +1,5 @@
 #include "peptide.h"
+#include "isotopologue.h"
 
 Peptide::Peptide() {
 	iPeptideLength = 0;
@@ -69,7 +70,7 @@ void Peptide::calculateExpectedFragments(const string & sNewPeptide, const map<c
 			break;
 		iter = mapResidueMass.find(sNewPeptide[i]);
 		if (iter == mapResidueMass.end())
-			cerr << "WARNING: Residue " << sNewPeptide[i] << " Peptide " << sNewPeptide << " is not defined in the config." << endl;
+			cerr << "WARNING: Residue " << sNewPeptide[i] << " Peptide " << sNewPeptide << " is not defined in the active chemistry profile." << endl;
 		else if (isalpha(sNewPeptide[i])) {
 			// this is an amino acid residue
 			dMass = dMass + iter->second;
@@ -88,7 +89,7 @@ void Peptide::calculateExpectedFragments(const string & sNewPeptide, const map<c
 			// this is PTM to the C terminus
 			iter = mapResidueMass.find(sNewPeptide[i]);
 			if (iter == mapResidueMass.end())
-				cerr << "WARNING: Residue " << sNewPeptide[i] << " Peptide " << sNewPeptide << " is not defined in the config." << endl;
+				cerr << "WARNING: Residue " << sNewPeptide[i] << " Peptide " << sNewPeptide << " is not defined in the active chemistry profile." << endl;
 			else
 				dMass = dMass + iter->second;
 		}
@@ -229,7 +230,7 @@ void Peptide::calculateExpectedFragments(const string & sNewPeptide, const map<c
 		}
 		iter = mapResidueMass.find(sNewPeptide[i]);
 		if (iter == mapResidueMass.end()) {
-			cerr << "WARNING: Residue " << sNewPeptide[i] << " Peptide " << sNewPeptide << " is not defined in the config." << endl;
+			cerr << "WARNING: Residue " << sNewPeptide[i] << " Peptide " << sNewPeptide << " is not defined in the active chemistry profile." << endl;
 		} else if (isalpha(sNewPeptide[i])) {
 			// this is an amino acid residue
 			dMass = dMass + iter->second;
@@ -249,7 +250,7 @@ void Peptide::calculateExpectedFragments(const string & sNewPeptide, const map<c
 			// this is PTM to the C terminus
 			iter = mapResidueMass.find(sNewPeptide[i]);
 			if (iter == mapResidueMass.end()) {
-				cerr << "WARNING: Residue " << sNewPeptide[i] << " Peptide " << sNewPeptide << " is not defined in the config." << endl;
+				cerr << "WARNING: Residue " << sNewPeptide[i] << " Peptide " << sNewPeptide << " is not defined in the active chemistry profile." << endl;
 			} else {
 				dMass = dMass + iter->second;
 			}
@@ -261,4 +262,3 @@ void Peptide::calculateExpectedFragments(const string & sNewPeptide, const map<c
 		pvdYionMass->push_back(dMass - (*pvdBionMass)[i]);
 	}
 }
-

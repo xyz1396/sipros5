@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -257,32 +258,10 @@ class WorkflowAllocationTests(unittest.TestCase):
         workflow.toleranceMS1 = 0.01
         workflow.toleranceMS2 = 0.02
         workflow.topPsmsPerScan = 8
+        workflow.ptms = None
+        workflow.fixedPtms = None
+        workflow.maxPtmCount = None
         return workflow
-
-    def test_workflows_write_config_without_configs_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            templates = root / "templates"
-            templates.mkdir()
-            (templates / "Regular.cfg").write_text(
-                "Search_Name = old\nSIP_Element = C\nSIP_Element_Isotope = 13\n"
-            )
-            (templates / "SIP.cfg").write_text(
-                "Search_Name = old\nSIP_Element = C\nSIP_Element_Isotope = 13\n"
-            )
-            for element, filename in (("R", "Regular.cfg"), ("N15", "SIP.cfg")):
-                with self.subTest(element=element):
-                    output = root / element
-                    workflow = self.make_search(str(output))
-                    workflow.element = element
-                    workflow.configTemplatePath = str(templates)
-                    workflow.fastaPath = "target.fasta"
-
-                    config = workflow.write_workflow_config()
-
-                    self.assertEqual(config, str(output / filename))
-                    self.assertTrue(Path(config).is_file())
-                    self.assertFalse((output / "configs").exists())
 
     def test_spectra_search_divides_cli_threads_between_samples(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -296,13 +275,14 @@ class WorkflowAllocationTests(unittest.TestCase):
                 lambda command, threads: captured.append((command, threads))
             )
 
-            workflow.search_spectra_samples("config.cfg", "spectra")
+            workflow.search_spectra_samples("spectra")
 
             self.assertEqual(sorted(threads for _, threads in captured), [8, 8, 8])
             for command, threads in captured:
                 match = re.search(r"(?:^| )-t (\d+)(?: |$)", command)
                 self.assertIsNotNone(match)
                 self.assertEqual(int(match.group(1)), threads)
+                self.assertNotIn(" -c ", command)
 
     def test_spectra_search_overwrites_existing_pin(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -319,7 +299,7 @@ class WorkflowAllocationTests(unittest.TestCase):
                 lambda _command, threads: captured.append(threads)
             )
 
-            workflow.search_spectra_samples("config.cfg", "spectra")
+            workflow.search_spectra_samples("spectra")
 
             self.assertEqual(sorted(captured), [8, 8, 8])
 
@@ -332,16 +312,114 @@ class WorkflowAllocationTests(unittest.TestCase):
             workflow.fastaPath = "target.fasta"
             workflow.decoyPath = "decoy.fasta"
             workflow.direct_sip_args = lambda: ""
-            captured: list[int] = []
+            captured: list[tuple[str, int]] = []
             workflow.run_command_sipros = (
-                lambda _command, threads: captured.append(threads)
+                lambda command, threads: captured.append((command, threads))
             )
             workflow.merge_pin_files = lambda *_arguments: None
 
-            workflow.sipros_search("config.cfg")
+            workflow.sipros_search()
 
-            self.assertEqual(sorted(captured), [8, 8])
-            self.assertEqual(sum(captured), 16)
+            self.assertEqual(sorted(threads for _, threads in captured), [8, 8])
+            self.assertEqual(sum(threads for _, threads in captured), 16)
+            for command, _ in captured:
+                self.assertNotIn(" -c ", command)
+                self.assertIn("--tolerance-ms1 0.01", command)
+                self.assertIn("--tolerance-ms2 0.02", command)
+                arguments = shlex.split(command)
+                self.assertNotIn("--ptm", arguments)
+                self.assertNotIn("--fixed-ptm", arguments)
+                self.assertNotIn("--max-ptm-count", arguments)
+
+    def test_fasta_search_passes_custom_ptms_to_target_and_decoy(self) -> None:
+        with tempfile.TemporaryDirectory() as output:
+            workflow = self.make_search(output)
+            workflow.base_names = ["sample"]
+            workflow.hdf5_paths = {"sample": f"{output}/sample.h5"}
+            workflow.element = "R"
+            workflow.fastaPath = "target.fasta"
+            workflow.decoyPath = "decoy.fasta"
+            workflow.ptms = ["phosphorylation", "!"]
+            workflow.fixedPtms = ["none"]
+            workflow.maxPtmCount = 2
+            captured: list[str] = []
+            workflow.run_command_sipros = (
+                lambda command, _threads: captured.append(command)
+            )
+            workflow.merge_pin_files = lambda *_arguments: None
+
+            workflow.sipros_search()
+
+            self.assertEqual(len(captured), 2)
+            for command in captured:
+                arguments = shlex.split(command)
+                ptms = [
+                    arguments[index + 1]
+                    for index, argument in enumerate(arguments)
+                    if argument == "--ptm"
+                ]
+                self.assertEqual(ptms, ["phosphorylation", "!"])
+                fixed_ptms = [
+                    arguments[index + 1]
+                    for index, argument in enumerate(arguments)
+                    if argument == "--fixed-ptm"
+                ]
+                self.assertEqual(fixed_ptms, ["none"])
+                max_index = arguments.index("--max-ptm-count")
+                self.assertEqual(arguments[max_index + 1], "2")
+
+    def test_generated_spectra_library_receives_fixed_ptms(self) -> None:
+        with tempfile.TemporaryDirectory() as output:
+            workflow = self.make_search(output)
+            workflow.spectraDir = None
+            workflow.psmTsv = "input psm.tsv"
+            workflow.unlabeledInput = "unlabeled.h5"
+            workflow.generatedSpectraDir = f"{output}/spectra"
+            workflow.sipRange = "1-5"
+            workflow.step = "1"
+            workflow.element = "C13"
+            workflow.fixedPtms = ["default", "carbamidomethyl"]
+            workflow.dryrun = False
+            workflow.resolve_or_convert_unlabeled_hdf5 = lambda: "unlabeled.h5"
+            captured: list[str] = []
+
+            def fake_run(command: str, threads: int) -> None:
+                captured.append(command)
+                Path(workflow.generatedSpectraDir, "library.h5").touch()
+
+            workflow.run_command = fake_run
+
+            self.assertEqual(
+                workflow.generate_or_reuse_spectra_library(),
+                workflow.generatedSpectraDir,
+            )
+            self.assertEqual(len(captured), 1)
+            arguments = shlex.split(captured[0])
+            fixed_ptms = [
+                arguments[index + 1]
+                for index, argument in enumerate(arguments)
+                if argument == "--fixed-ptm"
+            ]
+            self.assertEqual(fixed_ptms, ["default", "carbamidomethyl"])
+
+    def test_reused_spectra_library_rejects_fixed_ptms(self) -> None:
+        with tempfile.TemporaryDirectory() as output:
+            spectra_dir = Path(output, "spectra")
+            spectra_dir.mkdir()
+            Path(spectra_dir, "library.h5").touch()
+            workflow = self.make_search(output)
+            workflow.spectraDir = str(spectra_dir)
+            workflow.fixedPtms = ["none"]
+            workflow.logger = mock.Mock()
+
+            with self.assertRaises(SystemExit):
+                workflow.generate_or_reuse_spectra_library()
+
+            workflow.logger.error.assert_called_once()
+            self.assertIn(
+                "chemistry metadata is authoritative",
+                workflow.logger.error.call_args.args[0],
+            )
 
     def test_fasta_search_overwrites_existing_pin(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -364,7 +442,7 @@ class WorkflowAllocationTests(unittest.TestCase):
                 lambda *arguments: merged.append(arguments)
             )
 
-            workflow.sipros_search("config.cfg")
+            workflow.sipros_search()
 
             self.assertEqual(captured, [8, 8])
             self.assertEqual(len(merged), 1)

@@ -60,6 +60,7 @@ namespace fs = std::filesystem;
 
 namespace
 {
+constexpr int kSpectraHdf5FormatVersion = 2;
 
 // -------------------- Args --------------------
 
@@ -67,8 +68,6 @@ struct Args
 {
 	std::string workingDir;
 	std::string singleHdf5;
-	std::string configFile;
-	std::string configDir;
 	std::string hdf5Dir;
 	std::string outputDir;
 	int threads = 0;
@@ -258,7 +257,7 @@ void printUsage(const char *prog)
 {
 	std::cerr
 		<< "Usage:\n  " << prog
-		<< " -w <Raxport HDF5 dir> [-f <single.h5>] -c <config.cfg> | -g <config dir>\n"
+		<< " -w <Raxport HDF5 dir> [-f <single.h5>]\n"
 		<< "    -h5 <SIP spectra dir> -o <PIN output dir> [-t <N>] [--rt-tolerance <min>]\n"
 		<< "    [--tolerance-ms1 <N>] [--tolerance-ms1-unit ppm|da]   (default: 10 ppm)\n"
 		<< "    [--tolerance-ms2 <N>] [--tolerance-ms2-unit ppm|da]   (default: 10 ppm)\n"
@@ -290,10 +289,6 @@ Args parseArgs(int argc, char **argv)
 			a.workingDir = next();
 		else if (k == "-f")
 			a.singleHdf5 = next();
-		else if (k == "-c")
-			a.configFile = next();
-		else if (k == "-g")
-			a.configDir = next();
 		else if (k == "-h5")
 			a.hdf5Dir = next();
 		else if (k == "-o")
@@ -475,10 +470,157 @@ struct SipRecord
 
 struct Hdf5FileMeta
 {
+	int formatVersion = 0;
+	std::string chemistryProfileId;
 	double targetSipAbundancePct = 0.0;
-	std::string sipAtom = "C";
-	int sipIsotopeMassNumber = 13;
+	std::string sipAtom;
+	int sipIsotopeMassNumber = -1;
 };
+
+std::string readRequiredStringAttribute(
+	const H5::H5Object &obj, const char *name, const std::string &path);
+int readRequiredIntAttribute(
+	const H5::H5Object &obj, const char *name, const std::string &path);
+double readRequiredDoubleAttribute(
+	const H5::H5Object &obj, const char *name, const std::string &path);
+void readSpectraFormatMetadata(
+	const H5::H5Object &obj,
+	const std::string &path,
+	int &formatVersion,
+	std::string &chemistryProfileId);
+void readAndValidateSpectraFormatMetadata(
+	const H5::H5Object &obj,
+	const std::string &path,
+	int &formatVersion,
+	std::string &chemistryProfileId);
+
+bool validateSpectraLibraryMetadata(
+	const std::vector<std::string> &paths,
+	std::string &canonicalSipIsotope,
+	std::string &error)
+{
+	canonicalSipIsotope.clear();
+	if (paths.empty())
+	{
+		error = "No spectra-library metadata was provided.";
+		return false;
+	}
+
+	std::string canonicalChemistryProfileId;
+	try
+	{
+		H5::H5File firstFile(paths.front(), H5F_ACC_RDONLY);
+		int firstFormatVersion = 0;
+		readSpectraFormatMetadata(
+			firstFile, paths.front(), firstFormatVersion,
+			canonicalChemistryProfileId);
+	}
+	catch (const H5::Exception &e)
+	{
+		error = "Cannot read spectra library metadata from " + paths.front() +
+			": " + (e.getCDetailMsg() ? e.getCDetailMsg() : "HDF5 error");
+		return false;
+	}
+	catch (const std::exception &e)
+	{
+		error = e.what();
+		return false;
+	}
+
+	std::string chemistryError;
+	if (!ProNovoConfig::configureChemistryProfileId(
+			canonicalChemistryProfileId, chemistryError))
+	{
+		error = "Cannot use spectra library " + paths.front() + ": " +
+			chemistryError;
+		return false;
+	}
+
+	std::string firstIsotopePath;
+	for (const std::string &path : paths)
+	{
+		try
+		{
+			H5::H5File file(path, H5F_ACC_RDONLY);
+			int formatVersion = 0;
+			std::string chemistryProfileId;
+			readSpectraFormatMetadata(
+				file, path, formatVersion, chemistryProfileId);
+			if (chemistryProfileId != canonicalChemistryProfileId)
+			{
+				error = "Mixed chemistry_profile_id values in spectra libraries: " +
+					paths.front() + " uses '" + canonicalChemistryProfileId +
+					"', while " + path + " uses '" + chemistryProfileId +
+					"'. Search one preparation chemistry at a time.";
+				return false;
+			}
+			if (chemistryProfileId != ProNovoConfig::getChemistryProfileId())
+			{
+				error = "Spectra-library chemistry_profile_id '" +
+					chemistryProfileId +
+					"' was not reproduced by the compiled chemistry.";
+				return false;
+			}
+			const double targetSipAbundancePct =
+				readRequiredDoubleAttribute(
+					file, "target_sip_abundance_pct", path);
+			if (!std::isfinite(targetSipAbundancePct) ||
+				targetSipAbundancePct < 0.0 || targetSipAbundancePct > 100.0)
+			{
+				error = "Invalid target_sip_abundance_pct in " + path +
+					": " + std::to_string(targetSipAbundancePct) +
+					"; expected a percentage in [0, 100].";
+				return false;
+			}
+			const std::string sipAtom =
+				readRequiredStringAttribute(file, "sip_atom", path);
+			const int isotopeMassNumber =
+				readRequiredIntAttribute(file, "sip_isotope_mass_number", path);
+			const std::string currentSipIsotope =
+				PSMfeatureExtractor::canonicalSipIsotope(
+					sipAtom, isotopeMassNumber);
+			if (currentSipIsotope.empty())
+			{
+				error = "Unsupported SIP isotope metadata in " + path +
+					": atom=" + sipAtom + ", mass_number=" +
+					std::to_string(isotopeMassNumber) +
+					". Supported labels: C13,H2,N15,O18,S34.";
+				return false;
+			}
+			if (canonicalSipIsotope.empty())
+			{
+				canonicalSipIsotope = currentSipIsotope;
+				firstIsotopePath = path;
+			}
+			else if (currentSipIsotope != canonicalSipIsotope)
+			{
+				error = "Mixed SIP isotope targets in spectra libraries: " +
+					firstIsotopePath + " uses " + canonicalSipIsotope +
+					", while " + path + " uses " + currentSipIsotope +
+					". Search one isotope target at a time.";
+				return false;
+			}
+			if (!ProNovoConfig::validatePreparationChemistry(
+					ProNovoConfig::configIsotopologue, error))
+			{
+				error = "Cannot use spectra library " + path + ": " + error;
+				return false;
+			}
+		}
+		catch (const H5::Exception &e)
+		{
+			error = "Cannot read spectra library metadata from " + path + ": " +
+				(e.getCDetailMsg() ? e.getCDetailMsg() : "HDF5 error");
+			return false;
+		}
+		catch (const std::exception &e)
+		{
+			error = e.what();
+			return false;
+		}
+	}
+	return true;
+}
 
 // Strip [..]-style decorations, leaving naked letters for scoring.
 // SIP peptides use the form "[XXX]" for the N/C terminus and modifications.
@@ -569,28 +711,6 @@ std::string mergeProteinLists(const std::string &a, const std::string &b)
 	return formatProteinList(merged);
 }
 
-void ensureDefaultNTermAcetylation()
-{
-	Isotopologue &iso = ProNovoConfig::configIsotopologue;
-	if (iso.mResidueAtomicComposition.find("%") == iso.mResidueAtomicComposition.end())
-	{
-		// Element_List is CHONPS in Sipros configs; % is acetylation C2H2O.
-		iso.mResidueAtomicComposition["%"] = {2, 2, 1, 0, 0, 0};
-	}
-
-	IsotopeDistribution dist;
-	iso.computeIsotopicDistribution(iso.mResidueAtomicComposition["%"], dist);
-	iso.vResidueIsotopicDistribution["%"] = dist;
-
-	if (std::find(ProNovoConfig::vsSingleResidueNames.begin(),
-				  ProNovoConfig::vsSingleResidueNames.end(),
-				  "%") == ProNovoConfig::vsSingleResidueNames.end())
-	{
-		ProNovoConfig::vsSingleResidueNames.push_back("%");
-		ProNovoConfig::vdSingleResidueMasses.push_back(dist.getMostAbundantMass());
-	}
-}
-
 // Read an entire 1-D string dataset (fixed-length) into a vector<string>.
 std::vector<std::string> readStringDataset(H5::Group &g, const char *name)
 {
@@ -641,44 +761,115 @@ std::vector<T> readVecDataset(H5::Group &g, const char *name, const H5::PredType
 	return v;
 }
 
-std::string readStringAttribute(const H5::H5Object &obj, const char *name)
+std::string readRequiredStringAttribute(
+	const H5::H5Object &obj, const char *name, const std::string &path)
 {
 	if (!obj.attrExists(name))
-		return "";
+	{
+		throw std::runtime_error(
+			"Missing required HDF5 attribute '" + std::string(name) +
+			"' in " + path);
+	}
 	H5::Attribute a = obj.openAttribute(name);
 	H5::StrType type = a.getStrType();
+	std::string value;
 	if (type.isVariableStr())
 	{
 		char *p = nullptr;
 		a.read(type, &p);
-		std::string s = p ? p : "";
+		value = p ? p : "";
 		if (p)
 			std::free(p);
-		return s;
 	}
-	std::vector<char> buf(type.getSize() + 1, '\0');
-	a.read(type, buf.data());
-	return std::string(buf.data());
+	else
+	{
+		std::vector<char> buf(type.getSize() + 1, '\0');
+		a.read(type, buf.data());
+		value = std::string(buf.data());
+	}
+	if (value.empty())
+	{
+		throw std::runtime_error(
+			"Required HDF5 attribute '" + std::string(name) +
+			"' is empty in " + path);
+	}
+	return value;
 }
 
-double readDoubleAttribute(const H5::H5Object &obj, const char *name, double dflt = 0.0)
+double readRequiredDoubleAttribute(
+	const H5::H5Object &obj, const char *name, const std::string &path)
 {
 	if (!obj.attrExists(name))
-		return dflt;
-	double x = dflt;
+	{
+		throw std::runtime_error(
+			"Missing required HDF5 attribute '" + std::string(name) +
+			"' in " + path);
+	}
+	double x = 0.0;
 	H5::Attribute a = obj.openAttribute(name);
 	a.read(H5::PredType::NATIVE_DOUBLE, &x);
 	return x;
 }
 
-int readIntAttribute(const H5::H5Object &obj, const char *name, int dflt = 0)
+int readRequiredIntAttribute(
+	const H5::H5Object &obj, const char *name, const std::string &path)
 {
 	if (!obj.attrExists(name))
-		return dflt;
-	int x = dflt;
+	{
+		throw std::runtime_error(
+			"Missing required HDF5 attribute '" + std::string(name) +
+			"' in " + path);
+	}
+	int x = 0;
 	H5::Attribute a = obj.openAttribute(name);
 	a.read(H5::PredType::NATIVE_INT, &x);
 	return x;
+}
+
+void readSpectraFormatMetadata(
+	const H5::H5Object &obj,
+	const std::string &path,
+	int &formatVersion,
+	std::string &chemistryProfileId)
+{
+	formatVersion = readRequiredIntAttribute(obj, "format_version", path);
+	if (formatVersion != kSpectraHdf5FormatVersion)
+	{
+		throw std::runtime_error(
+			"Unsupported spectra HDF5 format_version in " + path + ": " +
+			std::to_string(formatVersion) + "; expected " +
+			std::to_string(kSpectraHdf5FormatVersion) +
+			" (source-aware chemistry schema). Regenerate this spectra "
+			"library with the current Sipros build.");
+	}
+	if (!obj.attrExists("chemistry_profile_id"))
+	{
+		throw std::runtime_error(
+			"Missing required HDF5 attribute 'chemistry_profile_id' in " +
+			path + ". This library does not identify its preparation "
+			"chemistry; regenerate it with the current Sipros build.");
+	}
+	chemistryProfileId =
+		readRequiredStringAttribute(obj, "chemistry_profile_id", path);
+}
+
+void readAndValidateSpectraFormatMetadata(
+	const H5::H5Object &obj,
+	const std::string &path,
+	int &formatVersion,
+	std::string &chemistryProfileId)
+{
+	readSpectraFormatMetadata(
+		obj, path, formatVersion, chemistryProfileId);
+	const std::string expected = ProNovoConfig::getChemistryProfileId();
+	if (chemistryProfileId != expected)
+	{
+		throw std::runtime_error(
+			"Incompatible chemistry_profile_id in " + path + ": '" +
+			chemistryProfileId + "'; expected '" + expected +
+			"'. Regenerate the spectra library with the same Sipros "
+			"chemistry profile used for search.");
+	}
 }
 
 // Best-effort parse of "1.23" minutes (or "PT74S"-like) into minutes.
@@ -706,12 +897,13 @@ bool loadHdf5File(const std::string &path,
 	try
 	{
 		H5::H5File f(path, H5F_ACC_RDONLY);
-		meta.targetSipAbundancePct = readDoubleAttribute(f, "target_sip_abundance_pct", 0.0);
-		meta.sipAtom = readStringAttribute(f, "sip_atom");
-		if (meta.sipAtom.empty())
-			meta.sipAtom = "C";
+		readAndValidateSpectraFormatMetadata(
+			f, path, meta.formatVersion, meta.chemistryProfileId);
+		meta.targetSipAbundancePct = readRequiredDoubleAttribute(
+			f, "target_sip_abundance_pct", path);
+		meta.sipAtom = readRequiredStringAttribute(f, "sip_atom", path);
 		meta.sipIsotopeMassNumber =
-			readIntAttribute(f, "sip_isotope_mass_number", 13);
+			readRequiredIntAttribute(f, "sip_isotope_mass_number", path);
 		const std::string canonicalSipIsotope =
 			PSMfeatureExtractor::canonicalSipIsotope(
 				meta.sipAtom, meta.sipIsotopeMassNumber);
@@ -724,7 +916,23 @@ bool loadHdf5File(const std::string &path,
 				std::to_string(meta.sipIsotopeMassNumber) +
 				". Supported labels: C13,H2,N15,O18,S34.");
 		}
+		const std::string expectedSipIsotope =
+			PSMfeatureExtractor::canonicalSipIsotope(
+				ProNovoConfig::getSetSIPelement());
+		if (canonicalSipIsotope != expectedSipIsotope)
+		{
+			throw std::runtime_error(
+				"Incompatible SIP isotope metadata in " + path + ": " +
+				canonicalSipIsotope + "; expected " + expectedSipIsotope +
+				" from the validated spectra-library set.");
+		}
 		meta.sipAtom = canonicalSipIsotope;
+		std::string chemistryError;
+		if (!ProNovoConfig::validatePreparationChemistry(
+				ProNovoConfig::configIsotopologue, chemistryError))
+		{
+			throw std::runtime_error(chemistryError);
+		}
 
 		H5::Group records = f.openGroup("records");
 		H5::Group precursor = f.openGroup("precursor");
@@ -1323,7 +1531,7 @@ struct LabeledRecord
 	SipRecord rec;
 	int label = 0; // +1 / -1
 	double ms2Pct = 0.0;
-	std::string sipAtom = "C";
+	std::string sipAtom;
 };
 
 bool writeFull(int fd, const void *data, size_t len)
@@ -1560,6 +1768,8 @@ size_t flatHdf5BlobSize(const std::vector<SipRecord> &records,
 						const Hdf5FileMeta &meta)
 {
 	size_t n = 0;
+	n += sizeof(meta.formatVersion);
+	n += flatStringSize(meta.chemistryProfileId);
 	n += sizeof(meta.targetSipAbundancePct);
 	n += flatStringSize(meta.sipAtom);
 	n += sizeof(meta.sipIsotopeMassNumber);
@@ -1601,6 +1811,8 @@ void writeFlatHdf5Blob(Writer &w,
 					   const std::vector<SipRecord> &records,
 					   const Hdf5FileMeta &meta)
 {
+	w.pod(meta.formatVersion);
+	w.str(meta.chemistryProfileId);
 	w.pod(meta.targetSipAbundancePct);
 	w.str(meta.sipAtom);
 	w.pod(meta.sipIsotopeMassNumber);
@@ -1647,7 +1859,9 @@ bool readFlatHdf5Blob(const void *data,
 {
 	FlatReader r{static_cast<const unsigned char *>(data), size, 0};
 	uint64_t n = 0;
-	if (!r.pod(meta.targetSipAbundancePct) ||
+	if (!r.pod(meta.formatVersion) ||
+		!r.str(meta.chemistryProfileId) ||
+		!r.pod(meta.targetSipAbundancePct) ||
 		!r.str(meta.sipAtom) ||
 		!r.pod(meta.sipIsotopeMassNumber) ||
 		!r.pod(n))
@@ -1717,8 +1931,40 @@ bool readBlobFromSharedMemory(int fd,
 	const bool ok = readFlatHdf5Blob(p, blobSize, records, meta);
 	::munmap(p, blobSize);
 	if (!ok)
+	{
 		err = "cannot parse flat HDF5 shared-memory blob";
-	return ok;
+		return false;
+	}
+	if (meta.formatVersion != kSpectraHdf5FormatVersion)
+	{
+		err = "child metadata carries unsupported spectra format_version " +
+			std::to_string(meta.formatVersion);
+		return false;
+	}
+	const std::string expectedChemistryProfileId =
+		ProNovoConfig::getChemistryProfileId();
+	if (meta.chemistryProfileId != expectedChemistryProfileId)
+	{
+		err = "child metadata carries incompatible chemistry_profile_id '" +
+			meta.chemistryProfileId + "'; expected '" +
+			expectedChemistryProfileId + "'";
+		return false;
+	}
+	const std::string actualSipIsotope =
+		PSMfeatureExtractor::canonicalSipIsotope(
+			meta.sipAtom, meta.sipIsotopeMassNumber);
+	const std::string expectedSipIsotope =
+		PSMfeatureExtractor::canonicalSipIsotope(
+			ProNovoConfig::getSetSIPelement());
+	if (actualSipIsotope.empty() || actualSipIsotope != expectedSipIsotope)
+	{
+		err = "child metadata carries incompatible SIP isotope atom='" +
+			meta.sipAtom + "', mass_number=" +
+			std::to_string(meta.sipIsotopeMassNumber) +
+			"; expected '" + expectedSipIsotope + "'";
+		return false;
+	}
+	return true;
 }
 
 bool writeChildStatus(int fd,
@@ -1754,15 +2000,13 @@ void appendLabeledRecords(const std::string &path,
 {
 	out.reserve(out.size() + records.size());
 	const int label = isDecoyHdf5(path) ? -1 : +1;
-	const std::string sipAtom =
-		meta.sipAtom.empty() ? "C13" : meta.sipAtom;
 	for (auto &record : records)
 	{
 		LabeledRecord lr;
 		lr.rec = std::move(record);
 		lr.label = label;
 		lr.ms2Pct = meta.targetSipAbundancePct;
-		lr.sipAtom = sipAtom;
+		lr.sipAtom = meta.sipAtom;
 		out.push_back(std::move(lr));
 	}
 }
@@ -2246,7 +2490,7 @@ ShardPsmRow makeScoringRow(size_t scanIdx,
             precursorCharge,
             monoPrecursorMz,
             match.matchedMz,
-            avg.pepAtomCounts,
+            avg.pepComposition,
             labeledRecord.sipAtom,
             labeledRecord.ms2Pct,
             mzToleranceDaAt);
@@ -2310,24 +2554,42 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 	const double parentTolDa = args.toleranceMs1Ppm
 								   ? args.toleranceMs1 * parentTolRefMz / 1.0e6
 								   : args.toleranceMs1;
-	const double fragTolDaCfg = args.toleranceMs2Ppm
+	const double fragmentToleranceDa = args.toleranceMs2Ppm
 									? args.toleranceMs2 * fragTolRefMz / 1.0e6
 									: args.toleranceMs2;
 
-	if (!ProNovoConfig::setFilename(args.configFile))
+	if (!ProNovoConfig::load(ProNovoConfig::Profile::Sip))
 	{
-		std::cerr << "Cannot load config " << args.configFile << "\n";
+		std::cerr << "Cannot initialize the built-in SIP profile\n";
 		return 2;
 	}
-	ensureDefaultNTermAcetylation();
-	ProNovoConfig::setMassAccuracy(parentTolDa, fragTolDaCfg);
+	std::string libraryMetadataError;
+	std::string canonicalSipIsotope;
+	if (!validateSpectraLibraryMetadata(
+			hdf5Files, canonicalSipIsotope, libraryMetadataError))
+	{
+		std::cerr << libraryMetadataError << "\n";
+		return 2;
+	}
+	if (!ProNovoConfig::selectSipTarget(
+			canonicalSipIsotope[0],
+			std::stoi(canonicalSipIsotope.substr(1)),
+			libraryMetadataError))
+	{
+		std::cerr << "Cannot activate spectra-library SIP isotope "
+				  << canonicalSipIsotope << ": " << libraryMetadataError << "\n";
+		return 2;
+	}
+	ProNovoConfig::setMassAccuracy(parentTolDa, fragmentToleranceDa);
 
+	std::cout << "  Chemistry profile: "
+			  << ProNovoConfig::getChemistryProfileId() << "\n";
 	std::cout << "  Tolerance: MS1=" << args.toleranceMs1
 			  << (args.toleranceMs1Ppm ? " ppm" : " Da")
 			  << ", MS2=" << args.toleranceMs2
 			  << (args.toleranceMs2Ppm ? " ppm" : " Da")
-			  << "  (scoring config: parent=" << parentTolDa
-			  << " Da, fragment=" << fragTolDaCfg << " Da)\n";
+				  << "  (scoring tolerances: parent=" << parentTolDa
+			  << " Da, fragment=" << fragmentToleranceDa << " Da)\n";
 	std::cout << "  Xcorr/MVH envelope top-N peaks: "
 			  << args.scoreEnvelopeTopN << "\n";
 	std::cout << "  WDP top PSMs per scan/label: "
@@ -2725,22 +2987,6 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 int SearchSpectraWorkflow::run(int argc, char **argv)
 {
 	Args args = parseArgs(argc, argv);
-
-	if (args.configFile.empty() && !args.configDir.empty())
-	{
-		auto cfgs = listFiles(args.configDir, {".cfg", ".CFG"});
-		if (cfgs.empty())
-		{
-			std::cerr << "No .cfg in " << args.configDir << "\n";
-			return 1;
-		}
-		args.configFile = cfgs.front();
-	}
-	if (args.configFile.empty())
-	{
-		std::cerr << "-c <config> or -g <config dir> required\n";
-		return 1;
-	}
 
 	std::vector<std::string> scanFiles;
 	if (!args.singleHdf5.empty())

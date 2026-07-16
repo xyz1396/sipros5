@@ -1,4 +1,8 @@
 #include "isotopologue.h"
+#include "proNovoConfig.h"
+
+#include <cctype>
+#include <utility>
 
 IsotopeDistribution::IsotopeDistribution()
 {
@@ -84,79 +88,44 @@ Isotopologue::~Isotopologue()
 	// destructor
 }
 
-bool Isotopologue::setupIsotopologue(const string &sTable, const string &AtomNameInput)
+bool Isotopologue::setupIsotopologue(
+	const map<string, sipros::SourcedComposition> &residueAtomicComposition,
+	const vector<IsotopeDistribution> &atomIsotopicDistribution,
+	const string &atomNames)
 {
-	// CHONPS
-	AtomName = AtomNameInput;
+	AtomName = atomNames;
 	AtomNumber = AtomName.size();
-
-	istringstream issStream(sTable);
-	string sResidue;
-	vector<int> viAtomVector;
-	int iNumber;
-	unsigned int i;
-
-	// parse out the RESIDUE_ATOMIC_COMPOSITION table
-	while (!(issStream.eof()))
+	if (AtomNumber == 0 ||
+		atomIsotopicDistribution.size() != AtomNumber)
 	{
-		// each row is expected to start with the residue name, following by 6 numbers for the natuual CHONPS
-		issStream >> sResidue;
-		if (sResidue == "")
-			continue;
-		viAtomVector.clear();
-		viAtomVector.reserve(AtomNumber);
-		for (i = 0; i < AtomNumber; ++i)
-		{
-			if (issStream.eof())
-			{
-				// this row doesn't have 6 fields
-				cerr << "ERROR:  the RESIDUE_ATOMIC_COMPOSITION table in ProNovoConfig is not correct!" << endl;
-				return false;
-			}
-			issStream >> iNumber;
-			viAtomVector.push_back(iNumber);
-		}
-		// add this row into the mResidueAtomicComposition table
-		mResidueAtomicComposition[sResidue] = viAtomVector;
-		sResidue = "";
+		cerr << "ERROR: built-in atom names and isotope distributions do not match." << endl;
+		return false;
+	}
+	if (AtomNumber != sipros::ElementCount)
+	{
+		cerr << "ERROR: built-in chemistry must define the six real CHONPS elements."
+			 << endl;
+		return false;
 	}
 
-	// push 6 empty IsotopeDistributions into vAtomIsotopicDistribution
-	vAtomIsotopicDistribution.reserve(AtomNumber);
-	for (i = 0; i < (AtomNumber); ++i)
+	mResidueSourcedComposition = residueAtomicComposition;
+	vAtomIsotopicDistribution = atomIsotopicDistribution;
+	vResidueIsotopicDistribution.clear();
+	for (IsotopeDistribution &distribution : vAtomIsotopicDistribution)
 	{
-		IsotopeDistribution TempDistribution;
-		vAtomIsotopicDistribution.push_back(TempDistribution);
-	}
-
-	// variables to be passed as reference to ProNovoConfig::getAtomIsotopicComposition
-	// to receive its return value
-	vector<double> vdMassTemp;
-	vector<double> vdNaturalCompositionTemp;
-
-	// the isotopic distribution is pushed into vAtomIsotopicDistribution in the order of
-	// natural CHONPS
-	for (i = 0; i < AtomName.size(); ++i)
-	{
-		if (!ProNovoConfig::getAtomIsotopicComposition(AtomName[i], vdMassTemp, vdNaturalCompositionTemp))
+		if (distribution.vMass.size() != distribution.vProb.size() ||
+			!CheckMass(distribution.vMass, distribution.vProb))
 		{
-			cerr << "ERROR: cannot retrieve isotopic composition for atom " << AtomName[i] << " from ProNovoConfig" << endl;
+			cerr << "ERROR: invalid built-in isotope distribution." << endl;
 			return false;
 		}
-		if (!CheckMass(vdMassTemp, vdNaturalCompositionTemp))
-		{
-			cerr << "ERROR: Isotopic distribution of elements is not correctly set." << endl;
-			cerr << "ERROR: Difference of isotopic distribution of elements should be around 1 Dalton." << endl;
-			exit(1);
-		}
-		vAtomIsotopicDistribution[i].vMass = vdMassTemp;
-		vAtomIsotopicDistribution[i].vProb = vdNaturalCompositionTemp;
 	}
+	vNaturalAtomIsotopicDistribution = vAtomIsotopicDistribution;
 
 	// calculate Isotopic distribution for all residues
-	map<string, vector<int>>::iterator ResidueIter;
+	map<string, sipros::SourcedComposition>::iterator ResidueIter;
 	IsotopeDistribution tempIsotopeDistribution;
-	for (ResidueIter = mResidueAtomicComposition.begin(); ResidueIter != mResidueAtomicComposition.end(); ResidueIter++)
+	for (ResidueIter = mResidueSourcedComposition.begin(); ResidueIter != mResidueSourcedComposition.end(); ResidueIter++)
 	{
 		if (!computeIsotopicDistribution(ResidueIter->second, tempIsotopeDistribution))
 		{
@@ -166,105 +135,6 @@ bool Isotopologue::setupIsotopologue(const string &sTable, const string &AtomNam
 
 		vResidueIsotopicDistribution[ResidueIter->first] = tempIsotopeDistribution;
 	}
-
-	//-----Comet Begin--------
-	double iterAtomMonoMass;
-	ProNovoConfig::pdAAMassFragment.clear();
-	char cAtom = 0;
-	double dProb = 0;
-	double dMass = 0;
-	for (i = 0; i < AtomName.size(); ++i)
-	{
-		dProb = 0;
-		for (size_t j = 0; j < vAtomIsotopicDistribution.at(i).vProb.size(); j++)
-		{
-			if (dProb < vAtomIsotopicDistribution.at(i).vProb.at(j))
-			{
-				dProb = vAtomIsotopicDistribution.at(i).vProb.at(j);
-				dMass = vAtomIsotopicDistribution.at(i).vMass.at(j);
-			}
-		}
-		string sTemp = AtomName.substr(i, 1);
-		std::transform(sTemp.begin(), sTemp.end(), sTemp.begin(), ::tolower);
-		cAtom = sTemp.at(0);
-		iterAtomMonoMass = ProNovoConfig::pdAAMassFragment.find(cAtom);
-		if (iterAtomMonoMass == ProNovoConfig::pdAAMassFragment.end())
-		{
-			ProNovoConfig::pdAAMassFragment[cAtom] = dMass;
-		}
-		else
-		{
-			cout << "error: duplicate symbols" << endl;
-			exit(1);
-		}
-	}
-	map<string, IsotopeDistribution>::iterator iterResidueIsotopicDistribution;
-	// map<char, double>::iterator iterResidueMonoMass;
-	double iterResidueMonoMass;
-	char cResidue = 0;
-	for (iterResidueIsotopicDistribution = vResidueIsotopicDistribution.begin(); iterResidueIsotopicDistribution != vResidueIsotopicDistribution.end();
-		 iterResidueIsotopicDistribution++)
-	{
-		dProb = 0;
-		for (int j = 0; j < (int)iterResidueIsotopicDistribution->second.vProb.size(); j++)
-		{
-			if (dProb < iterResidueIsotopicDistribution->second.vProb.at(j))
-			{
-				dProb = iterResidueIsotopicDistribution->second.vProb.at(j);
-				dMass = iterResidueIsotopicDistribution->second.vMass.at(j);
-			}
-		}
-		if (iterResidueIsotopicDistribution->first.size() > 1)
-		{
-			continue;
-		}
-		cResidue = iterResidueIsotopicDistribution->first.at(0);
-		iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(cResidue);
-		if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end())
-		{
-			ProNovoConfig::pdAAMassFragment[cResidue] = dMass;
-		}
-		else
-		{
-			cout << "error: duplicate symbols" << endl;
-			exit(1);
-		}
-	}
-	if (ProNovoConfig::pdAAMassFragment.find('h') == ProNovoConfig::pdAAMassFragment.end())
-	{
-		cout << "Error 70" << endl;
-	}
-	if (ProNovoConfig::pdAAMassFragment.find('c') == ProNovoConfig::pdAAMassFragment.end())
-	{
-		cout << "Error 71" << endl;
-	}
-	if (ProNovoConfig::pdAAMassFragment.find('o') == ProNovoConfig::pdAAMassFragment.end())
-	{
-		cout << "Error 72" << endl;
-	}
-	if (ProNovoConfig::pdAAMassFragment.find('n') == ProNovoConfig::pdAAMassFragment.end())
-	{
-		cout << "Error 73" << endl;
-	}
-	// H2O
-	dMass = ProNovoConfig::pdAAMassFragment.find('h') * 2 + ProNovoConfig::pdAAMassFragment.find('o');
-	ProNovoConfig::precalcMasses.iMinus17LowRes = (int)(dMass * ProNovoConfig::dLowResInverseBinWidth + ProNovoConfig::dLowResOneMinusBinOffset);
-	ProNovoConfig::precalcMasses.iMinus17HighRes = (int)(dMass * ProNovoConfig::dHighResInverseBinWidth + ProNovoConfig::dHighResOneMinusBinOffset);
-	// NH3
-	dMass = ProNovoConfig::pdAAMassFragment.find('h') * 3 + ProNovoConfig::pdAAMassFragment.find('n');
-	ProNovoConfig::precalcMasses.iMinus18LowRes = (int)(dMass * ProNovoConfig::dLowResInverseBinWidth + ProNovoConfig::dLowResOneMinusBinOffset);
-	ProNovoConfig::precalcMasses.iMinus18HighRes = (int)(dMass * ProNovoConfig::dHighResInverseBinWidth + ProNovoConfig::dHighResOneMinusBinOffset);
-	// PROTON_MASS
-	ProNovoConfig::precalcMasses.dNtermProton = PROTON_MASS;
-	// dOH2fragment + PROTON_MASS
-	ProNovoConfig::precalcMasses.dCtermOH2Proton = PROTON_MASS + ProNovoConfig::pdAAMassFragment.find('o') + ProNovoConfig::pdAAMassFragment.find('h') * 2;
-	// dOH2fragment + PROTON_MASS
-	ProNovoConfig::precalcMasses.dCtermOH2 = ProNovoConfig::pdAAMassFragment.find('o') + ProNovoConfig::pdAAMassFragment.find('h') * 2;
-	ProNovoConfig::precalcMasses.dCO = ProNovoConfig::pdAAMassFragment.find('o') + ProNovoConfig::pdAAMassFragment.find('c');
-	ProNovoConfig::precalcMasses.dNH2 = ProNovoConfig::pdAAMassFragment.find('n') + ProNovoConfig::pdAAMassFragment.find('h') * 2;
-	ProNovoConfig::precalcMasses.dNH3 = ProNovoConfig::pdAAMassFragment.find('n') + ProNovoConfig::pdAAMassFragment.find('h') * 3;
-	ProNovoConfig::precalcMasses.dCOminusH2 = ProNovoConfig::precalcMasses.dCO - (ProNovoConfig::pdAAMassFragment.find('h') * 2);
-	//-----Comet End----------
 
 	return true;
 }
@@ -330,7 +200,7 @@ bool Isotopologue::getSingleResidueMostAbundantMasses(vector<string> &vsResidues
 		}
 		else
 		{
-			cerr << "ERROR: Cannot recognize the configuration for residue " << sCurrentResidue << endl;
+			cerr << "ERROR: Unknown residue or PTM " << sCurrentResidue << endl;
 		}
 	}
 
@@ -415,307 +285,279 @@ bool Isotopologue::computeIsotopicDistribution(string sSequence, IsotopeDistribu
 	return true;
 }
 
-bool Isotopologue::computeProductIon(string sSequence, vector<vector<double>> &vvdYionMass, vector<vector<double>> &vvdYionProb,
-									 vector<vector<double>> &vvdBionMass, vector<vector<double>> &vvdBionProb)
+bool Isotopologue::computePeptideIsotopicDistribution(
+	string decoratedSequence,
+	IsotopeDistribution &myIsotopeDistribution)
 {
-	// get the mass for a proton
-	double dProtonMass = ProNovoConfig::getProtonMass();
-	unsigned int i = 0;
-
-	//	if(!isalpha(sSequence[0]))
-	//	{
-	//		cout << "ERROR: First character in a peptide sequence can't be a PTM." << endl;
-	//		return false;
-	//	}
-
-	int iPeptideLength = 0;
-	for (i = 0; i < sSequence.length(); ++i)
+	if (decoratedSequence.empty() || decoratedSequence.front() != '[')
 	{
-		if (isalpha(sSequence[i]))
-		{
-			iPeptideLength = iPeptideLength + 1;
-		}
+		cerr << "ERROR: First character in a peptide sequence must be [."
+			 << endl;
+		return false;
 	}
-
-	if (iPeptideLength < ProNovoConfig::getMinPeptideLength())
+	const size_t closingBracket = decoratedSequence.find(']', 1);
+	if (closingBracket == string::npos ||
+		decoratedSequence.find('[', 1) != string::npos ||
+		decoratedSequence.find(']', closingBracket + 1) != string::npos)
 	{
-		cerr << "ERROR: Peptide sequence is too short " << sSequence << endl;
+		cerr << "ERROR: Invalid decorated peptide brackets." << endl;
 		return false;
 	}
 
-	//	cout << "sSequence = " << sSequence << endl;
+	string symbols = decoratedSequence.substr(1, closingBracket - 1);
+	symbols.append(decoratedSequence.substr(closingBracket + 1));
+	if (symbols.empty())
+	{
+		cerr << "ERROR: Peptide sequence is empty." << endl;
+		return false;
+	}
+	sipros::SourcedComposition composition;
+	return computeSourcedComposition(symbols, composition) &&
+		computeIsotopicDistribution(composition, myIsotopeDistribution);
+}
 
+bool Isotopologue::computeProductIon(string sSequence, vector<vector<double>> &vvdYionMass, vector<vector<double>> &vvdYionProb,
+									 vector<vector<double>> &vvdBionMass, vector<vector<double>> &vvdBionProb)
+{
 	vvdYionMass.clear();
 	vvdYionProb.clear();
 	vvdBionMass.clear();
 	vvdBionProb.clear();
 
-	vvdYionMass.reserve(iPeptideLength);
-	vvdYionProb.reserve(iPeptideLength);
-	vvdBionMass.reserve(iPeptideLength);
-	vvdBionProb.reserve(iPeptideLength);
-
-	map<string, IsotopeDistribution>::iterator ResidueIter;
-
-	vector<IsotopeDistribution> vResidueDistribution;
-	IsotopeDistribution sumDistribution;
-	IsotopeDistribution currentDistribution;
-
-	string currentResidue;
-	string currentPTM;
-
-	if (sSequence[0] != '[')
+	if (sSequence.empty() || sSequence.front() != '[')
 	{
 		cerr << "ERROR: First character in a peptide sequence must be [." << endl;
 		return false;
 	}
 
-	unsigned int iStartResidueIndex = 1;
-	ResidueIter = vResidueIsotopicDistribution.find("Nterm");
-	if (ResidueIter != vResidueIsotopicDistribution.end())
+	const size_t closingBracket = sSequence.find(']', 1);
+	if (closingBracket == string::npos)
 	{
-		currentDistribution = ResidueIter->second;
+		cerr << "ERROR: Peptide sequence must contain a closing ]." << endl;
+		return false;
+	}
+	if (sSequence.find(']', closingBracket + 1) != string::npos)
+	{
+		cerr << "ERROR: Peptide sequence contains more than one closing ]." << endl;
+		return false;
+	}
 
-		if (!isalpha(sSequence[1]))
+	auto addNamedComposition = [&](char symbol,
+								   sipros::SourcedComposition &composition,
+								   const char *kind) -> bool
+	{
+		const string name(1, symbol);
+		const auto found = mResidueSourcedComposition.find(name);
+		if (found == mResidueSourcedComposition.end())
 		{
-			iStartResidueIndex = 2;
-			currentPTM = sSequence[1];
-			ResidueIter = vResidueIsotopicDistribution.find(currentPTM);
-			if (ResidueIter == vResidueIsotopicDistribution.end())
-			{
-				cerr << "ERROR: cannot find this PTM in the config file " << currentPTM << endl;
+			cerr << "ERROR: cannot find " << kind
+				 << " in the built-in chemistry: " << name << endl;
+			return false;
+		}
+		composition += found->second;
+		return true;
+	};
+	auto loadTerminalComposition = [&](const char *name,
+									   sipros::SourcedComposition &composition) -> bool
+	{
+		const auto found = mResidueSourcedComposition.find(name);
+		if (found == mResidueSourcedComposition.end())
+		{
+			cerr << "ERROR: can't find the " << name << " composition" << endl;
+			return false;
+		}
+		composition = found->second;
+		return true;
+	};
+	const auto isResidue = [](char symbol)
+	{
+		return std::isalpha(static_cast<unsigned char>(symbol)) != 0;
+	};
+
+	sipros::SourcedComposition nTermComposition;
+	sipros::SourcedComposition cTermComposition;
+	if (!loadTerminalComposition("Nterm", nTermComposition) ||
+		!loadTerminalComposition("Cterm", cTermComposition))
+		return false;
+	const sipros::SourcedComposition baseNTermComposition =
+		nTermComposition;
+
+	// Decorations between '[' and the first amino acid belong to the
+	// N-terminus. Decorations after ']' belong to the C-terminus. Each
+	// decoration is a registered one-character PTM token.
+	size_t cursor = 1;
+	while (cursor < closingBracket && !isResidue(sSequence[cursor]))
+	{
+		if (sSequence[cursor] == '[' ||
+			!addNamedComposition(sSequence[cursor], nTermComposition,
+								 "N-terminal PTM"))
+			return false;
+		++cursor;
+	}
+
+	vector<sipros::SourcedComposition> residueCompositions;
+	while (cursor < closingBracket)
+	{
+		if (!isResidue(sSequence[cursor]))
+		{
+			cerr << "ERROR: expected an amino-acid residue in peptide sequence."
+				 << endl;
+			return false;
+		}
+
+		sipros::SourcedComposition residueComposition;
+		if (!addNamedComposition(sSequence[cursor], residueComposition,
+								 "residue"))
+			return false;
+		++cursor;
+		while (cursor < closingBracket && !isResidue(sSequence[cursor]))
+		{
+			if (sSequence[cursor] == '[' ||
+				!addNamedComposition(sSequence[cursor], residueComposition,
+									 "PTM"))
 				return false;
-			}
-
-			currentDistribution = sum(currentDistribution, ResidueIter->second);
+			++cursor;
 		}
-
-		vResidueDistribution.push_back(currentDistribution);
+		residueCompositions.push_back(residueComposition);
 	}
-	else
+
+	for (cursor = closingBracket + 1; cursor < sSequence.size(); ++cursor)
 	{
-		cerr << "ERROR: can't find the N-terminus" << endl;
+		if (isResidue(sSequence[cursor]) || sSequence[cursor] == '[' ||
+			sSequence[cursor] == ']' ||
+			!addNamedComposition(sSequence[cursor], cTermComposition,
+								 "C-terminal PTM"))
+		{
+			cerr << "ERROR: invalid character after the peptide closing ]."
+				 << endl;
+			return false;
+		}
+	}
+
+	const int peptideLength = static_cast<int>(residueCompositions.size());
+	if (peptideLength < ProNovoConfig::getMinPeptideLength())
+	{
+		cerr << "ERROR: Peptide sequence is too short " << sSequence << endl;
 		return false;
 	}
 
-	for (i = iStartResidueIndex; i < sSequence.length(); i++)
-	{
-		if (sSequence[i] == ']')
-		{
-			break;
-		}
+	const size_t productIonCount = residueCompositions.size() - 1;
+	vvdYionMass.reserve(productIonCount);
+	vvdYionProb.reserve(productIonCount);
+	vvdBionMass.reserve(productIonCount);
+	vvdBionProb.reserve(productIonCount);
 
-		if (!isalpha(sSequence[i]))
-		{
-			cerr << "ERROR: One residue can only have one PTM (Up to only one symbol after an amino acid)" << endl;
+	// PTMs may contain negative atom counts. Aggregate each fragment's net
+	// sourced composition before convolution so those atoms cancel against
+	// the residue (or fixed modification) that they replace.
+	// Product-ion masses are stored as neutral masses; callers add one proton
+	// when converting them to charge-one m/z. The base N-terminal hydrogen is
+	// therefore transferred to the y ion together with the C-terminal OH.
+	// N-terminal PTM deltas remain on b ions, and C-terminal PTM deltas remain
+	// on y ions.
+	sipros::SourcedComposition bComposition =
+		nTermComposition - baseNTermComposition;
+	for (size_t residue = 0; residue < productIonCount; ++residue)
+	{
+		bComposition += residueCompositions[residue];
+		IsotopeDistribution distribution;
+		if (!computeIsotopicDistribution(bComposition, distribution))
 			return false;
-		}
-		currentResidue = sSequence.substr(i, 1);
-		ResidueIter = vResidueIsotopicDistribution.find(currentResidue);
-		if (ResidueIter == vResidueIsotopicDistribution.end())
-		{
-			cerr << "ERROR: cannot find this residue in the config file. " << currentResidue << endl;
+		vvdBionMass.push_back(std::move(distribution.vMass));
+		vvdBionProb.push_back(std::move(distribution.vProb));
+	}
+
+	sipros::SourcedComposition yComposition =
+		baseNTermComposition + cTermComposition;
+	for (size_t offset = 0; offset < productIonCount; ++offset)
+	{
+		const size_t residue = residueCompositions.size() - 1 - offset;
+		yComposition += residueCompositions[residue];
+		IsotopeDistribution distribution;
+		if (!computeIsotopicDistribution(yComposition, distribution))
 			return false;
-		}
-		currentDistribution = ResidueIter->second;
-		if (i + 1 < sSequence.length())
-		{
-			if (!isalpha(sSequence[i + 1]) && sSequence[i + 1] != ']') // this residue is modified
-			{
-				currentPTM = sSequence[i + 1];
-				ResidueIter = vResidueIsotopicDistribution.find(currentPTM);
-				if (ResidueIter == vResidueIsotopicDistribution.end())
-				{
-					cerr << "ERROR: cannot find this PTM in the config file " << currentPTM << endl;
-					return false;
-				}
-
-				// this PTM can substract mass from the residue
-				// the currentDistribution could even be negative.
-				currentDistribution = sum(currentDistribution, ResidueIter->second);
-
-				i = i + 1; // increment index to the next residue
-			}
-		}
-
-		vResidueDistribution.push_back(currentDistribution);
+		vvdYionMass.push_back(std::move(distribution.vMass));
+		vvdYionProb.push_back(std::move(distribution.vProb));
 	}
-
-	ResidueIter = vResidueIsotopicDistribution.find("Cterm");
-	if (ResidueIter != vResidueIsotopicDistribution.end())
-	{
-		currentDistribution = ResidueIter->second;
-
-		if (i + 1 < sSequence.length())
-		{
-			if (!isalpha(sSequence[i + 1]))
-			{
-				currentPTM = sSequence[i + 1];
-				ResidueIter = vResidueIsotopicDistribution.find(currentPTM);
-				if (ResidueIter == vResidueIsotopicDistribution.end())
-				{
-					cerr << "ERROR: cannot find this PTM in the config file " << currentPTM << endl;
-					return false;
-				}
-
-				currentDistribution = sum(currentDistribution, ResidueIter->second);
-			}
-		}
-
-		vResidueDistribution.push_back(currentDistribution);
-	}
-	else
-	{
-		cerr << "ERROR: can't find the C-terminus" << endl;
-		return false;
-	}
-
-	// compute B-ion series
-
-	vector<IsotopeDistribution> vBionDistribution;
-	vBionDistribution.reserve(iPeptideLength);
-
-	// start with the N-terminus distibution, which should the first element
-	currentDistribution = vResidueDistribution.front();
-	sumDistribution = currentDistribution;
-
-	int j;
-	for (j = 1; j < iPeptideLength; j++)
-	{
-		currentDistribution = vResidueDistribution[j];
-		sumDistribution = sum(currentDistribution, sumDistribution);
-		vBionDistribution.push_back(sumDistribution);
-	}
-	for (i = 0; i < vBionDistribution.size(); i++)
-	{
-		vvdBionMass.push_back(vBionDistribution[i].vMass);
-		vvdBionProb.push_back(vBionDistribution[i].vProb);
-		//	cout << "b " << i << endl;
-		//	vBionDistribution[i].print();
-	}
-
-	// compute Y-ion series
-	vector<IsotopeDistribution> vYionDistribution;
-	vYionDistribution.reserve(iPeptideLength);
-
-	// start with the C-terminus distibution, which should the last element
-	currentDistribution = vResidueDistribution.back();
-	sumDistribution = currentDistribution;
-
-	for (j = iPeptideLength; j > 1; j--)
-	{
-		currentDistribution = vResidueDistribution[j];
-		sumDistribution = sum(currentDistribution, sumDistribution);
-		vYionDistribution.push_back(sumDistribution);
-	}
-
-	for (i = 0; i < vYionDistribution.size(); i++)
-	{
-		vvdYionMass.push_back(vYionDistribution[i].vMass);
-		vvdYionProb.push_back(vYionDistribution[i].vProb);
-		//	cout << "y " << i << endl;
-		//	vYionDistribution[i].print();
-	}
-
-	// change the masses to correct for the proton transfer during peptide bond cleavage
-	unsigned int n;
-	unsigned int m;
-	for (n = 0; n < vvdYionMass.size(); ++n)
-	{
-		for (m = 0; m < vvdYionMass[n].size(); ++m)
-		{
-			vvdYionMass[n][m] += dProtonMass;
-		}
-	}
-
-	for (n = 0; n < vvdBionMass.size(); ++n)
-	{
-		for (m = 0; m < vvdBionMass[n].size(); ++m)
-		{
-			vvdBionMass[n][m] -= dProtonMass;
-		}
-	}
-
-	//	cout << "Y		B" << endl;
-	//	for (n = 0; n < vvdBionMass.size(); ++n)
-	//	{
-	//		cout << vvdYionMass[n][0] << "\t\t" << vvdBionMass[n][0] << endl;
-	//	}
 
 	return true;
 }
 
-bool Isotopologue::computeIsotopicDistribution(vector<int> AtomicComposition, IsotopeDistribution &myIsotopeDistribution)
+bool Isotopologue::computeIsotopicDistribution(
+	const sipros::SourcedComposition &composition,
+	IsotopeDistribution &myIsotopeDistribution)
 {
-	IsotopeDistribution sumDistribution;
-	IsotopeDistribution currentAtomDistribution;
-	currentAtomDistribution = multiply(vAtomIsotopicDistribution[0], AtomicComposition[0]);
-	sumDistribution = currentAtomDistribution;
+	if (vAtomIsotopicDistribution.size() != AtomNumber ||
+		vNaturalAtomIsotopicDistribution.size() != AtomNumber)
+		return false;
 
-	for (unsigned int i = 1; i < AtomNumber; i++)
+	IsotopeDistribution result({0.0}, {1.0});
+	for (size_t element = 0; element < AtomNumber; ++element)
 	{
-		currentAtomDistribution = multiply(vAtomIsotopicDistribution[i], AtomicComposition[i]);
-		sumDistribution = sum(currentAtomDistribution, sumDistribution);
-	}
-	myIsotopeDistribution = sumDistribution;
+		const int biosyntheticCount =
+			composition[sipros::IsotopeSource::Biosynthetic][element];
+		const int naturalCount =
+			composition[sipros::IsotopeSource::ReagentNatural][element] +
+			composition[sipros::IsotopeSource::DigestionSolvent][element];
+		const IsotopeDistribution &active =
+			vAtomIsotopicDistribution[element];
+		const IsotopeDistribution &natural =
+			vNaturalAtomIsotopicDistribution[element];
 
+		// At natural abundance, grouping identical channels produces the same
+		// convolution (and pruning order) as a conventional flat formula.
+		if (active.vMass == natural.vMass && active.vProb == natural.vProb)
+		{
+			const int totalCount = biosyntheticCount + naturalCount;
+			if (totalCount != 0)
+				result = sum(multiply(natural, totalCount), result);
+			continue;
+		}
+		if (biosyntheticCount != 0)
+			result = sum(multiply(active, biosyntheticCount), result);
+		if (naturalCount != 0)
+			result = sum(multiply(natural, naturalCount), result);
+	}
+	myIsotopeDistribution = result;
 	return true;
 }
 
-bool Isotopologue::computeAtomicComposition(string sSequence, vector<int> &myAtomicComposition)
+bool Isotopologue::computeSourcedComposition(
+	string sSequence,
+	sipros::SourcedComposition &composition)
 {
-	vector<int> AtomicComposition;
-	vector<int> CurrentComposition;
-	unsigned int i;
-	map<string, vector<int>>::iterator ResidueIter;
-
-	for (i = 0; i < AtomNumber; i++)
-		AtomicComposition.push_back(0);
-
-	ResidueIter = mResidueAtomicComposition.find("Nterm");
-	if (ResidueIter != mResidueAtomicComposition.end())
+	composition = {};
+	auto addNamedComposition = [&](const string &name) -> bool
 	{
-		CurrentComposition = ResidueIter->second;
-		for (i = 0; i < AtomNumber; i++)
-			AtomicComposition[i] = CurrentComposition[i];
-	}
-	else
+		const auto residue = mResidueSourcedComposition.find(name);
+		if (residue == mResidueSourcedComposition.end())
+			return false;
+		composition += residue->second;
+		return true;
+	};
+
+	if (!addNamedComposition("Nterm"))
 	{
-		cerr << "ERROR: can't find the atomic composition for the N-terminus" << endl;
+		cerr << "ERROR: can't find the atomic composition for the N-terminus"
+			 << endl;
 		return false;
 	}
-
-	ResidueIter = mResidueAtomicComposition.find("Cterm");
-	if (ResidueIter != mResidueAtomicComposition.end())
+	if (!addNamedComposition("Cterm"))
 	{
-		CurrentComposition = ResidueIter->second;
-		for (i = 0; i < AtomNumber; i++)
-			AtomicComposition[i] += CurrentComposition[i];
-	}
-	else
-	{
-		cerr << "ERROR: can't find the atomic composition for the C-terminus" << endl;
+		cerr << "ERROR: can't find the atomic composition for the C-terminus"
+			 << endl;
 		return false;
 	}
 
 	for (unsigned int j = 0; j < sSequence.length(); j++)
 	{
 		string currentResidue = sSequence.substr(j, 1);
-		ResidueIter = mResidueAtomicComposition.find(currentResidue);
-		if (ResidueIter != mResidueAtomicComposition.end())
-		{
-			CurrentComposition = ResidueIter->second;
-			for (i = 0; i < AtomNumber; i++)
-				AtomicComposition[i] += CurrentComposition[i];
-		}
-		else
+		if (!addNamedComposition(currentResidue))
 		{
 			cerr << "ERROR: can't find the atomic composition for residue/PTM: " << currentResidue << endl;
 			return false;
 		}
 	}
-
-	myAtomicComposition = AtomicComposition;
 	return true;
 }
 

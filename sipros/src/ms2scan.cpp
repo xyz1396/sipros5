@@ -1,5 +1,7 @@
 #include "ms2scan.h"
 
+#include <algorithm>
+
 /**********switching from weightsum to ranksum needs to turn on some function in ms2scan.cpp and peptide.cpp *******/
 
 MS2Scan::MS2Scan()

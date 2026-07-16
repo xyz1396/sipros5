@@ -26,7 +26,7 @@ class ProteinDatabase
     bool bstayCurrentProtein;         // false if need to read the next protein
     bool bstayCurrentOriginalPeptide; // false if need the next original peptide
     ifstream db_stream;
-    PTM_List ptmlist;                             // from configure file
+    PTM_List ptmlist;                             // enabled compiled PTMs
     vector<vector<pair<string, double>>> ptm_map; // reorgnized based on ptmlist
     vector<int> vicleavageSite;
     int iclCheck;          // number of cleavage sites missed;

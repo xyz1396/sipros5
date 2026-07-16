@@ -24,10 +24,9 @@ ProteinDatabase::ProteinDatabase()
 	if ((ProNovoConfig::getSearchType() == "Regular") || (ProNovoConfig::getSearchType() == "SIP"))
 	{
 		// Currently, in the peptide generating part, SIP and Regular modes are same.
-		if (!ptmlist.populate_from_xml_config())
-		// the current configure file is not xml format, but we still use this function
+		if (!ptmlist.populateFromEnabledPtms())
 		{
-			cerr << "Error in parsing PTM rules from config " << endl;
+			cerr << "Error while loading enabled compiled PTMs" << endl;
 			exit(1);
 		}
 		Initial_PTM_Map();
@@ -513,25 +512,31 @@ bool ProteinDatabase::getNextPtmPeptide(Peptide *ptmPeptide)
 	int i, iPtmPos;
 	bool bReVal = true;
 	string scurrentPeptide, sPtm;
-	double dcurrentMass, dPtmMass;
+	double dcurrentMass;
 
 	if (iPtmCount > icurrentMaxPtm)
 		bReVal = false;
 	else
 	{
 		scurrentPeptide = sOriginalPeptide;
-		dcurrentMass = dOriginalPeptideMass;
 		for (i = ((int)comb_order.size() - 1); i >= 0; i--)
 		{
 			iPtmPos = ptm_position_all.at(comb_order.at(i)).first;
 			//	    cout<<"i "<<i<<endl;
 			//	    cout<<ptm_position_all.at(comb_order.at(i)).second.size()<<endl;
 			sPtm = ptm_position_all.at(comb_order.at(i)).second.at(ptm_order.at(i)).first;
-
-			dPtmMass = ptm_position_all.at(comb_order.at(i)).second.at(ptm_order.at(i)).second;
-			dcurrentMass += dPtmMass;
 			scurrentPeptide.insert(iPtmPos + 1, sPtm);
 		}
+		// A modal isotope mass is not additive across standalone residue/PTM
+		// modes. Recalculate from the complete net sourced composition so a
+		// negative-atom PTM (for example deamidation) changes the target-isotope
+		// count only when the full peptide's multinomial mode changes.
+		string compositionSequence;
+		compositionSequence.reserve(scurrentPeptide.size());
+		for (char symbol : scurrentPeptide)
+			if (symbol != '[' && symbol != ']')
+				compositionSequence.push_back(symbol);
+		dcurrentMass = mAveragine.calPrecursorMass(compositionSequence);
 		setPeptideInfo(ptmPeptide, scurrentPeptide, dcurrentMass);
 		// ptmPeptide->setPeptide(scurrentPeptide, sOriginalPeptide, scurrentProteinName, vicleavageSite.at(ibeginCleavagePos)+1,dcurrentMass);
 		if (!GenerateNextPTM(ptm_order, ele_num))

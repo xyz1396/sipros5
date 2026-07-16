@@ -162,7 +162,7 @@ class MS2Scan
 public:
 	int bin_res, iMaxMZ, iMinMZ;
 
-	double dMassTolerance; //<FRAGMENT_IONS>
+	double dMassTolerance; // fragment-ion mass tolerance
 	double dProtonMass;	   // proton mass
 
 	string sScanType; // format: FT-MS1/FT-MS2@CID

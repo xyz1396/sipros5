@@ -21,8 +21,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 TMP = ROOT / "data" / "tmp" / "raxport_hdf5_workflow_test"
 SIPROS = ROOT / "bin" / "sipros"
-CFG = ROOT / "configTemplates" / "Regular.cfg"
-FASTA = ROOT / "data" / "EcoliWithCrapNodup.fasta"
+FASTA = TMP / "synthetic.fasta"
 
 
 def write_dataset(group: h5py.Group, name: str, values, dtype) -> None:
@@ -154,9 +153,10 @@ def run_sipros(
         str(SIPROS),
         "search-fasta",
         "-f", str(scan_file),
-        "-c", str(CFG),
         "-fasta", str(FASTA),
         "-o", str(out_dir),
+        "--tolerance-ms1", "0.01",
+        "--tolerance-ms2", "0.01",
     ]
     command.extend(extra_args or [])
     return subprocess.run(
@@ -195,7 +195,6 @@ def run_flat_fasta_layout(scan_file: Path) -> None:
         toleranceMS2=0.01,
         sipRange="0-100",
         step="1",
-        configTemplatePath=str(ROOT / "configTemplates"),
         raxportPath=str(ROOT / "tools" / "Raxport-linux-x64"),
         siprosPath=str(SIPROS),
         fastaPath=str(FASTA),
@@ -208,11 +207,10 @@ def run_flat_fasta_layout(scan_file: Path) -> None:
         topPsmsPerScan=2,
     )
     workflow.reverse_fasta_sequences()
-    config = workflow.write_workflow_config()
     workflow.getInputFiles()
     workflow.create_sample_directories()
     workflow.prepare_hdf5_inputs()
-    workflow.sipros_search(config)
+    workflow.sipros_search()
 
     base = scan_file.stem
     sample_dir = output / base
@@ -246,6 +244,7 @@ def main() -> None:
     if TMP.exists():
         shutil.rmtree(TMP)
     TMP.mkdir(parents=True)
+    FASTA.write_text(">synthetic_protein\nMPEPTIDERK\n", encoding="utf-8")
 
     bad_input = TMP / "bad.scan"
     bad_input.write_text("S\t1\t500.0\n", encoding="utf-8")

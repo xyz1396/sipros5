@@ -55,13 +55,12 @@ class MS2ScanVector {
 	// vpAllMS2Scans and vpPrecursorMasses are in the same order
 	vector<double> vpPrecursorMasses;
 	// for peptide assignment
-    vector<tuple<double, int, MS2Scan *>> vAllPrecursorMassChargeMS2ScanPtrTuples;
+	vector<tuple<double, int, MS2Scan *>> vAllPrecursorMassChargeMS2ScanPtrTuples;
 	//vector <int> mass_w; // mass window
 	string sScanFilename;    // the scan filename
 	string sOutputFile; // the output file name
-	string sConfigFile; // the configure file name
 
-	// this should be moved to the Peptide class or make it a static member in the Config class
+	// this should be moved to Peptide or shared through ProNovoConfig
 	map<char, double> mapResidueMass; // mass except N and C termini;
 
 	bool loadRaxportHdf5File();
@@ -97,7 +96,7 @@ class MS2ScanVector {
 	string ParsePath(string sPath);
 
 public:
-	MS2ScanVector(const string & sScanFilenameInput, const string & sOutputDirectory, const string & sConfigFilename);
+	MS2ScanVector(const string &sScanFilenameInput, const string &sOutputDirectory);
 	~MS2ScanVector();
 
 	// Populate vpAllMS2Scans from a Raxport schema v6 HDF5 file.

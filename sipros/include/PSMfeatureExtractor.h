@@ -50,7 +50,7 @@ public:
     static int sipAtomIndex(const std::string &sipAtom);
     static int sipIsotopeIndex(const std::string &sipAtom);
     static int sipNominalShiftPerAtom(const std::string &sipAtom);
-    static double expectedNaturalNominalShiftExceptTarget(const std::array<int, 6> &atomCounts,
+    static double expectedNaturalNominalShiftExceptTarget(const sipros::SourcedComposition &composition,
                                                           int targetAtomIndex,
                                                           int targetIsotopeIndex,
                                                           double targetFraction);
@@ -64,7 +64,7 @@ public:
                                                           int precursorCharge,
                                                           double monoPrecursorMz,
                                                           double matchedPrecursorMz,
-                                                          const std::array<int, 6> &atomCounts,
+                                                          const sipros::SourcedComposition &composition,
                                                           const std::string &sipAtom,
                                                           double expectedEnrichmentPct,
                                                           const std::function<double(double)> &mzToleranceDaAt);

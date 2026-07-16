@@ -8,10 +8,6 @@ import runpy
 os.chdir("/scratch/recovered/benchmark/cecum_13C_glucose/")
 
 # 2A. python test.py 4 5
-# args = 'python ../script3/sipros_psm_tabulating.py \
-#         -i regular \
-#         -c SiprosEnsembleConfig.cfg -o regular'
-
 # args = 'python ../script33/main.py \
 #         -i /scratch/yixiong/dignose/13C/raw3 \
 #         -f fasta/EcoliWithCrapNodup.fasta \

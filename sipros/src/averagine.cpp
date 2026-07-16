@@ -1,133 +1,217 @@
 #include "averagine.h"
+#include "proNovoConfig.h"
 
-averagine::averagine(const int minPepLen, const int maxPepLen)
-    : minPepLen(minPepLen), maxPepLen(maxPepLen), pepLenRange(maxPepLen - minPepLen + 1)
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+namespace
 {
-    // get averagine's Atom content and mass distribution
-    averagineAtomCounts = ProNovoConfig::configIsotopologue.mResidueAtomicComposition[averagineResidue];
-    ProNovoConfig::configIsotopologue.computeIsotopicDistribution(averagineAtomCounts,
-                                                                  averagineSIPdistribution);
-    diffAtomCounts.resize(averagineAtomCounts.size());
-    C12Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[0].vMass[0];
-    C13Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[0].vMass[1];
-    C13Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[0].vProb[1];
-    H1Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[1].vMass[0];
-    H2Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[1].vMass[1];
-    H2Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[1].vProb[1];
-    O16Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[2].vMass[0];
-    O17Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[2].vMass[1];
-    O17Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[2].vProb[1];
-    O18Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[2].vMass[2];
-    O18Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[2].vProb[2];
-    N14Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[3].vMass[0];
-    N15Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[3].vMass[1];
-    N15Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[3].vProb[1];
-    PfakeLowMass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[4].vMass[0];
-    PfakeMass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[4].vMass[1];
-    PfakeAbundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[4].vProb[1];
-    S32Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vMass[0];
-    S33Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vMass[1];
-    S33Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vProb[1];
-    S34Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vMass[2];
-    S34Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vProb[2];
-    S36Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vMass[4];
-    S36Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vProb[4];
-    adjustEstimatePrecursorMassbyNP();
+
+struct IsotopeShiftEstimate
+{
+    double exactMass = 0.0;
+    int nominalShift = 0;
+};
+
+sipros::SourcedComposition scaledComposition(
+    const sipros::SourcedComposition &composition,
+    int factor)
+{
+    sipros::SourcedComposition result;
+    for (size_t source = 0; source < sipros::IsotopeSourceCount; ++source)
+        for (size_t element = 0; element < sipros::ElementCount; ++element)
+            result.atoms[source][element] =
+                composition.atoms[source][element] * factor;
+    return result;
+}
+
+// Return an exact mode of the multinomial isotope-count distribution. The
+// log-probability is separable and concave, so repeatedly assigning an atom
+// to the largest p_i / (count_i + 1) marginal gives a global mode. If two
+// allocations are tied, prefer the lower isotope index; this is the same
+// lower-mass tie break used by IsotopeDistribution::getMostAbundantMass().
+std::vector<int> multinomialMode(
+    int atomCount,
+    const IsotopeDistribution &distribution)
+{
+    const size_t isotopeCount = std::min(
+        distribution.vMass.size(), distribution.vProb.size());
+    std::vector<int> counts(isotopeCount, 0);
+    for (int atom = 0; atom < atomCount && isotopeCount > 0; ++atom)
+    {
+        size_t best = isotopeCount;
+        for (size_t isotope = 0; isotope < isotopeCount; ++isotope)
+        {
+            const double probability = distribution.vProb[isotope];
+            if (!(probability > 0.0))
+                continue;
+            if (best == isotopeCount)
+            {
+                best = isotope;
+                continue;
+            }
+
+            // Compare p_i/(count_i+1) without division. A small tolerance
+            // preserves the deterministic lower-mass choice at exact ties.
+            const double left = probability *
+                static_cast<double>(counts[best] + 1);
+            const double right = distribution.vProb[best] *
+                static_cast<double>(counts[isotope] + 1);
+            const double tolerance =
+                16.0 * std::numeric_limits<double>::epsilon() *
+                std::max({1.0, std::fabs(left), std::fabs(right)});
+            if (left > right + tolerance ||
+                (std::fabs(left - right) <= tolerance && isotope < best))
+                best = isotope;
+        }
+        if (best == isotopeCount)
+            break;
+        ++counts[best];
+    }
+    return counts;
+}
+
+void addIsotopeCount(IsotopeShiftEstimate &estimate,
+                     int count,
+                     const IsotopeDistribution &distribution,
+                     size_t isotope)
+{
+    if (count <= 0 || isotope == 0 ||
+        isotope >= distribution.vMass.size())
+        return;
+    const double exactDelta =
+        distribution.vMass[isotope] - distribution.vMass.front();
+    estimate.exactMass += static_cast<double>(count) * exactDelta;
+    estimate.nominalShift += count * static_cast<int>(std::lround(exactDelta));
+}
+
+void addAtomGroup(IsotopeShiftEstimate &estimate,
+                  int atomCount,
+                  const IsotopeDistribution &distribution)
+{
+    const size_t isotopeCount = std::min(
+        distribution.vMass.size(), distribution.vProb.size());
+    if (atomCount <= 0 || isotopeCount <= 1)
+        return;
+    const std::vector<int> counts =
+        multinomialMode(atomCount, distribution);
+    for (size_t isotope = 1; isotope < isotopeCount; ++isotope)
+        addIsotopeCount(estimate, counts[isotope], distribution, isotope);
+}
+
+bool sameProbabilities(const IsotopeDistribution &left,
+                       const IsotopeDistribution &right)
+{
+    if (left.vProb.size() != right.vProb.size() ||
+        left.vMass != right.vMass)
+        return false;
+    for (size_t isotope = 0; isotope < left.vProb.size(); ++isotope)
+    {
+        if (std::fabs(left.vProb[isotope] - right.vProb[isotope]) >
+            8.0 * std::numeric_limits<double>::epsilon())
+            return false;
+    }
+    return true;
+}
+
+// Estimate the exact modal isotope-count vector while retaining the mass
+// defect of every element. Thus one O18 or S34 atom always adds its full +2
+// isotope delta; it is never represented as two averaged one-neutron events.
+IsotopeShiftEstimate estimateIsotopeShift(
+    const sipros::SourcedComposition &composition)
+{
+    const auto &active = ProNovoConfig::configIsotopologue
+                             .vAtomIsotopicDistribution;
+    const auto &natural = ProNovoConfig::configIsotopologue
+                              .vNaturalAtomIsotopicDistribution;
+    IsotopeShiftEstimate estimate;
+
+    for (size_t element = 0; element < sipros::ElementCount; ++element)
+    {
+        if (element >= active.size() || element >= natural.size())
+            continue;
+        const int biosyntheticCount =
+            composition[sipros::IsotopeSource::Biosynthetic][element];
+        const int naturalCount =
+            composition[sipros::IsotopeSource::ReagentNatural][element] +
+            composition[sipros::IsotopeSource::DigestionSolvent][element];
+        // When both sources have the same distribution (the regular/natural
+        // case), combine their counts before finding the mode. Source
+        // provenance must not split one natural binomial into smaller modes.
+        if (sameProbabilities(active[element], natural[element]))
+        {
+            addAtomGroup(estimate,
+                         biosyntheticCount + naturalCount,
+                         natural[element]);
+            continue;
+        }
+
+        // Under SIP enrichment only biosynthetic atoms use the active target
+        // distribution. Reagent and digestion-solvent atoms remain one
+        // combined natural-abundance group.
+        addAtomGroup(estimate, biosyntheticCount, active[element]);
+        addAtomGroup(estimate, naturalCount, natural[element]);
+    }
+    return estimate;
+}
+
+} // namespace
+
+averagine::averagine(const int minimumPeptideLength,
+                     const int maximumPeptideLength)
+    : minPepLen(minimumPeptideLength),
+      maxPepLen(maximumPeptideLength),
+      pepLenRange(maximumPeptideLength - minimumPeptideLength + 1)
+{
+    const auto residue = ProNovoConfig::configIsotopologue
+                             .mResidueSourcedComposition.find(
+                                 averagineResidue);
+    if (residue != ProNovoConfig::configIsotopologue
+                       .mResidueSourcedComposition.end())
+        averagineComposition = residue->second;
+    ProNovoConfig::configIsotopologue.computeIsotopicDistribution(
+        averagineComposition, averagineSIPdistribution);
 }
 
 averagine::averagine()
 {
-    diffAtomCounts.resize(6);
-    C12Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[0].vMass[0];
-    C13Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[0].vMass[1];
-    C13Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[0].vProb[1];
-    H1Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[1].vMass[0];
-    H2Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[1].vMass[1];
-    H2Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[1].vProb[1];
-    O16Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[2].vMass[0];
-    O17Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[2].vMass[1];
-    O17Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[2].vProb[1];
-    O18Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[2].vMass[2];
-    O18Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[2].vProb[2];
-    N14Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[3].vMass[0];
-    N15Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[3].vMass[1];
-    N15Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[3].vProb[1];
-    PfakeLowMass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[4].vMass[0];
-    PfakeMass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[4].vMass[1];
-    PfakeAbundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[4].vProb[1];
-    S32Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vMass[0];
-    S33Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vMass[1];
-    S33Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vProb[1];
-    S34Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vMass[2];
-    S34Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vProb[2];
-    S36Mass = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vMass[4];
-    S36Abundance = &ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[5].vProb[4];
-    adjustEstimatePrecursorMassbyNP();
 }
 
-averagine::~averagine()
+averagine::~averagine() = default;
+
+double averagine::lightMass(size_t element)
 {
+    const auto &atoms = ProNovoConfig::configIsotopologue
+                            .vNaturalAtomIsotopicDistribution;
+    if (element >= atoms.size() || atoms[element].vMass.empty())
+        return 0.0;
+    return atoms[element].vMass.front();
 }
 
-void averagine::adjustEstimatePrecursorMassbyNP()
+double averagine::baseMass(
+    const sipros::SourcedComposition &composition)
 {
-    // for SIP atom C13
-    SIPatomIX = 0;
-    estimatePrecursorMassbyNP = [&](double baseMass, int atomCount, double neutronMass)
-    { return (baseMass + std::round(atomCount * (*C13Abundance)) * neutronMass); };
-    // for SIP atom other than C13
-    // SIP element shif + C13 element shif because C13 is abundant in nature (1%)
-    if (ProNovoConfig::getSetSIPelement() == "H")
-    {
-        SIPatomIX = 1;
-        estimatePrecursorMassbyNP = [&](double baseMass, int atomCount, double neutronMass)
-        { return (baseMass +
-                  std::round(atomCount * (*H2Abundance) + pepAtomCounts[0] * (*C13Abundance)) * neutronMass); };
-    }
-    else if (ProNovoConfig::getSetSIPelement() == "O")
-    {
-        SIPatomIX = 2;
-        estimatePrecursorMassbyNP = [&](double baseMass, int atomCount, double neutronMass)
-        { return (baseMass +
-                  std::round(2 * atomCount * (*O18Abundance) + pepAtomCounts[0] * (*C13Abundance)) * neutronMass); };
-    }
-    else if (ProNovoConfig::getSetSIPelement() == "N")
-    {
-        SIPatomIX = 3;
-        estimatePrecursorMassbyNP = [&](double baseMass, int atomCount, double neutronMass)
-        { return (baseMass +
-                  std::round(atomCount * (*N15Abundance) + pepAtomCounts[0] * (*C13Abundance)) * neutronMass); };
-    }
-    else if (ProNovoConfig::getSetSIPelement() == "S")
-    {
-        SIPatomIX = 5;
-        estimatePrecursorMassbyNP = [&](double baseMass, int atomCount, double neutronMass)
-        { return (baseMass +
-                  std::round(2 * atomCount * (*S34Abundance) + pepAtomCounts[0] * (*C13Abundance)) * neutronMass); };
-    }
+    const sipros::AtomCounts total = composition.total();
+    double mass = 0.0;
+    for (size_t element = 0; element < total.size(); ++element)
+        mass += static_cast<double>(total[element]) * lightMass(element);
+    return mass;
 }
 
-void averagine::changeAtomSIPabundance(const char SIPatom, const double pct)
+void averagine::changeAtomSIPabundance(const char sipAtom,
+                                       const double fraction)
 {
-    const size_t atomPos = SIPatoms.find(SIPatom);
-    if (atomPos == string::npos)
+    const char atom = static_cast<char>(std::toupper(
+        static_cast<unsigned char>(sipAtom)));
+    if (SIPatoms.find(atom) == string::npos ||
+        !ProNovoConfig::applySipAbundance(atom, fraction))
     {
-        cout << SIPatom << "element is not supported!" << endl;
-        return;
-    }
-    const int atomIndex = static_cast<int>(atomPos);
-    SIPatomIX = atomIndex;
-    ProNovoConfig::getSetSIPelement() = SIPatom;
-    adjustEstimatePrecursorMassbyNP();
-    const bool updated = changeAtomProbability(
-        ProNovoConfig::configIsotopologue.vAtomIsotopicDistribution[atomIndex].vProb, SIPatom, pct);
-    if (!updated)
-    {
+        cerr << atom << " element is not a supported SIP target." << endl;
         return;
     }
     ProNovoConfig::configIsotopologue.computeIsotopicDistribution(
-        ProNovoConfig::configIsotopologue.mResidueAtomicComposition[averagineResidue],
-        averagineSIPdistribution);
+        averagineComposition, averagineSIPdistribution);
 }
 
 bool averagine::changeAtomProbability(
@@ -156,31 +240,22 @@ bool averagine::changeAtomProbability(
     }
 
     double nonTargetTotal = 0.0;
-    for (size_t isotope = 0;
-         isotope < probabilities.size();
-         ++isotope)
-    {
+    for (size_t isotope = 0; isotope < probabilities.size(); ++isotope)
         if (isotope != targetIsotopeIndex)
             nonTargetTotal += probabilities[isotope];
-    }
 
     if (!(nonTargetTotal > 0.0))
     {
-        std::fill(
-            probabilities.begin(), probabilities.end(), 0.0);
+        std::fill(probabilities.begin(), probabilities.end(), 0.0);
         probabilities[0] = 1.0 - targetFraction;
     }
     else
     {
         const double scale =
             (1.0 - targetFraction) / nonTargetTotal;
-        for (size_t isotope = 0;
-             isotope < probabilities.size();
-             ++isotope)
-        {
+        for (size_t isotope = 0; isotope < probabilities.size(); ++isotope)
             if (isotope != targetIsotopeIndex)
                 probabilities[isotope] *= scale;
-        }
     }
     probabilities[targetIsotopeIndex] = targetFraction;
     return true;
@@ -188,230 +263,166 @@ bool averagine::changeAtomProbability(
 
 void averagine::calAveraginePepAtomCounts()
 {
-    vector<int> averaginePepAtomCounts;
-    averaginePepAtomCountss.reserve(pepLenRange);
-    averaginePepAtomCounts.reserve(averagineAtomCounts.size());
-    for (int pepLen = minPepLen; pepLen <= maxPepLen; pepLen++)
-    {
-        averaginePepAtomCounts.clear();
-        for (size_t j = 0; j < averagineAtomCounts.size(); j++)
-            averaginePepAtomCounts.push_back(averagineAtomCounts[j] * pepLen);
-        averaginePepAtomCountss.push_back(averaginePepAtomCounts);
-    }
+    averaginePepCompositions.clear();
+    averaginePepCompositions.reserve(
+        static_cast<size_t>(std::max(0, pepLenRange)));
+    for (int peptideLength = minPepLen;
+         peptideLength <= maxPepLen;
+         ++peptideLength)
+        averaginePepCompositions.push_back(
+            scaledComposition(averagineComposition, peptideLength));
 }
 
-vector<int> *averagine::getAveraginePepAtomCounts(const int pepLen)
+sipros::SourcedComposition *averagine::getAveraginePepComposition(
+    const int peptideLength)
 {
-    return &averaginePepAtomCountss[pepLen - minPepLen];
+    return &averaginePepCompositions[static_cast<size_t>(
+        peptideLength - minPepLen)];
 }
 
 void averagine::calAveraginePepSIPdistributions()
 {
-    IsotopeDistribution NtermSIPdistribution =
-        ProNovoConfig::configIsotopologue.vResidueIsotopicDistribution["Nterm"];
-    IsotopeDistribution CtermSIPdistribution =
-        ProNovoConfig::configIsotopologue.vResidueIsotopicDistribution["Cterm"];
-    averaginePepSIPdistributions.reserve(pepLenRange);
-    IsotopeDistribution tempSIPdistribution = NtermSIPdistribution;
-    ProNovoConfig::configIsotopologue.sum(CtermSIPdistribution, tempSIPdistribution);
-    for (int i = 0; i < minPepLen; i++)
+    averaginePepSIPdistributions.clear();
+    averaginePepSIPdistributions.reserve(
+        static_cast<size_t>(std::max(0, pepLenRange)));
+    const auto nTerm = ProNovoConfig::configIsotopologue
+                           .mResidueSourcedComposition.at("Nterm");
+    const auto cTerm = ProNovoConfig::configIsotopologue
+                           .mResidueSourcedComposition.at("Cterm");
+    for (int peptideLength = minPepLen;
+         peptideLength <= maxPepLen;
+         ++peptideLength)
     {
-        ProNovoConfig::configIsotopologue.sum(averagineSIPdistribution, tempSIPdistribution);
-    }
-    for (int i = 0; i <= pepLenRange; i++)
-    {
-        ProNovoConfig::configIsotopologue.sum(averagineSIPdistribution, tempSIPdistribution);
-        averaginePepSIPdistributions.push_back(tempSIPdistribution);
+        sipros::SourcedComposition composition =
+            scaledComposition(averagineComposition, peptideLength);
+        composition += nTerm;
+        composition += cTerm;
+        IsotopeDistribution distribution;
+        ProNovoConfig::configIsotopologue.computeIsotopicDistribution(
+            composition, distribution);
+        averaginePepSIPdistributions.push_back(std::move(distribution));
     }
 }
 
-IsotopeDistribution *averagine::getAveraginePepSIPdistribution(const int pepLen)
+IsotopeDistribution *averagine::getAveraginePepSIPdistribution(
+    const int peptideLength)
 {
-    return &averaginePepSIPdistributions[pepLen - minPepLen];
+    return &averaginePepSIPdistributions[static_cast<size_t>(
+        peptideLength - minPepLen)];
 }
 
-void averagine::calPepAtomCounts(const string &pepSeq)
+void averagine::calPepAtomCounts(const string &peptideSequence)
 {
-    std::fill(pepAtomCounts.begin(), pepAtomCounts.end(), 0);
-    vector<int> *residueAtomCounts;
-    residueAtomCounts = &ProNovoConfig::configIsotopologue
-                             .mResidueAtomicComposition["Nterm"];
-    for (size_t j = 0; j < residueAtomCounts->size(); j++)
-        pepAtomCounts[j] += residueAtomCounts->operator[](j);
-    residueAtomCounts = &ProNovoConfig::configIsotopologue
-                             .mResidueAtomicComposition["Cterm"];
-    for (size_t j = 0; j < residueAtomCounts->size(); j++)
-        pepAtomCounts[j] += residueAtomCounts->operator[](j);
-    for (size_t i = 0; i < pepSeq.size(); i++)
+    pepComposition = {};
+    if (!ProNovoConfig::configIsotopologue.computeSourcedComposition(
+            peptideSequence, pepComposition))
+        return;
+}
+
+void averagine::calBYionsAtomCounts(const string &peptideSequence)
+{
+    BionsCompositions.clear();
+    YionsCompositions.clear();
+    BionsCompositions.reserve(peptideSequence.size());
+    YionsCompositions.reserve(peptideSequence.size());
+
+    sipros::SourcedComposition bIon;
+    sipros::SourcedComposition yIon =
+        ProNovoConfig::configIsotopologue
+            .mResidueSourcedComposition.at("Nterm") +
+        ProNovoConfig::configIsotopologue
+            .mResidueSourcedComposition.at("Cterm");
+
+    for (size_t index = 0; index < peptideSequence.size(); ++index)
     {
-        if (ProNovoConfig::configIsotopologue
-                .mResidueAtomicComposition.find(pepSeq.substr(i, 1)) == ProNovoConfig::configIsotopologue
-                                                                            .mResidueAtomicComposition.end())
+        const string symbol = peptideSequence.substr(index, 1);
+        const auto residue = ProNovoConfig::configIsotopologue
+                                 .mResidueSourcedComposition.find(symbol);
+        if (residue == ProNovoConfig::configIsotopologue
+                           .mResidueSourcedComposition.end())
         {
-            cerr << "ERROR: cannot find " << pepSeq.substr(i, 1) << " residue or PTM in the config file." << endl;
+            cerr << "ERROR: cannot find " << symbol
+                 << " residue or PTM in the built-in chemistry." << endl;
+            BionsCompositions.clear();
+            YionsCompositions.clear();
             return;
         }
-        residueAtomCounts = &ProNovoConfig::configIsotopologue
-                                 .mResidueAtomicComposition[pepSeq.substr(i, 1)];
-        for (size_t j = 0; j < residueAtomCounts->size(); j++)
-            pepAtomCounts[j] += residueAtomCounts->operator[](j);
+        bIon += residue->second;
+        if (std::isalpha(static_cast<unsigned char>(peptideSequence[index])))
+            BionsCompositions.push_back(bIon);
+        else if (!BionsCompositions.empty())
+            BionsCompositions.back() = bIon;
     }
-}
+    if (!BionsCompositions.empty())
+        BionsCompositions.pop_back();
 
-void averagine::calBYionsAtomCounts(const string &pepSeq)
-{
-    int peptideLength = pepSeq.size();
-    BionsAtomCounts.clear();
-    YionsAtomCounts.clear();
-    BionsAtomCounts.reserve(peptideLength);
-    YionsAtomCounts.reserve(peptideLength);
-    // one hydrogen atom shifts from b ion to its conuterpart when cleavage
-    std::array<int, 6> bIonCounts = {0, 0, 0, 0, 0, 0};
-    // one hydrogen atom shifts to y ion from its conuterpart when cleavage
-    std::array<int, 6> yIonCounts = {0, 2, 1, 0, 0, 0};
-    vector<int> *residueAtomCounts;
-    // Calculate atom counts for B ions
-    for (int i = 0; i < peptideLength; i++)
+    for (size_t reverse = peptideSequence.size(); reverse > 0; --reverse)
     {
-        if (ProNovoConfig::configIsotopologue
-                .mResidueAtomicComposition.find(pepSeq.substr(i, 1)) == ProNovoConfig::configIsotopologue
-                                                                            .mResidueAtomicComposition.end())
-        {
-            cerr << "ERROR: cannot find " << pepSeq.substr(i, 1) << " residue or PTM in the config file." << endl;
+        const size_t index = reverse - 1;
+        const string symbol = peptideSequence.substr(index, 1);
+        const auto residue = ProNovoConfig::configIsotopologue
+                                 .mResidueSourcedComposition.find(symbol);
+        if (residue == ProNovoConfig::configIsotopologue
+                           .mResidueSourcedComposition.end())
             return;
-        }
-        if (!isalpha(pepSeq[i]))
-        {
-            string ptmSymbol = pepSeq.substr(i, 1);
-            residueAtomCounts =
-                &ProNovoConfig::configIsotopologue
-                     .mResidueAtomicComposition[ptmSymbol];
-            for (size_t k = 0; k < residueAtomCounts->size(); ++k)
-                bIonCounts[k] += residueAtomCounts->operator[](k);
-            // if the PTM is not at Nterm
-            if (BionsAtomCounts.size() > 0)
-                BionsAtomCounts.back() = bIonCounts;
-            continue; // Move to the next character
-        }
-        const string residue = pepSeq.substr(i, 1);
-        residueAtomCounts =
-            &ProNovoConfig::configIsotopologue.mResidueAtomicComposition[residue];
-        for (size_t k = 0; k < residueAtomCounts->size(); ++k)
-            bIonCounts[k] += residueAtomCounts->operator[](k);
-        BionsAtomCounts.push_back(bIonCounts);
+        yIon += residue->second;
+        if (std::isalpha(static_cast<unsigned char>(peptideSequence[index])))
+            YionsCompositions.push_back(yIon);
     }
-    // remove the last element, which is the full peptide without cterm
-    BionsAtomCounts.pop_back();
-
-    // Calculate atom counts for Y ions
-    for (int i = peptideLength - 1; i >= 0; i--)
-    {
-        if (!isalpha(pepSeq[i]))
-        {
-            string ptmSymbol = pepSeq.substr(i, 1);
-            residueAtomCounts =
-                &ProNovoConfig::configIsotopologue
-                     .mResidueAtomicComposition[ptmSymbol];
-            for (size_t k = 0; k < residueAtomCounts->size(); ++k)
-                yIonCounts[k] += residueAtomCounts->operator[](k);
-            continue; // Move to the next character
-        }
-        const string residue = pepSeq.substr(i, 1);
-        residueAtomCounts =
-            &ProNovoConfig::configIsotopologue.mResidueAtomicComposition[residue];
-        // Sum the counts
-        for (size_t k = 0; k < residueAtomCounts->size(); ++k)
-            yIonCounts[k] += residueAtomCounts->operator[](k);
-        YionsAtomCounts.push_back(yIonCounts);
-    }
-    // remove the last element, which is the full peptide without nterm
-    YionsAtomCounts.pop_back();
+    if (!YionsCompositions.empty())
+        YionsCompositions.pop_back();
 }
 
-double averagine::weighted_mean(const std::vector<double> &values, const std::vector<double> &weights)
+double averagine::calNetronMass(const string &peptideSequence)
 {
-    double sum_weights = std::accumulate(weights.begin(), weights.end(), 0.0);
-    double sum_product = std::inner_product(values.begin(), values.end(), weights.begin(), 0.0);
-    return (sum_product / sum_weights);
+    calPepAtomCounts(peptideSequence);
+    const IsotopeShiftEstimate estimate =
+        estimateIsotopeShift(pepComposition);
+    return estimate.nominalShift > 0
+               ? estimate.exactMass /
+                     static_cast<double>(estimate.nominalShift)
+               : ProNovoConfig::getNeutronMass();
 }
 
-double averagine::calNetronMass(const string &pepSeq)
+double averagine::calPrecursorBaseMass(const string &peptideSequence)
 {
-    calPepAtomCounts(pepSeq);
-    std::vector<double> weights = {*C13Abundance, *H2Abundance, *O17Abundance + *O18Abundance,
-                                   *N15Abundance, *PfakeAbundance, *S33Abundance + *S34Abundance + *S36Abundance};
-    for (size_t i = 0; i < pepAtomCounts.size(); i++)
-    {
-        weights[i] *= pepAtomCounts[i];
-    }
-    double OdeltaMass = weighted_mean({*O17Mass - *O16Mass, *O18Mass - *O17Mass}, {*O17Abundance, *O18Abundance});
-    double SdeltaMass = weighted_mean({*S33Mass - *S32Mass, *S34Mass - *S33Mass, (*S36Mass - *S34Mass) / 2.0},
-                                      {*S33Abundance, *S34Abundance, *S36Abundance * 2});
-    double neutronMass = weighted_mean({*C13Mass - *C12Mass, *H2Mass - *H1Mass, OdeltaMass,
-                                        *N15Mass - *N14Mass, *PfakeMass - *PfakeLowMass, SdeltaMass},
-                                       weights);
-    return neutronMass;
+    calPepAtomCounts(peptideSequence);
+    return baseMass(pepComposition);
 }
 
-double averagine::calPrecursorBaseMass(const string &pepSeq)
+void averagine::calBYionBaseMasses(const string &peptideSequence)
 {
-    calPepAtomCounts(pepSeq);
-    double baseMass = pepAtomCounts[0] * (*C12Mass) + pepAtomCounts[1] * (*H1Mass) + pepAtomCounts[2] * (*O16Mass) +
-                      pepAtomCounts[3] * (*N14Mass) + pepAtomCounts[4] * (*PfakeLowMass) +
-                      pepAtomCounts[5] * (*S32Mass);
-    return baseMass;
-}
-
-void averagine::calBYionBaseMasses(const string &pepSeq)
-{
-    calBYionsAtomCounts(pepSeq);
+    calBYionsAtomCounts(peptideSequence);
     BionsBaseMasses.clear();
     YionsBaseMasses.clear();
-    BionsBaseMasses.reserve(BionsAtomCounts.size());
-    YionsBaseMasses.reserve(YionsAtomCounts.size());
-    for (size_t i = 0; i < BionsAtomCounts.size(); i++)
-    {
-        BionsBaseMasses.push_back(
-            BionsAtomCounts[i][0] * (*C12Mass) + BionsAtomCounts[i][1] * (*H1Mass) +
-            BionsAtomCounts[i][2] * (*O16Mass) + BionsAtomCounts[i][3] * (*N14Mass) +
-            BionsAtomCounts[i][4] * (*PfakeLowMass) +
-            BionsAtomCounts[i][5] * (*S32Mass));
-    }
-    for (size_t i = 0; i < YionsAtomCounts.size(); i++)
-    {
-        YionsBaseMasses.push_back(
-            YionsAtomCounts[i][0] * (*C12Mass) + YionsAtomCounts[i][1] * (*H1Mass) +
-            YionsAtomCounts[i][2] * (*O16Mass) + YionsAtomCounts[i][3] * (*N14Mass) +
-            YionsAtomCounts[i][4] * (*PfakeLowMass) +
-            YionsAtomCounts[i][5] * (*S32Mass));
-    }
+    BionsBaseMasses.reserve(BionsCompositions.size());
+    YionsBaseMasses.reserve(YionsCompositions.size());
+    for (const auto &composition : BionsCompositions)
+        BionsBaseMasses.push_back(baseMass(composition));
+    for (const auto &composition : YionsCompositions)
+        YionsBaseMasses.push_back(baseMass(composition));
 }
 
-double averagine::calPrecursorMass(const string &pepSeq)
+double averagine::calPrecursorMass(const string &peptideSequence)
 {
-    calPepAtomCounts(pepSeq);
-    double neutronMass = calNetronMass(pepSeq);
-    double baseMass = pepAtomCounts[0] * (*C12Mass) + pepAtomCounts[1] * (*H1Mass) + pepAtomCounts[2] * (*O16Mass) +
-                      pepAtomCounts[3] * (*N14Mass) + pepAtomCounts[4] * (*PfakeLowMass) +
-                      pepAtomCounts[5] * (*S32Mass);
-    double precursorMass = estimatePrecursorMassbyNP(baseMass, pepAtomCounts[SIPatomIX], neutronMass);
-    return (precursorMass);
+    calPepAtomCounts(peptideSequence);
+    const IsotopeShiftEstimate estimate =
+        estimateIsotopeShift(pepComposition);
+    return baseMass(pepComposition) + estimate.exactMass;
 }
 
-void averagine::calDiffAtomCounts(const string &pepSeq)
+void averagine::calDiffAtomCounts(const string &peptideSequence)
 {
-    calPepAtomCounts(pepSeq);
-    diffAtomCounts = vector<int>(pepAtomCounts.begin(), pepAtomCounts.end());
-    vector<int> *averaginePepAtomCountPtr = getAveraginePepAtomCounts(pepSeq.length());
-    for (size_t k = 0; k < diffAtomCounts.size(); k++)
-        diffAtomCounts[k] -= (*averaginePepAtomCountPtr)[k];
+    // Retained for source compatibility. Exact sourced convolution below no
+    // longer needs the old flat averagine-difference approximation.
+    calPepAtomCounts(peptideSequence);
 }
 
-void averagine::calPrecursorIsotopeDistribution(const string &pepSeq, IsotopeDistribution &tempSIPdistribution)
+void averagine::calPrecursorIsotopeDistribution(
+    const string &peptideSequence,
+    IsotopeDistribution &distribution)
 {
-    calDiffAtomCounts(pepSeq);
-    ProNovoConfig::configIsotopologue.computeIsotopicDistribution(diffAtomCounts,
-                                                                  tempSIPdistribution);
-    ProNovoConfig::configIsotopologue.sum(*(getAveraginePepSIPdistribution(pepSeq.length())),
-                                          tempSIPdistribution);
+    calPepAtomCounts(peptideSequence);
+    ProNovoConfig::configIsotopologue.computeIsotopicDistribution(
+        pepComposition, distribution);
 }
