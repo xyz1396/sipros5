@@ -1,9 +1,12 @@
 #include "ms2scanvector.h"
+#include "PeptideIsotopeCalculator.h"
 #include "RaxportHdf5Reader.h"
 
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <exception>
+#include <stdexcept>
 #include <utility>
 
 MS2ScanVector::MS2ScanVector(const string &sScanFilenameInput,
@@ -261,7 +264,10 @@ void MS2ScanVector::preProcessAllMs2WdpSip()
 		vpAllMS2Scans.at(i)->preprocess();
 }
 
-void MS2ScanVector::GetAllRangeFromMass(double dPeptideMass, vector<std::pair<int, int>> &vpPeptideMassRanges)
+void MS2ScanVector::GetAllRangeFromMass(
+	double dPeptideMass,
+	double precursorNeutronMass,
+	vector<std::pair<int, int>> &vpPeptideMassRanges)
 // all ranges of MS2 scans are stored in  vpPeptideMassWindows
 {
 	int i;
@@ -270,7 +276,10 @@ void MS2ScanVector::GetAllRangeFromMass(double dPeptideMass, vector<std::pair<in
 	vector<pair<double, double>> vpPeptideMassWindows;
 	vpPeptideMassWindows.clear();
 	vpPeptideMassRanges.clear();
-	ProNovoConfig::getPeptideMassWindows(dPeptideMass, vpPeptideMassWindows);
+	if (!ProNovoConfig::getPeptideMassWindows(
+			dPeptideMass, precursorNeutronMass, vpPeptideMassWindows))
+		throw std::runtime_error(
+			"FASTA peptide is missing a valid composition-weighted precursor neutron mass.");
 	for (i = 0; i < (int)vpPeptideMassWindows.size(); i++)
 	{
 		pairMS2Range = GetRangeFromMass(vpPeptideMassWindows.at(i).first, vpPeptideMassWindows.at(i).second);
@@ -365,7 +374,9 @@ bool MS2ScanVector::assignPeptides2Scans(Peptide *currentPeptide)
 	vector<pair<int, int>> vpPeptideMassRanges;
 	pair<int, int> pairMS2Range;
 
-	GetAllRangeFromMass(currentPeptide->getPeptideMass(), vpPeptideMassRanges);
+	GetAllRangeFromMass(currentPeptide->getPeptideMass(),
+						currentPeptide->getPrecursorNeutronMass(),
+						vpPeptideMassRanges);
 
 	for (j = 0; j < (int)vpPeptideMassRanges.size(); j++)
 	{
@@ -389,10 +400,79 @@ bool MS2ScanVector::assignPeptides2Scans(Peptide *currentPeptide)
 	return bAssigned;
 }
 
+void MS2ScanVector::estimateAndAssignPeptides(
+	vector<Peptide *> &vpPeptideArray)
+{
+	std::exception_ptr estimateError;
+	const int peptideCount = static_cast<int>(vpPeptideArray.size());
+
+#pragma omp parallel
+	{
+		PeptideIsotopeCalculator calculator;
+#pragma omp for schedule(guided)
+		for (int i = 0; i < peptideCount; ++i)
+		{
+			try
+			{
+				const string &decorated = vpPeptideArray[i]->getPeptideSeq();
+				string compositionSequence;
+				compositionSequence.reserve(decorated.size());
+				for (char symbol : decorated)
+					if (symbol != '[' && symbol != ']')
+						compositionSequence.push_back(symbol);
+
+				const auto estimate =
+					calculator.calPrecursorEstimate(compositionSequence);
+				vpPeptideArray[i]->setPeptideMass(estimate.mass);
+				vpPeptideArray[i]->setPrecursorNeutronMass(
+					estimate.neutronMass);
+			}
+			catch (...)
+			{
+#pragma omp critical(sipros_precursor_estimate_error)
+				{
+					if (!estimateError)
+						estimateError = std::current_exception();
+				}
+			}
+		}
+	}
+
+	if (estimateError)
+	{
+		for (Peptide *peptide : vpPeptideArray)
+			delete peptide;
+		vpPeptideArray.clear();
+		std::rethrow_exception(estimateError);
+	}
+
+	// Scan candidate vectors are mutable, so assignment remains serial after
+	// every candidate has received its final modal precursor estimate.
+	vector<Peptide *> assigned;
+	assigned.reserve(vpPeptideArray.size());
+	for (Peptide *peptide : vpPeptideArray)
+	{
+		if (assignPeptides2Scans(peptide))
+		{
+			assigned.push_back(peptide);
+			if (peptide->getPeptideMass() > ProNovoConfig::dMaxPeptideMass)
+				ProNovoConfig::dMaxPeptideMass = peptide->getPeptideMass();
+		}
+		else
+		{
+			delete peptide;
+		}
+	}
+	vpPeptideArray.swap(assigned);
+}
+
 void MS2ScanVector::processPeptideArrayWdpSip(vector<Peptide *> &vpPeptideArray)
 {
 	int i, iPeptideArraySize, iScanSize;
+	estimateAndAssignPeptides(vpPeptideArray);
 	iPeptideArraySize = (int)vpPeptideArray.size();
+	if (iPeptideArraySize == 0)
+		return;
 
 	//    for (int i=0; i< (int) vpPeptideArray.size(); i++)
 	//      cout<<vpPeptideArray.at(i)->getPeptideSeq() <<"\t"
@@ -429,7 +509,10 @@ void MS2ScanVector::processPeptideArrayWdpSip(vector<Peptide *> &vpPeptideArray)
 void MS2ScanVector::processPeptideArrayMvh(vector<Peptide *> &vpPeptideArray)
 {
 	int i, iPeptideArraySize, iScanSize;
+	estimateAndAssignPeptides(vpPeptideArray);
 	iPeptideArraySize = (int)vpPeptideArray.size();
+	if (iPeptideArraySize == 0)
+		return;
 
 #pragma omp parallel for shared(vpPeptideArray) private(i) \
 	schedule(guided)
@@ -474,12 +557,32 @@ void MS2ScanVector::processPeptideArrayMvhTask(vector<Peptide *> &vpPeptideArray
 	MS2Scan *scanPtr;
 	int precursorCharge;
 	double precursorMass;
+	PeptideIsotopeCalculator calculator;
 	for (i = 0; i < iPeptideArraySize; i++)
 	{
 		bAssigned = false;
 		bProcessed = false;
+		const string &decorated = vpPeptideArray.at(i)->getPeptideSeq();
+		string compositionSequence;
+		compositionSequence.reserve(decorated.size());
+		for (char symbol : decorated)
+			if (symbol != '[' && symbol != ']')
+				compositionSequence.push_back(symbol);
+		const auto estimate =
+			calculator.calPrecursorEstimate(compositionSequence);
+		vpPeptideArray.at(i)->setPeptideMass(estimate.mass);
+		vpPeptideArray.at(i)->setPrecursorNeutronMass(
+			estimate.neutronMass);
+#pragma omp critical(sipros_max_peptide_mass)
+		{
+			if (estimate.mass > ProNovoConfig::dMaxPeptideMass)
+				ProNovoConfig::dMaxPeptideMass = estimate.mass;
+		}
 		// assign peptide to scan
-		GetAllRangeFromMass(vpPeptideArray.at(i)->getPeptideMass(), vpPeptideMassRanges);
+		GetAllRangeFromMass(
+			vpPeptideArray.at(i)->getPeptideMass(),
+			vpPeptideArray.at(i)->getPrecursorNeutronMass(),
+			vpPeptideMassRanges);
 		for (j = 0; j < (int)vpPeptideMassRanges.size(); j++)
 		{
 			pairMS2Range = vpPeptideMassRanges.at(j);
@@ -565,20 +668,9 @@ void MS2ScanVector::searchDatabaseMvh()
 		// get one peptide from the database at a time, until there is no more peptide
 		while (myProteinDatabase.getNextPeptide(currentPeptide))
 		{
-			// assign the pointers of peptides to appropriete MS2Scans
-			if (assignPeptides2Scans(currentPeptide))
-			{
-				// save the new peptide to the array
-				vpPeptideArray.push_back(currentPeptide);
-				if (currentPeptide->getPeptideMass() > ProNovoConfig::dMaxPeptideMass)
-				{
-					ProNovoConfig::dMaxPeptideMass = currentPeptide->getPeptideMass();
-				}
-			}
-			else
-			{
-				delete currentPeptide;
-			}
+			// Modal precursor estimates are calculated for the whole batch in
+			// parallel, then candidates are assigned to scans serially.
+			vpPeptideArray.push_back(currentPeptide);
 			// create a new peptide for the next iteration
 			currentPeptide = new Peptide;
 			// when the vpPeptideArray is full
@@ -616,18 +708,7 @@ void MS2ScanVector::searchDatabaseWdpSip()
 		// get one peptide from the database at a time, until there is no more peptide
 		while (myProteinDatabase.getNextPeptide(currentPeptide))
 		{
-
-			// assign the pointers of peptides to appropriete MS2Scans
-			if (assignPeptides2Scans(currentPeptide))
-			{
-				// save the new peptide to the array
-				vpPeptideArray.push_back(currentPeptide);
-			}
-			else
-			{
-				// not assigned, delete
-				delete currentPeptide;
-			}
+			vpPeptideArray.push_back(currentPeptide);
 			// create a new peptide for the next iteration
 			currentPeptide = new Peptide;
 			// when the vpPeptideArray is full
@@ -681,10 +762,6 @@ void MS2ScanVector::searchDatabaseMvhTask()
 				// get one peptide from the database at a time, until there is no more peptide
 				while (myProteinDatabase.getNextPeptide(currentPeptide))
 				{
-					if (currentPeptide->getPeptideMass() > ProNovoConfig::dMaxPeptideMass)
-					{
-						ProNovoConfig::dMaxPeptideMass = currentPeptide->getPeptideMass();
-					}
 					vpPeptideArray.push_back(currentPeptide);
 					if (vpPeptideArray.size() >= TASKPEPTIDE_ARRAY_SIZE)
 					{
@@ -1284,6 +1361,7 @@ void MS2ScanVector::appendScoredPsmRows(vector<ScoredPsmRow> &rows, bool isDecoy
 			row.isolationWindowCenterMZ = scan->dParentMZ;
 			row.measuredParentMass = peptide->dMeasuredParentMass;
 			row.calculatedParentMass = peptide->dPepNeutralMass;
+			row.precursorNeutronMass = peptide->dPrecursorNeutronMass;
 			row.scanType = scan->getScanType();
 			row.searchName = ProNovoConfig::getSearchName();
 			row.ms2IsotopicAbundancePct = ms2IsotopicAbundancePct;

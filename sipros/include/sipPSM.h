@@ -22,6 +22,7 @@ public:
     std::vector<int> parentCharges;
     std::vector<double> measuredParentMasses;
     std::vector<double> calculatedParentMasses;
+    std::vector<double> precursorNeutronMasses;
     std::string scanType;
 
     std::string scoringFunction;

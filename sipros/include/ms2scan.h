@@ -117,6 +117,7 @@ public:
 	// ranks of the 3 scores
 	std::array<double, 3> vdRank;
 	double dPepNeutralMass;
+	double dPrecursorNeutronMass;
 	double iPepLength;
 	static int iNumScores;
 

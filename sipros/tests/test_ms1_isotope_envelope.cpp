@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include <omp.h>
 #include <unistd.h>
 
 namespace
@@ -128,7 +129,7 @@ NominalDistribution peptideDistribution(
             if (biosynthetic &&
                 static_cast<int>(atom) == target.atomIndex)
             {
-                check(averagine::changeAtomProbability(
+                check(PeptideIsotopeCalculator::changeAtomProbability(
                           probabilities,
                           target.label[0],
                           targetFraction),
@@ -203,10 +204,10 @@ Fixture makeFixture(const TargetCase &target,
     fixture.charge = charge;
     fixture.expectedPct = targetFraction * 100.0;
 
-    averagine avg;
+    PeptideIsotopeCalculator calculator;
     fixture.baseMass =
-        avg.calPrecursorBaseMass(fixture.peptide);
-    fixture.composition = avg.pepComposition;
+        calculator.calPrecursorBaseMass(fixture.peptide);
+    fixture.composition = calculator.pepComposition;
     fixture.targetAtomCount =
         fixture.composition[sipros::IsotopeSource::Biosynthetic]
                            [static_cast<size_t>(target.atomIndex)];
@@ -333,6 +334,8 @@ sipPSM extractFixtureFeatures(Fixture &fixture)
         fixture.charge);
     psm.calculatedParentMasses.push_back(
         fixture.baseMass);
+    psm.precursorNeutronMasses.push_back(
+        PeptideIsotopeCalculator().calPrecursorEstimate(fixture.peptide).neutronMass);
     psm.identifiedPeptides.push_back(
         "[" + fixture.peptide + "]");
     psm.originalPeptides.push_back(
@@ -452,128 +455,166 @@ void checkWhitelistAndConfiguredMasses()
           "configuration resolver accepted phosphorus");
 }
 
-void checkPrecursorMassUsesExactTargetDelta()
+void checkModalPrecursorAndWindows()
 {
-    constexpr double midpointFraction = 0.55;
-    averagine avg;
-    for (const TargetCase &target : targetCases())
+    PeptideIsotopeCalculator calculator;
+    const std::string peptide = "KVDVTGTSK";
+
+    const auto checkModalShift = [&calculator, &peptide](
+        const PeptideIsotopeCalculator::PrecursorEstimate &estimate,
+        const std::string &label)
     {
-        check(ProNovoConfig::applySipAbundance(
-                  target.label[0], 0.0),
-              std::string("failed to set zero enrichment for ") +
-                  target.label);
-        const double zeroMass =
-            avg.calPrecursorMass(target.peptide);
-        const int targetAtomCount =
-            avg.pepComposition[
-                sipros::IsotopeSource::Biosynthetic]
-                [static_cast<size_t>(target.atomIndex)];
-        check(targetAtomCount > 0,
-              std::string("precursor test has no ") +
-                  target.label + " atoms");
+        IsotopeDistribution envelope;
+        check(ProNovoConfig::configIsotopologue.computeIsotopicDistribution(
+                  calculator.pepComposition, envelope),
+              label + " precursor convolution failed");
+        const auto apex = std::max_element(
+            envelope.vProb.begin(), envelope.vProb.end());
+        check(apex != envelope.vProb.end(),
+              label + " precursor envelope is empty");
+        const size_t apexIndex = static_cast<size_t>(
+            std::distance(envelope.vProb.begin(), apex));
+        const double baseMass = calculator.calPrecursorBaseMass(peptide);
+        const int modalShift = static_cast<int>(std::lround(
+            envelope.vMass[apexIndex] - baseMass));
+        check(estimate.nominalShift == modalShift,
+              label + " precursor estimate did not use the modal shift");
+        check(std::fabs(
+                  estimate.mass -
+                  (baseMass + modalShift * estimate.neutronMass)) < 1e-9,
+              label + " modal precursor identity failed");
+    };
 
-        check(ProNovoConfig::applySipAbundance(
-                  target.label[0], midpointFraction),
-              std::string("failed to set midpoint enrichment for ") +
-                  target.label);
-        const double midpointMass =
-            avg.calPrecursorMass(target.peptide);
-        const int midpointHeavyCount = static_cast<int>(
-            std::floor(
-                (static_cast<double>(targetAtomCount) + 1.0) *
-                midpointFraction));
-        const double expectedMidpointShift =
-            static_cast<double>(midpointHeavyCount) *
-            target.expectedMassDelta;
-        check(std::fabs(
-                  (midpointMass - zeroMass) -
-                  expectedMidpointShift) < 1e-6,
-              std::string("precursor midpoint used an averaged neutron delta for ") +
-                  target.label);
+    check(ProNovoConfig::load(ProNovoConfig::Profile::Regular),
+          "failed to load Regular profile for precursor estimate test");
+    const auto regular = calculator.calPrecursorEstimate(peptide);
+    check(std::fabs(regular.neutronMass - 1.002786935) < 1e-6,
+          "Regular composition-weighted neutron mass is wrong");
+    checkModalShift(regular, "Regular");
 
-        check(ProNovoConfig::applySipAbundance(
-                  target.label[0], 1.0),
-              std::string("failed to set full enrichment for ") +
-                  target.label);
-        const double fullMass =
-            avg.calPrecursorMass(target.peptide);
-        const double expectedFullShift =
-            static_cast<double>(targetAtomCount) *
-            target.expectedMassDelta;
+    std::vector<std::pair<double, double>> windows;
+    check(ProNovoConfig::getPeptideMassWindows(
+              regular.mass, regular.neutronMass, windows),
+          "failed to build peptide-specific precursor windows");
+    check(windows.size() == 5,
+          "peptide-specific precursor windows have the wrong count");
+    for (int shift = -2; shift <= 2; ++shift)
+    {
+        const auto &window = windows[static_cast<size_t>(shift + 2)];
+        const double center = (window.first + window.second) / 2.0;
         check(std::fabs(
-                  (fullMass - zeroMass) -
-                  expectedFullShift) < 1e-6,
-              std::string("precursor endpoint used an averaged neutron delta for ") +
-                  target.label);
-
-        // calNetronMass is explicitly per nominal-neutron unit. Therefore a
-        // full O18/S34 event is divided by two here, but not in the precursor
-        // peak mass checked above.
-        check(std::fabs(
-                  avg.calNetronMass(target.peptide) -
-                  target.expectedMassDelta /
-                      static_cast<double>(target.nominalShift)) < 1e-9,
-              std::string("nominal neutron spacing is wrong for ") +
-                  target.label);
-        check(std::fabs(
-                  ProNovoConfig::getNeutronMass() -
-                  target.expectedMassDelta /
-                      static_cast<double>(target.nominalShift)) < 1e-9,
-              std::string("configured nominal neutron spacing is wrong for ") +
-                  target.label);
+                  center -
+                  (regular.mass + shift * regular.neutronMass)) < 1e-9,
+              "precursor window did not use peptide-specific spacing");
     }
+    std::vector<std::pair<double, double>> invalidWindows;
+    check(!ProNovoConfig::getPeptideMassWindows(
+               regular.mass, 0.0, invalidWindows),
+          "invalid peptide spacing fell back to the global neutron mass");
 
-    const double naturalCarbon =
-        ProNovoConfig::getNaturalAtomIsotopeProbabilities(0)[1];
-    check(ProNovoConfig::applySipAbundance('C', naturalCarbon),
-          "failed to restore natural carbon after precursor checks");
+    check(ProNovoConfig::load(ProNovoConfig::Profile::Sip),
+          "failed to restore SIP profile for precursor estimate test");
+    check(ProNovoConfig::applySipAbundance('C', 0.5),
+          "failed to set 50% C13 for precursor estimate test");
+    const auto sip = calculator.calPrecursorEstimate(peptide);
+    check(std::fabs(sip.neutronMass - 1.003339560) < 1e-6,
+          "SIP composition-weighted neutron mass is wrong");
+    checkModalShift(sip, "SIP");
 }
 
-void checkExactMultinomialBoundaryModes()
+void checkMassErrorUsesPeptideSpecificSpacing()
 {
-    struct BoundaryCase
+    PSMfeatureExtractor extractor;
+    constexpr double calculatedMass = 1000.0;
+    for (double peptideSpacing : {1.002786935, 1.003339560})
     {
-        char atom;
-        std::string peptide;
-        int element;
-        int expectedHeavyCount;
-        double exactDelta;
-    };
-    const std::vector<BoundaryCase> boundaries{
-        // With 19 atoms and p=0.55, target counts 10 and 11 are tied in
-        // the target-vs-rest binomial. O17/S33 split the rest, making 11
-        // target atoms the unique multinomial mode.
-        {'O', std::string(18, 'A') + "K", 2, 11, 2.004245},
-        {'S', std::string(19, 'M') + "K", 5, 11, 1.995796},
-        // A genuine two-isotope tie retains the lower-mass mode.
-        {'C', "AAAGGK", 0, 9, 1.003355}};
+        const auto result = extractor.getMassWindowShiftAndError(
+            calculatedMass + peptideSpacing,
+            calculatedMass,
+            peptideSpacing);
+        check(result.first == 1,
+              "PIN isotope shift did not use peptide-specific spacing");
+        check(std::fabs(result.second) < 1e-9,
+              "PIN mass error did not use peptide-specific spacing");
+    }
+}
 
-    averagine avg;
-    for (const BoundaryCase &boundary : boundaries)
+void checkAllTargetsProduceModalEstimates()
+{
+    PeptideIsotopeCalculator calculator;
+    for (const TargetCase &target : targetCases())
     {
         check(ProNovoConfig::load(ProNovoConfig::Profile::Sip),
-              "failed to reset SIP profile for multinomial boundary");
-        check(ProNovoConfig::applySipAbundance(boundary.atom, 0.0),
-              "failed to set light multinomial boundary");
-        const double lightMass =
-            avg.calPrecursorMass(boundary.peptide);
-        const int atomCount =
-            avg.pepComposition[
-                sipros::IsotopeSource::Biosynthetic]
-                [static_cast<size_t>(boundary.element)];
-        check(atomCount == 19,
-              "multinomial boundary peptide has the wrong atom count");
-
-        check(ProNovoConfig::applySipAbundance(
-                  boundary.atom, boundary.atom == 'C' ? 0.5 : 0.55),
-              "failed to set multinomial boundary abundance");
-        const double labeledMass =
-            avg.calPrecursorMass(boundary.peptide);
+              "failed to reset SIP profile for modal target test");
+        check(ProNovoConfig::applySipAbundance(target.label[0], 0.55),
+              "failed to set modal target abundance");
+        const auto estimate =
+            calculator.calPrecursorEstimate(target.peptide);
+        check(estimate.mass > 0.0 && estimate.neutronMass > 0.0 &&
+                  std::isfinite(estimate.mass) &&
+                  std::isfinite(estimate.neutronMass),
+              std::string("invalid modal estimate for ") +
+                  target.label);
+        const double baseMass =
+            calculator.calPrecursorBaseMass(target.peptide);
+        IsotopeDistribution envelope;
+        check(ProNovoConfig::configIsotopologue.computeIsotopicDistribution(
+                  calculator.pepComposition, envelope),
+              std::string("precursor convolution failed for ") +
+                  target.label);
+        const auto apex = std::max_element(
+            envelope.vProb.begin(), envelope.vProb.end());
+        const size_t apexIndex = static_cast<size_t>(
+            std::distance(envelope.vProb.begin(), apex));
+        check(estimate.nominalShift == static_cast<int>(std::lround(
+                  envelope.vMass[apexIndex] - baseMass)),
+              std::string("modal shift failed for ") + target.label);
         check(std::fabs(
-                  (labeledMass - lightMass) -
-                  boundary.expectedHeavyCount * boundary.exactDelta) < 1e-6,
-              std::string("wrong exact multinomial boundary mode for ") +
-                  boundary.atom);
+                  estimate.mass -
+                  (baseMass + estimate.nominalShift *
+                      estimate.neutronMass)) < 1e-9,
+              std::string("modal identity failed for ") +
+                  target.label);
+    }
+}
+
+void checkParallelModalEstimates()
+{
+    check(ProNovoConfig::load(ProNovoConfig::Profile::Sip),
+          "failed to load SIP profile for parallel modal test");
+    check(ProNovoConfig::applySipAbundance('C', 0.25),
+          "failed to set C13 abundance for parallel modal test");
+
+    std::vector<std::string> peptides;
+    peptides.reserve(64 * targetCases().size());
+    for (int repeat = 0; repeat < 64; ++repeat)
+        for (const TargetCase &target : targetCases())
+            peptides.push_back(target.peptide);
+
+    std::vector<PeptideIsotopeCalculator::PrecursorEstimate> serial(
+        peptides.size());
+    std::vector<PeptideIsotopeCalculator::PrecursorEstimate> parallel(
+        peptides.size());
+    PeptideIsotopeCalculator serialCalculator;
+    for (size_t i = 0; i < peptides.size(); ++i)
+        serial[i] = serialCalculator.calPrecursorEstimate(peptides[i]);
+
+#pragma omp parallel
+    {
+        PeptideIsotopeCalculator calculator;
+#pragma omp for schedule(guided)
+        for (int i = 0; i < static_cast<int>(peptides.size()); ++i)
+            parallel[static_cast<size_t>(i)] =
+                calculator.calPrecursorEstimate(
+                    peptides[static_cast<size_t>(i)]);
+    }
+
+    for (size_t i = 0; i < peptides.size(); ++i)
+    {
+        check(parallel[i].mass == serial[i].mass &&
+                  parallel[i].neutronMass == serial[i].neutronMass &&
+                  parallel[i].nominalShift == serial[i].nominalShift,
+              "parallel modal estimate differs from serial result");
     }
 }
 
@@ -588,20 +629,13 @@ void checkDirectSearchUsesFullPtmComposition()
     check(ProNovoConfig::applySipAbundance('N', 0.55),
           "failed to set N15 abundance for direct-search PTM mass test");
 
-    averagine avg;
+    PeptideIsotopeCalculator calculator;
     const std::string plain = "NAAAAHK";
     const std::string modified = "N!AAAAHK";
-    const double plainMass = avg.calPrecursorMass(plain);
-    const double expectedModifiedMass =
-        avg.calPrecursorMass(modified);
-    const double fullCompositionShift =
-        expectedModifiedMass - plainMass;
-    check(std::fabs(fullCompositionShift - 0.984016) < 1e-6,
-          "full deamidated peptide changed an unchanged N15 modal count");
-    check(std::fabs(
-              fullCompositionShift -
-              ProNovoConfig::getResidueMass("!")) > 0.9,
-          "deamidation fixture does not expose standalone-mode nonadditivity");
+    const auto plainEstimate =
+        calculator.calPrecursorEstimate(plain);
+    const auto modifiedEstimate =
+        calculator.calPrecursorEstimate(modified);
 
     struct TemporaryFasta
     {
@@ -635,21 +669,22 @@ void checkDirectSearchUsesFullPtmComposition()
         if (peptide.getPeptideSeq() == "[NAAAAHK]")
         {
             foundPlain = true;
-            check(std::fabs(peptide.getPeptideMass() - plainMass) < 1e-6,
-                  "direct search assigned the wrong unmodified precursor mass");
+            check(peptide.getPeptideMass() == 0.0 &&
+                      peptide.getPrecursorNeutronMass() == 0.0,
+                  "database generation did not defer precursor estimation");
         }
         else if (peptide.getPeptideSeq() == "[N!AAAAHK]")
         {
             foundModified = true;
-            check(std::fabs(
-                      peptide.getPeptideMass() -
-                      expectedModifiedMass) < 1e-6,
-                  "direct search added a standalone PTM mode instead of "
-                  "recomputing the full decorated peptide");
+            check(peptide.getPeptideMass() == 0.0 &&
+                      peptide.getPrecursorNeutronMass() == 0.0,
+                  "PTM generation did not defer precursor estimation");
         }
     }
     check(foundPlain && foundModified,
           "direct search did not generate both PTM mass fixtures");
+    check(plainEstimate.mass != modifiedEstimate.mass,
+          "full modal estimator ignored the PTM composition");
     check(ProNovoConfig::load(ProNovoConfig::Profile::Sip),
           "failed to restore SIP profile after direct-search PTM mass test");
 }
@@ -659,7 +694,7 @@ void checkTargetElementCategories()
     const auto &naturalOxygen =
         ProNovoConfig::getNaturalAtomIsotopeProbabilities(2);
     std::vector<double> oxygen = naturalOxygen;
-    check(averagine::changeAtomProbability(
+    check(PeptideIsotopeCalculator::changeAtomProbability(
               oxygen, 'O', 0.5),
           "failed to prepare O18 categories");
     const double oxygenScale =
@@ -676,7 +711,7 @@ void checkTargetElementCategories()
     const auto &naturalSulfur =
         ProNovoConfig::getNaturalAtomIsotopeProbabilities(5);
     std::vector<double> sulfur = naturalSulfur;
-    check(averagine::changeAtomProbability(
+    check(PeptideIsotopeCalculator::changeAtomProbability(
               sulfur, 'S', 0.5),
           "failed to prepare S34 categories");
     const double sulfurScale =
@@ -696,13 +731,13 @@ void checkTargetElementCategories()
                   naturalSulfur[4] * sulfurScale) < 1e-12,
           "S32/S33/S36 natural ratios were not retained for S34");
 
-    check(averagine::changeAtomProbability(
+    check(PeptideIsotopeCalculator::changeAtomProbability(
               oxygen, 'O', 1.0),
           "failed to prepare O18 endpoint");
     check(oxygen[0] == 0.0 && oxygen[1] == 0.0 &&
               oxygen[2] == 1.0,
           "O18 endpoint did not suppress other isotopes");
-    check(averagine::changeAtomProbability(
+    check(PeptideIsotopeCalculator::changeAtomProbability(
               sulfur, 'S', 1.0),
           "failed to prepare S34 endpoint");
     check(sulfur[0] == 0.0 && sulfur[1] == 0.0 &&
@@ -1084,8 +1119,10 @@ int main(int argc, char **argv)
               "failed to load built-in SIP profile");
 
         checkWhitelistAndConfiguredMasses();
-        checkPrecursorMassUsesExactTargetDelta();
-        checkExactMultinomialBoundaryModes();
+        checkModalPrecursorAndWindows();
+        checkMassErrorUsesPeptideSpecificSpacing();
+        checkAllTargetsProduceModalEstimates();
+        checkParallelModalEstimates();
         checkDirectSearchUsesFullPtmComposition();
         checkTargetElementCategories();
         checkCleanEnrichments();

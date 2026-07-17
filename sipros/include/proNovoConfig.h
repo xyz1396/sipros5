@@ -305,8 +305,8 @@ public:
 	// Initialize session-wide state from a compiled profile.
 	static bool load(Profile profile);
 
-	// Return every compiled legacy PTM. The selectable flag reflects the active
-	// fixed chemistry for conditional compatibility tokens such as variable IAA.
+	// Return every compiled PTM. The selectable flag reflects whether each token
+	// is valid for the active fixed chemistry.
 	static const vector<PtmDefinition> &getPtmCatalog();
 	static const vector<FixedPtmDefinition> &getFixedPtmCatalog();
 	static vector<string> getEnabledFixedPtmNames();
@@ -404,6 +404,11 @@ public:
 
 	// Expand a peptide mass into the compiled parent-mass windows.
 	static bool getPeptideMassWindows(double dPeptideMass,
+									  vector<pair<double, double>> &vpPeptideMassWindows);
+	// Expand a peptide mass with its source-aware, composition-weighted
+	// nominal-neutron spacing. FASTA search uses this overload exclusively.
+	static bool getPeptideMassWindows(double dPeptideMass,
+									  double precursorNeutronMass,
 									  vector<pair<double, double>> &vpPeptideMassWindows);
 
 	// Return the active maximum number of variable PTMs per peptide.

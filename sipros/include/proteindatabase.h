@@ -10,7 +10,6 @@
 #include "peptide.h"
 #include "proNovoConfig.h"
 #include "ptm.h"
-#include "averagine.h"
 // #include "alphabet.h"
 
 // #define ORDERSTRING "ACDEFGHIJKLMNPQRSTVWY[]"
@@ -39,8 +38,6 @@ class ProteinDatabase
     int iPtmCount;                  // exact number of ptms in the current peptide
     vector<int> comb_order;         // info for combination;
     vector<int> ptm_order, ele_num; // based on given comb_order
-    // for precursor mass estimate
-    averagine mAveragine = averagine();
     // Amino aa;
     vector<double> mass_map;    // Masses for each position in protein
     vector<double> msum_map;    // Mass sum ending at each position in protein
@@ -91,7 +88,9 @@ class ProteinDatabase
     bool mutatePeptideMoreCleavage(Peptide *mutationPeptide, const string &sOriginalPeptideContent, string &sMutatedPeptide);
     // check cleavage info for the new mutated peptide;
     bool verifyPeptide(const string &sMutatedPeptide);
-    void setPeptideInfo(Peptide *thePeptide, const string &sIdentifyPeptide, const double &dMass);
+    void setPeptideInfo(Peptide *thePeptide, const string &sIdentifyPeptide,
+                        const double &dMass,
+                        double precursorNeutronMass = 0.0);
     void setLeftSubPeptideInfo(Peptide *thePeptide);
     void setRightSubPeptideInfo(Peptide *thePeptide);
     void subPeptide(const string &sMutatedPeptide);

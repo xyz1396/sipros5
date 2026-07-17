@@ -108,9 +108,12 @@ Elemental formulas also retain isotope-source provenance. Amino-acid atoms are
 sources always use the natural isotope distribution of the real CHONPS element.
 Generated spectra libraries record this contract in `chemistry_profile_id`, and
 `search-spectra` rejects libraries made with a different or legacy chemistry.
-Precursor estimates retain each target isotope's exact mass defect: C13, H2,
-and N15 use their element-specific one-neutron shifts, while each O18 or S34
-atom contributes its full two-neutron isotope mass difference.
+FASTA precursor estimates sum the expected exact isotope-mass shifts from all
+source-aware CHONPS atoms, divide by the expected nominal-neutron shift to get
+a peptide-specific spacing, and round the combined nominal shift once. The
+same composition-weighted spacing defines that peptide's configured precursor
+isotope windows; FASTA assignment does not fall back to a global target-isotope
+spacing.
 
 ### 5. Output Files
 

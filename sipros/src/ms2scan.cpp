@@ -2002,6 +2002,7 @@ void PeptideUnit::setPeptideUnitInfo(const tuple<double, int, Peptide *> current
 	// Sipros Ensemble
 	vdScores[scoreIX] = dScore;
 	dPepNeutralMass = currentPeptide->getPeptideMass();
+	dPrecursorNeutronMass = currentPeptide->getPrecursorNeutronMass();
 	iPepLength = currentPeptide->getPeptideLength();
 	sPeptideForScoring = currentPeptide->getPeptideForScoring();
 }

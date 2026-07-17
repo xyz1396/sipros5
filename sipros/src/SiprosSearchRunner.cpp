@@ -464,6 +464,7 @@ static sipPSM buildSipPsm(const std::string &sampleName,
 		psm.isolationWindowCenterMZs.push_back(row.isolationWindowCenterMZ);
 		psm.measuredParentMasses.push_back(row.measuredParentMass);
 		psm.calculatedParentMasses.push_back(row.calculatedParentMass);
+		psm.precursorNeutronMasses.push_back(row.precursorNeutronMass);
 		psm.MS2IsotopicAbundances.push_back(row.ms2IsotopicAbundancePct);
 		psm.ranks.push_back(row.rank);
 		psm.scores.push_back(row.wdpScore);

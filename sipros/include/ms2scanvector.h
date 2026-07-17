@@ -31,6 +31,7 @@ struct ScoredPsmRow
 	double isolationWindowCenterMZ = 0.0;
 	double measuredParentMass = 0.0;
 	double calculatedParentMass = 0.0;
+	double precursorNeutronMass = 0.0;
 	string scanType;
 	string searchName;
 	double ms2IsotopicAbundancePct = 1.07;
@@ -70,6 +71,7 @@ class MS2ScanVector {
 
 	// find every MS2 scan whose precursor mass matches peptide mass
 	bool assignPeptides2Scans(Peptide * currentPeptide);
+	void estimateAndAssignPeptides(vector<Peptide *> &vpPeptideArray);
 	pair<int, int> GetRangeFromMass(double lb, double ub);
 
 	// regular search functions
@@ -92,7 +94,9 @@ class MS2ScanVector {
 
 	void setOutputFile(const string & sScanFilenameInput, const string & sOutputDirectory);
 
-	void GetAllRangeFromMass(double dPeptideMass, vector<pair<int, int> > & vpPeptideMassRanges);
+	void GetAllRangeFromMass(double dPeptideMass,
+						 double precursorNeutronMass,
+						 vector<pair<int, int> > & vpPeptideMassRanges);
 	string ParsePath(string sPath);
 
 public:

@@ -24,6 +24,8 @@ public:
 	int ibeginPos;
 	// the mass of the whole peptide
 	double dPeptideMass;
+	// Peptide-specific nominal-neutron spacing used for precursor windows.
+	double dPrecursorNeutronMass;
 	// score if it is in weightsum vector, the score is weightsum score, so do Xorr, Ranksome, and others.
 	double dscore;
 	// the length of the peptide
@@ -50,7 +52,6 @@ public:
 	vector<vector<double> > vvdBionProb;
 
 	Peptide();
-	~Peptide();
 
 	void setPeptide(const string & sPeptide, const string & sOriginalPeptide, const string & sProteinName, const int & ibeginPos, const double & dPeptideMass,
 			const char & cIdentifyPrefix, const char & cIdentifySuffix, const char & cOriginalPrefix, const char & cOriginalSuffix);
@@ -72,6 +73,18 @@ public:
 	;
 	double getPeptideMass() const {
 		return dPeptideMass;
+	}
+	;
+	void setPeptideMass(double peptideMass) {
+		dPeptideMass = peptideMass;
+	}
+	;
+	double getPrecursorNeutronMass() const {
+		return dPrecursorNeutronMass;
+	}
+	;
+	void setPrecursorNeutronMass(double neutronMass) {
+		dPrecursorNeutronMass = neutronMass;
 	}
 	;
 	double getPeptideScore() const {
@@ -112,8 +125,6 @@ public:
 	void preprocessing(bool isMS2HighRes, const map<char, double> & mapResidueMass);
 
 	void preprocessingMVH();
-
-	void preprocessingSIP();
 
 	// this function doesn't need mapResidueMass as input
 	void calculateIsotope(const string & sNewPeptide);

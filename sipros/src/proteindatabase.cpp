@@ -435,11 +435,12 @@ bool ProteinDatabase::getNextOriginalPeptide(Peptide *originalPeptide)
 		{
 			if (isPeptideLengthGood(vicleavageSite.at(iendCleavagePos) - vicleavageSite.at(ibeginCleavagePos)))
 			{
-				// migrate to the new precursor mass estimate method by binomial NP
 				sOriginalPeptide = scurrentProtein.substr(vicleavageSite.at(ibeginCleavagePos) + 1, vicleavageSite.at(iendCleavagePos) - vicleavageSite.at(ibeginCleavagePos));
-				dOriginalPeptideMass = mAveragine.calPrecursorMass(sOriginalPeptide);
 				sOriginalPeptide = "[" + sOriginalPeptide + "]";
-				setPeptideInfo(originalPeptide, sOriginalPeptide, dOriginalPeptideMass);
+				// Regular/SIP precursor mass and neutron spacing are finalized in
+				// parallel by MS2ScanVector immediately before scan assignment.
+				dOriginalPeptideMass = 0.0;
+				setPeptideInfo(originalPeptide, sOriginalPeptide, 0.0);
 				// sOriginalPeptide = "["
 				// 		+ scurrentProtein.substr(vicleavageSite.at(ibeginCleavagePos) + 1,
 				// 				vicleavageSite.at(iendCleavagePos) - vicleavageSite.at(ibeginCleavagePos)) + "]";
@@ -512,7 +513,6 @@ bool ProteinDatabase::getNextPtmPeptide(Peptide *ptmPeptide)
 	int i, iPtmPos;
 	bool bReVal = true;
 	string scurrentPeptide, sPtm;
-	double dcurrentMass;
 
 	if (iPtmCount > icurrentMaxPtm)
 		bReVal = false;
@@ -527,17 +527,9 @@ bool ProteinDatabase::getNextPtmPeptide(Peptide *ptmPeptide)
 			sPtm = ptm_position_all.at(comb_order.at(i)).second.at(ptm_order.at(i)).first;
 			scurrentPeptide.insert(iPtmPos + 1, sPtm);
 		}
-		// A modal isotope mass is not additive across standalone residue/PTM
-		// modes. Recalculate from the complete net sourced composition so a
-		// negative-atom PTM (for example deamidation) changes the target-isotope
-		// count only when the full peptide's multinomial mode changes.
-		string compositionSequence;
-		compositionSequence.reserve(scurrentPeptide.size());
-		for (char symbol : scurrentPeptide)
-			if (symbol != '[' && symbol != ']')
-				compositionSequence.push_back(symbol);
-		dcurrentMass = mAveragine.calPrecursorMass(compositionSequence);
-		setPeptideInfo(ptmPeptide, scurrentPeptide, dcurrentMass);
+		// The complete decorated sequence is estimated once in the parallel
+		// precursor batch, so PTMs are included in the same convolution.
+		setPeptideInfo(ptmPeptide, scurrentPeptide, 0.0);
 		// ptmPeptide->setPeptide(scurrentPeptide, sOriginalPeptide, scurrentProteinName, vicleavageSite.at(ibeginCleavagePos)+1,dcurrentMass);
 		if (!GenerateNextPTM(ptm_order, ele_num))
 		{
@@ -786,7 +778,10 @@ void ProteinDatabase::mutatePeptide(const string &sOriginalPeptideContent, strin
 		sMutatedPeptide = sOriginalPeptideContent.substr(0, imutationPos) + sMutationOrder.substr(imutationOrder, 1) + sOriginalPeptideContent.substr(imutationPos + 1);
 }
 
-void ProteinDatabase::setPeptideInfo(Peptide *thePeptide, const string &sIdentifyPeptide, const double &dMass)
+void ProteinDatabase::setPeptideInfo(Peptide *thePeptide,
+									 const string &sIdentifyPeptide,
+									 const double &dMass,
+									 double precursorNeutronMass)
 {
 	char cIdentifyPrefix, cIdentifySuffix, cOriginalPrefix, cOriginalSuffix;
 	int iBeginPos, iEndPos; // positions of Peptide on the original protein
@@ -804,6 +799,7 @@ void ProteinDatabase::setPeptideInfo(Peptide *thePeptide, const string &sIdentif
 	cIdentifySuffix = cOriginalSuffix;
 	thePeptide->setPeptide(sIdentifyPeptide, sOriginalPeptide, scurrentProteinName, vicleavageSite.at(ibeginCleavagePos) + 1, dMass, cIdentifyPrefix,
 						   cIdentifySuffix, cOriginalPrefix, cOriginalSuffix);
+	thePeptide->setPrecursorNeutronMass(precursorNeutronMass);
 }
 
 void ProteinDatabase::setLeftSubPeptideInfo(Peptide *thePeptide)

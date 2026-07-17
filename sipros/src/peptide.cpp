@@ -1,19 +1,18 @@
 #include "peptide.h"
 #include "isotopologue.h"
 
+#include <algorithm>
+
 Peptide::Peptide() {
 	iPeptideLength = 0;
 	cOriginalPrefix = '-';
 	cOriginalSuffix = '-';
 	dscore = 0;
 	dPeptideMass = 0;
+	dPrecursorNeutronMass = 0;
 	ibeginPos = 0;
 	cIdentifyPrefix = '-';
 	cIdentifySuffix = '-';
-}
-
-Peptide::~Peptide() {
-
 }
 
 void Peptide::setPeptide(const string& sPeptide, const string& sOriginalPeptide, const string& sProteinName, const int& ibeginPos, const double & dPeptideMass,
@@ -133,51 +132,6 @@ void Peptide::preprocessingMVH() {
 	}
 
 	sNeutralLossPeptide = neutralLossProcess(sPeptide);
-}
-
-void Peptide::preprocessingSIP() {
-	int i;
-	iPeptideLength = 0;
-	for (i = 0; i < (int) sPeptide.length(); ++i) {
-		if (isalpha(sPeptide.at(i))) {
-			iPeptideLength = iPeptideLength + 1;
-		}
-	}
-
-	sNeutralLossPeptide = neutralLossProcess(sPeptide);
-	// get isotope distribution
-	calculateIsotope(sNeutralLossPeptide); // just for weightsum
-	// re-scale the probability
-	int iLen2 = 0, j = 0;
-	double dMaxProb = 0;
-	// y-ion
-	int iLen1 = this->vvdYionProb.size();
-	for (i = 0; i < iLen1; ++i) {
-		iLen2 = vvdYionProb.at(i).size();
-		dMaxProb = 0;
-		for (j = 0; j < iLen2; ++j) {
-			if (dMaxProb < vvdYionProb.at(i).at(j)) {
-				dMaxProb = vvdYionProb.at(i).at(j);
-			}
-		}
-		for (j = 0; j < iLen2; ++j) {
-			vvdYionProb.at(i).at(j) /= dMaxProb;
-		}
-	}
-	// b-ion
-	iLen1 = this->vvdBionProb.size();
-	for (i = 0; i < iLen1; ++i) {
-		iLen2 = vvdBionProb.at(i).size();
-		dMaxProb = 0;
-		for (j = 0; j < iLen2; ++j) {
-			if (dMaxProb < vvdBionProb.at(i).at(j)) {
-				dMaxProb = vvdBionProb.at(i).at(j);
-			}
-		}
-		for (j = 0; j < iLen2; ++j) {
-			vvdBionProb.at(i).at(j) /= dMaxProb;
-		}
-	}
 }
 
 string Peptide::neutralLossProcess(const string& sCurrentPeptide) {

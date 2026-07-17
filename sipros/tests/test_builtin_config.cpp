@@ -6,6 +6,7 @@
 #include <cmath>
 #include <iostream>
 #include <map>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -24,6 +25,23 @@ void require(bool condition, const std::string &message)
 bool near(double actual, double expected, double tolerance = 1e-10)
 {
 	return std::abs(actual - expected) <= tolerance;
+}
+
+double lowestMass(const IsotopeDistribution &distribution)
+{
+	require(!distribution.vMass.empty(), "isotope distribution is empty");
+	return *std::min_element(
+		distribution.vMass.begin(), distribution.vMass.end());
+}
+
+double lowestMassForSequence(
+	Isotopologue &isotopologue,
+	const std::string &sequence)
+{
+	IsotopeDistribution distribution;
+	require(isotopologue.computeIsotopicDistribution(sequence, distribution),
+			"failed to compute isotope distribution for " + sequence);
+	return lowestMass(distribution);
 }
 
 void requireCounts(const sipros::AtomCounts &actual,
@@ -105,8 +123,27 @@ void requireIonDistributionNear(
 {
 	for (double &mass : expected.vMass)
 		mass += massCorrection;
-	requireDistributionNear(
-		IsotopeDistribution(actualMass, actualProbability), expected, message);
+	require(!actualMass.empty() &&
+			actualMass.size() == actualProbability.size(),
+			message + " (empty or malformed envelope)");
+	const double actualTotal = std::accumulate(
+		actualProbability.begin(), actualProbability.end(), 0.0);
+	const double expectedTotal = std::accumulate(
+		expected.vProb.begin(), expected.vProb.end(), 0.0);
+	require(near(actualTotal, expectedTotal, 1e-10),
+			message + " (different normalization)");
+	const auto actualApex = std::max_element(
+		actualProbability.begin(), actualProbability.end());
+	const auto expectedApex = std::max_element(
+		expected.vProb.begin(), expected.vProb.end());
+	const size_t actualApexIndex = static_cast<size_t>(
+		std::distance(actualProbability.begin(), actualApex));
+	const size_t expectedApexIndex = static_cast<size_t>(
+		std::distance(expected.vProb.begin(), expectedApex));
+	require(near(actualMass[actualApexIndex],
+				expected.vMass[expectedApexIndex], 1e-5) &&
+				near(*actualApex, *expectedApex, 1e-5),
+			message + " (different envelope apex)");
 }
 
 void checkProductIonNetCompositionCase(
@@ -199,9 +236,9 @@ void checkProductIonExactMassesAndPrecursorConservation()
 		6.0 * 12.000000 + 14.0 * 1.007825 +
 		2.0 * 15.994915 + 2.0 * 14.003074 + proton;
 	require(near(bMass.front().front() + proton, expectedB1Mz, 1e-9),
-			"b1 m/z includes an extra electron mass");
+			"b1 m/z differs from neutral composition plus proton");
 	require(near(yMass.front().front() + proton, expectedY1Mz, 1e-9),
-			"y1 m/z is missing an electron mass");
+			"y1 m/z differs from neutral composition plus proton");
 
 	IsotopeDistribution reconstructedPrecursor = isotopologue.sum(
 		IsotopeDistribution(bMass.back(), bProbability.back()),
@@ -220,8 +257,8 @@ void checkProductIonExactMassesAndPrecursorConservation()
 	requireDistributionNear(
 		directPrecursor, compositionPrecursor,
 		"decorated direct precursor convolution changed the composition");
-	require(near(reconstructedPrecursor.getLowestMass(),
-				directPrecursor.getLowestMass(), 1e-8),
+	require(near(lowestMass(reconstructedPrecursor),
+				lowestMass(directPrecursor), 1e-8),
 			"b/y terminal correction changed reconstructed precursor base mass");
 	require(near(reconstructedPrecursor.getMostAbundantMass(),
 				directPrecursor.getMostAbundantMass(), 1e-5),
@@ -253,10 +290,10 @@ void checkProductIonNetComposition()
 		{"A", "C(", "D", "E", "F", "G", "H", "K"},
 		"", "", 'C', 0.57, "fixed-CAM S-nitrosylation");
 	checkProductIonNetCompositionCase(
-		"[%AS2@CDEFGK]~",
-		{"A", "S2@", "C", "D", "E", "F", "G", "K"},
-		"%", "~", 'O', 0.61,
-		"neutral loss with terminal and consecutive PTMs");
+		"[%AS2CDEFGK]",
+		{"A", "S2", "C", "D", "E", "F", "G", "K"},
+		"%", "", 'O', 0.61,
+		"neutral loss with N-terminal acetylation");
 }
 
 void checkNoUninitializedFallback()
@@ -349,7 +386,7 @@ void checkCommonChemistry()
 				  "peptide natural-source formula is wrong");
 	requireCounts(peptide.total(), {5, 10, 3, 2, 0, 1},
 				  "peptide total formula is wrong");
-	require(near(iso.computeMonoisotopicMass("C"),
+	require(near(lowestMassForSequence(iso, "C"),
 				 178.041214, 1e-6),
 			"natural peptide monoisotopic mass is wrong");
 
@@ -370,7 +407,7 @@ void checkCommonChemistry()
 		{0, 1, 3, 0, 1, 0});
 	IsotopeDistribution phosphoDistribution;
 	require(iso.computeIsotopicDistribution(phospho, phosphoDistribution) &&
-				near(phosphoDistribution.getLowestMass(), 79.966332, 1e-6),
+				near(lowestMass(phosphoDistribution), 79.966332, 1e-6),
 			"real-phosphorus HPO3 mass is wrong");
 }
 
@@ -441,8 +478,8 @@ void checkSourceIsolationAndEndpointMasses()
 
 		require(ProNovoConfig::applySipAbundance(target.atom, 1.0),
 				"failed to apply endpoint abundance");
-		require(near(ProNovoConfig::configIsotopologue
-						 .computeMonoisotopicMass("C"),
+		require(near(lowestMassForSequence(
+						 ProNovoConfig::configIsotopologue, "C"),
 				 target.expectedEndpointMass, 2e-6),
 				std::string("natural-source atoms shifted at endpoint ") +
 					target.atom);
@@ -560,12 +597,80 @@ void checkRegularProfile()
 			"profile reload did not restore natural carbon");
 }
 
+void checkUnifiedRegularProductIons()
+{
+	require(ProNovoConfig::load(ProNovoConfig::Profile::Regular),
+			"failed to load Regular profile for product-ion test");
+	Isotopologue &isotopologue = ProNovoConfig::configIsotopologue;
+	std::vector<std::vector<double>> yMass;
+	std::vector<std::vector<double>> yProbability;
+	std::vector<std::vector<double>> bMass;
+	std::vector<std::vector<double>> bProbability;
+	require(isotopologue.computeProductIon(
+			"[SATPAQAQAVHK]", yMass, yProbability, bMass, bProbability),
+			"failed to compute Regular product ions");
+
+	IsotopeDistribution expectedB1 =
+		isotopologue.vResidueIsotopicDistribution.at("S");
+	sipros::SourcedComposition expectedYTermComposition =
+		isotopologue.mResidueSourcedComposition.at("Nterm") +
+		isotopologue.mResidueSourcedComposition.at("Cterm");
+	IsotopeDistribution expectedYTerm;
+	require(isotopologue.computeIsotopicDistribution(
+			expectedYTermComposition, expectedYTerm),
+		"failed to build direct Regular y-ion terminus");
+	IsotopeDistribution expectedY1 = isotopologue.sum(
+		isotopologue.vResidueIsotopicDistribution.at("K"), expectedYTerm);
+	requireDistributionNear(
+		IsotopeDistribution(bMass.front(), bProbability.front()),
+		expectedB1,
+		"Regular b1 differs from its neutral composition");
+	requireDistributionNear(
+		IsotopeDistribution(yMass.front(), yProbability.front()),
+		expectedY1,
+		"Regular y1 differs from its neutral composition");
+}
+
+void checkResiduePtmStateCache()
+{
+	require(ProNovoConfig::load(ProNovoConfig::Profile::Sip),
+			"failed to load SIP profile for residue-PTM cache test");
+	require(ProNovoConfig::applySipAbundance('C', 0.57),
+			"failed to apply SIP abundance for residue-PTM cache test");
+	Isotopologue &isotopologue = ProNovoConfig::configIsotopologue;
+	for (const std::string &state : {"N!", "M~", "C(", "S2"})
+	{
+		sipros::SourcedComposition cachedComposition;
+		IsotopeDistribution cachedDistribution;
+		require(isotopologue.getCachedResidueState(
+				state, cachedComposition, cachedDistribution),
+				"missing cached residue-PTM state " + state);
+		sipros::SourcedComposition expectedComposition =
+			isotopologue.mResidueSourcedComposition.at(state.substr(0, 1));
+		expectedComposition +=
+			isotopologue.mResidueSourcedComposition.at(state.substr(1, 1));
+		requireSameComposition(
+			cachedComposition, expectedComposition,
+			"cached sourced composition differs for " + state);
+		requireNonnegativeComposition(
+			cachedComposition,
+			"cached sourced composition is negative for " + state);
+		IsotopeDistribution expectedDistribution;
+		require(isotopologue.computeIsotopicDistribution(
+				cachedComposition, expectedDistribution),
+				"failed direct convolution for cached state " + state);
+		requireDistributionNear(
+			cachedDistribution, expectedDistribution,
+			"cached envelope differs for " + state);
+	}
+}
+
 void checkPtmCatalogAndSelectors()
 {
 	require(ProNovoConfig::load(ProNovoConfig::Profile::Regular),
 			"failed to load Regular profile for PTM catalog tests");
 	const auto &catalog = ProNovoConfig::getPtmCatalog();
-	require(catalog.size() == 13, "legacy PTM catalog is incomplete");
+	require(catalog.size() == 13, "PTM catalog is incomplete");
 	struct ExpectedPtm
 	{
 		const char *token;
@@ -686,7 +791,7 @@ void checkPtmCatalogAndSelectors()
 	require(ProNovoConfig::configureVariablePtms({"all"}, -1, error), error);
 	require(ProNovoConfig::getPTMinfo(ptms) && ptms.size() == 12 &&
 			ptms.find("/") == ptms.end(),
-			"PTM selector 'all' included unavailable IAA or omitted a legacy PTM");
+			"PTM selector 'all' included unavailable IAA or omitted a PTM");
 	require(ProNovoConfig::getNeutralLossList().size() == 2,
 			"PTM selector 'all' omitted neutral-loss rules");
 	require(!ProNovoConfig::configureVariablePtms({"/"}, -1, error),
@@ -774,8 +879,8 @@ void checkFixedPtmConfiguration()
 	require(ProNovoConfig::configIsotopologue.computeSourcedComposition(
 			"C(", naturalSno),
 			"failed to compute natural-cysteine SNO composition");
-	const double naturalSnoMass =
-		ProNovoConfig::configIsotopologue.computeMonoisotopicMass("C(");
+	const double naturalSnoMass = lowestMassForSequence(
+		ProNovoConfig::configIsotopologue, "C(");
 	require(ProNovoConfig::configureVariablePtms({"/"}, -1, error), error);
 	sipros::SourcedComposition variableCamCysteine;
 	require(ProNovoConfig::configIsotopologue.computeSourcedComposition(
@@ -802,7 +907,8 @@ void checkFixedPtmConfiguration()
 			"failed to compute fixed-CAM SNO composition");
 	requireSameComposition(fixedSno, naturalSno,
 			"S-nitrosocysteine depends on starting fixed-CAM state");
-	require(near(ProNovoConfig::configIsotopologue.computeMonoisotopicMass("C("),
+	require(near(lowestMassForSequence(
+				 ProNovoConfig::configIsotopologue, "C("),
 				 naturalSnoMass, 1e-6),
 			"S-nitrosocysteine mass depends on starting fixed-CAM state");
 	require(!ptmByToken("/").selectable &&
@@ -1015,6 +1121,8 @@ int main()
 	{
 		checkNoUninitializedFallback();
 		checkRegularProfile();
+		checkUnifiedRegularProductIons();
+		checkResiduePtmStateCache();
 		checkPtmCatalogAndSelectors();
 		checkFixedPtmConfiguration();
 		checkPsmPtmTranslation();

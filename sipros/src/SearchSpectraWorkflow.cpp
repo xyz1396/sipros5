@@ -51,7 +51,7 @@
 #include "MVH.h"
 #include "CometSearchMod.h"
 #include "SiprosWorkflows.h"
-#include "averagine.h"
+#include "PeptideIsotopeCalculator.h"
 #include "RaxportHdf5Reader.h"
 #include "PinWriter.h"
 #include "PSMfeatureExtractor.h"
@@ -2476,9 +2476,9 @@ ShardPsmRow makeScoringRow(size_t scanIdx,
     std::vector<isotopicPeak> ms1Peaks;
     if (ms1Data && scan && scan->iParentScanID > 0 && precursorCharge > 0)
     {
-        averagine avg;
+        PeptideIsotopeCalculator calculator;
         const std::string peptideForComposition = PSMfeatureExtractor::peptideBodyWithPtms(rec.peptide);
-        baseMass = avg.calPrecursorBaseMass(peptideForComposition);
+        baseMass = calculator.calPrecursorBaseMass(peptideForComposition);
         const double monoPrecursorMz =
             baseMass / precursorCharge + ProNovoConfig::getProtonMass();
         int ms1ScanNumber = scan->iParentScanID;
@@ -2490,7 +2490,7 @@ ShardPsmRow makeScoringRow(size_t scanIdx,
             precursorCharge,
             monoPrecursorMz,
             match.matchedMz,
-            avg.pepComposition,
+            calculator.pepComposition,
             labeledRecord.sipAtom,
             labeledRecord.ms2Pct,
             mzToleranceDaAt);

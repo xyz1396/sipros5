@@ -12,7 +12,7 @@
 #include <sstream>
 #include <stdexcept>
 
-PSMfeatureExtractor::PSMfeatureExtractor() : mAveragine(averagine()), mSipPSM(nullptr)
+PSMfeatureExtractor::PSMfeatureExtractor() : mSipPSM(nullptr)
 {}
 
 struct SupportedSipIsotope
@@ -133,15 +133,22 @@ int PSMfeatureExtractor::getPTMnumber(const std::string &peptideSeq)
 }
 
 std::pair<int, double> PSMfeatureExtractor::getMassWindowShiftAndError(const double observedPrecursorMass,
-                                                                       const double calculatedPrecursorMass)
+                                                                       const double calculatedPrecursorMass,
+                                                                       const double precursorNeutronMass)
 {
-    int massWindowShift = static_cast<int>(round(std::abs(observedPrecursorMass - calculatedPrecursorMass) /
-                                                 ProNovoConfig::getNeutronMass()));
-    double massError = std::fmod(std::abs(observedPrecursorMass - calculatedPrecursorMass),
-                                 ProNovoConfig::getNeutronMass());
-    if (massError > ProNovoConfig::getNeutronMass() / 2)
+    if (!(precursorNeutronMass > 0.0) || !std::isfinite(precursorNeutronMass) ||
+        !(calculatedPrecursorMass > 0.0) || !std::isfinite(calculatedPrecursorMass))
     {
-        massError = ProNovoConfig::getNeutronMass() - massError;
+        throw std::invalid_argument(
+            "Mass-error calculation requires positive finite calculated mass and peptide neutron spacing.");
+    }
+    int massWindowShift = static_cast<int>(round(std::abs(observedPrecursorMass - calculatedPrecursorMass) /
+                                                 precursorNeutronMass));
+    double massError = std::fmod(std::abs(observedPrecursorMass - calculatedPrecursorMass),
+                                 precursorNeutronMass);
+    if (massError > precursorNeutronMass / 2)
+    {
+        massError = precursorNeutronMass - massError;
     }
     // convert it to ppm
     massError = massError / calculatedPrecursorMass * 1000000;
@@ -242,7 +249,7 @@ double PSMfeatureExtractor::expectedNaturalNominalShiftExceptTarget(
                 static_cast<int>(atomIdx) == targetAtomIndex &&
                 std::isfinite(targetFraction))
             {
-                if (!averagine::changeAtomProbability(
+                if (!PeptideIsotopeCalculator::changeAtomProbability(
                         probabilities, atomLetters[atomIdx], targetFraction))
                     return std::numeric_limits<double>::quiet_NaN();
             }
@@ -614,7 +621,7 @@ static EnvelopeComponent targetElementEnvelope(
     std::vector<double> probabilities =
         ProNovoConfig::getNaturalAtomIsotopeProbabilities(
             static_cast<size_t>(spec.atomIndex));
-    if (!averagine::changeAtomProbability(
+    if (!PeptideIsotopeCalculator::changeAtomProbability(
             probabilities, spec.atom, targetFraction))
         return component;
     if (probabilities.size() != configured.vMass.size() ||
@@ -917,13 +924,13 @@ PSMfeatureExtractor::getSIPelementAbundanceFromMS1Peaks(
         !std::isfinite(expectedEnrichmentPct))
         return result;
 
-    averagine avg;
-    avg.calPepAtomCounts(peptideBodyWithPtms(peptide));
+    PeptideIsotopeCalculator calculator;
+    calculator.calPepAtomCounts(peptideBodyWithPtms(peptide));
     if (spec.atomIndex < 0 ||
         spec.atomIndex >= static_cast<int>(sipros::ElementCount))
         return result;
     const double atomNumber =
-        avg.pepComposition[sipros::IsotopeSource::Biosynthetic]
+        calculator.pepComposition[sipros::IsotopeSource::Biosynthetic]
                           [static_cast<size_t>(spec.atomIndex)];
     if (atomNumber <= 0.0)
         return result;
@@ -957,7 +964,7 @@ PSMfeatureExtractor::getSIPelementAbundanceFromMS1Peaks(
     {
         const double naturalOtherShift =
             expectedNaturalNominalShiftExceptTarget(
-                avg.pepComposition,
+                calculator.pepComposition,
                 spec.atomIndex,
                 spec.isotopeIndex,
                 targetFraction);
@@ -996,7 +1003,7 @@ PSMfeatureExtractor::getSIPelementAbundanceFromMS1Peaks(
         const double modelFraction = fittedPct / 100.0;
         const NominalEnvelopeModel model =
             theoreticalSipEnvelope(
-                avg.pepComposition, spec, modelFraction);
+                calculator.pepComposition, spec, modelFraction);
         if (model.probability.empty())
             break;
         const double modelMaximum =
@@ -1157,6 +1164,11 @@ void PSMfeatureExtractor::extractFeaturesForPsm(const std::string &hdf5Path, sip
 
 void PSMfeatureExtractor::extractFeaturesOfEachPSM()
 {
+    if (mSipPSM->precursorNeutronMasses.size() != mSipPSM->isotopicPeakss.size())
+    {
+        throw std::runtime_error(
+            "PSM precursor neutron spacings do not match the number of PSM rows.");
+    }
     float topScore = 0;
     for (size_t i = 0; i < mSipPSM->isotopicPeakss.size(); i++)
     {
@@ -1164,7 +1176,7 @@ void PSMfeatureExtractor::extractFeaturesOfEachPSM()
         const int precursorCharge = mSipPSM->parentCharges[i];
         if (precursorCharge > 0)
         {
-            const double baseMass = mAveragine.calPrecursorBaseMass(compositionPeptide);
+            const double baseMass = mPeptideIsotopeCalculator.calPrecursorBaseMass(compositionPeptide);
             const double monoPrecursorMz = baseMass / precursorCharge + ProNovoConfig::getProtonMass();
             const double matchedPrecursorMz =
                 mSipPSM->measuredParentMasses[i] / precursorCharge + ProNovoConfig::getProtonMass();
@@ -1178,7 +1190,7 @@ void PSMfeatureExtractor::extractFeaturesOfEachPSM()
                 precursorCharge,
                 monoPrecursorMz,
                 matchedPrecursorMz,
-                mAveragine.pepComposition,
+                mPeptideIsotopeCalculator.pepComposition,
                 sipIsotope,
                 mSipPSM->MS2IsotopicAbundances[i],
                 mzToleranceDaAt);
@@ -1211,7 +1223,8 @@ void PSMfeatureExtractor::extractFeaturesOfEachPSM()
             mSipPSM->isolationWindowCenterMZs[i] -
             mSipPSM->measuredParentMasses[i] / mSipPSM->parentCharges[i] - ProNovoConfig::getProtonMass());
         std::tie(mSipPSM->isotopicMassWindowShifts[i], mSipPSM->massErrors[i]) = getMassWindowShiftAndError(
-            mSipPSM->measuredParentMasses[i], mSipPSM->calculatedParentMasses[i]);
+            mSipPSM->measuredParentMasses[i], mSipPSM->calculatedParentMasses[i],
+            mSipPSM->precursorNeutronMasses[i]);
 
         mSipPSM->precursorIntensities[i] = 0;
         for (auto &peak : mSipPSM->isotopicPeakss[i])

@@ -4,9 +4,7 @@
 #include <string>
 #include <vector>
 #include <map>
-#include <math.h>
-#include <iomanip>
-#include <algorithm>
+#include <unordered_map>
 #include <iostream>
 #include "proNovoConfig.h"
 using namespace std;
@@ -17,42 +15,35 @@ class IsotopeDistribution
 public:
 	IsotopeDistribution();
 	IsotopeDistribution(vector<double> vItsMass, vector<double> vItsComposition);
-	~IsotopeDistribution();
 
 	vector<double> vMass;
 	vector<double> vProb;
 
 	double getMostAbundantMass();
-	double getAverageMass();
-	double getLowestMass();
-
-	void filterProbCutoff(double dProCutoff);
-
-	// print out the isotoptic distribution
-	// this is mainly used for debuging
-	void print();
 };
 
 class Isotopologue
 {
 public:
 	Isotopologue();
-	~Isotopologue();
 
 	// Initialize chemistry from the built-in, strongly typed profile.
 	bool setupIsotopologue(
 		const map<string, sipros::SourcedComposition> &residueAtomicComposition,
 		const vector<IsotopeDistribution> &atomIsotopicDistribution,
 		const string &atomNames);
+	bool refreshResidueStateCache(
+		const map<string, string> &ptmSites,
+		const vector<string> &nTermPtms = {},
+		const vector<string> &cTermPtms = {});
+	bool getCachedResidueState(
+		const string &state,
+		sipros::SourcedComposition &composition,
+		IsotopeDistribution &distribution) const;
 
 	// get the MostAbundant masses of  residues
 	bool getSingleResidueMostAbundantMasses(vector<string> &vsResidues, vector<double> &vdMostAbundantMasses, double &dTerminusMassN,
 											double &dTerminusMassC);
-
-	// compute the mass of the most abundant isotopologue
-	double computeMostAbundantMass(string sSequence);
-	double computeAverageMass(string sSequence);
-	double computeMonoisotopicMass(string sSequence);
 
 	// variables for this isotopologue
 	map<string, sipros::SourcedComposition> mResidueSourcedComposition;
@@ -89,42 +80,30 @@ public:
 	bool computeSourcedComposition(string sSequence,
 								  sipros::SourcedComposition &composition);
 
-	vector<IsotopeDistribution> &get_vAtomIsotopicDistribution()
-	{
-		return vAtomIsotopicDistribution;
-	}
-
 private:
-	// functions for IsotopeDistribution's arithmetic
-	IsotopeDistribution sum_backup(const IsotopeDistribution &distribution0, const IsotopeDistribution &distribution1);
+	struct CachedResidueState
+	{
+		sipros::SourcedComposition composition;
+		IsotopeDistribution distribution;
+	};
+	struct ProductIonState
+	{
+		string nTermStateKey;
+		string cTermStateKey;
+		vector<string> residueStateKeys;
+	};
+	unordered_map<string, CachedResidueState> residueStateCache;
+	unordered_map<string, IsotopeDistribution> bIonTerminalStateCache;
+	unordered_map<string, IsotopeDistribution> yIonTerminalStateCache;
+
+	bool parseProductIonSequence(
+		const string &sequence,
+		ProductIonState &state);
+
 	IsotopeDistribution multiply(const IsotopeDistribution &distribution0, int count);
-	void shiftMass(IsotopeDistribution &distribution0, double dMass);
 
-	// implementation of max and min
-	double maximum(double a, double b)
-	{
-		return (a > b) ? a : b;
-	}
-	double minimum(double a, double b)
-	{
-		return (a < b) ? a : b;
-	}
-
-	// when two peaks have a mass difference less than the MassPrecision
-	// they will be merged into one peak with their average mass and sum intensity
-	const double MassPrecision; // 0.01
-
-	// when a peak have a probability less than the ProbabilityCutoff
-	// this peak will be ingnored, which makes the total probability space less than 1
-	const double ProbabilityCutoff; // 1*10E-9
-
-	// the name of atoms
-	string AtomName;
-
-	// Number of real CHONPS elements.
+	// Number of CHONPS elements in the active distributions.
 	unsigned int AtomNumber;
-
-	
 
 	// Sipros Ensemble
 	// emass needs the mass to be one nucleus difference

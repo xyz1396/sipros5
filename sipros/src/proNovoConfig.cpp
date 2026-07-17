@@ -6,7 +6,7 @@
 #include <limits>
 #include <stdexcept>
 
-#include "averagine.h"
+#include "PeptideIsotopeCalculator.h"
 #include "isotopologue.h"
 
 namespace
@@ -59,7 +59,7 @@ const std::vector<ProNovoConfig::PtmDefinition> &compiledPtmCatalog()
 		 "Tyrosine nitration removes biosynthetic H and adds reagent-natural NO2.",
 		 44.985079, true, false},
 		{"iaa-blocking", "/", "C",
-		 "Legacy variable CAM/IAA token. It is selectable only when fixed "
+		 "Variable CAM/IAA token. It is selectable only when fixed "
 		 "carbamidomethylation is disabled; otherwise it is a zero-delta alias.",
 		 57.021464, true, false},
 		{"beta-methylthiolation", "$", "D",
@@ -165,6 +165,22 @@ std::vector<std::pair<std::string, std::string>> neutralLossesFor(
 	return losses;
 }
 
+std::map<std::string, std::string> productIonPtmSites()
+{
+	std::map<std::string, std::string> sites;
+	for (const ProNovoConfig::PtmDefinition &definition :
+		 ProNovoConfig::getPtmCatalog())
+	{
+		if (definition.selectable)
+			sites[definition.token] = definition.sites;
+	}
+	// Search-time neutral-loss processing replaces these phosphorylation
+	// tokens while retaining the same residue specificity.
+	sites["1"] = sites.at(">");
+	sites["2"] = sites.at("<");
+	return sites;
+}
+
 class BuiltInConfig
 {
 public:
@@ -244,8 +260,8 @@ public:
 		{
 			const sipros::SourcedComposition &cam =
 				fixedModification("carbamidomethyl").delta;
-			// Fixed CAM is already present on C. The legacy IAA token becomes
-			// a mass-neutral compatibility alias, while SNO first removes CAM.
+			// Fixed CAM is already present on C. IAA is mass-neutral, while SNO
+			// first removes CAM.
 			residues["/"] = {};
 			residues["("] = nitrosyl - cam;
 		}
@@ -660,6 +676,8 @@ bool ProNovoConfig::load(Profile profile)
 	{
 		return false;
 	}
+	if (!refreshResidueDistributions(configIsotopologue))
+		return false;
 	if (!refreshSessionMassCaches())
 	{
 		return false;
@@ -1294,6 +1312,11 @@ bool ProNovoConfig::configureFixedPtms(
 		error = "Failed to install validated fixed-PTM chemistry.";
 		return false;
 	}
+	if (!refreshResidueDistributions(configIsotopologue))
+	{
+		error = "Failed to build residue-PTM isotope distributions.";
+		return false;
+	}
 	naturalAtomIsotopeProbabilities = chemistry.naturalProbabilities;
 	if (!refreshSessionMassCaches())
 	{
@@ -1593,15 +1616,8 @@ bool ProNovoConfig::validatePreparationChemistry(
 
 bool ProNovoConfig::refreshResidueDistributions(Isotopologue &iso)
 {
-	iso.vResidueIsotopicDistribution.clear();
-	for (const auto &residue : iso.mResidueSourcedComposition)
-	{
-		IsotopeDistribution distribution;
-		if (!iso.computeIsotopicDistribution(residue.second, distribution))
-			return false;
-		iso.vResidueIsotopicDistribution[residue.first] = distribution;
-	}
-	return true;
+	return iso.refreshResidueStateCache(
+		productIonPtmSites(), {"%"}, {});
 }
 
 int ProNovoConfig::resolveSipIsotopeIndex(const Isotopologue &iso,
@@ -1671,7 +1687,7 @@ void ProNovoConfig::setSipAbundance(Isotopologue &iso,
 
 	auto &probabilities =
 		iso.vAtomIsotopicDistribution[static_cast<size_t>(index)].vProb;
-	if (!averagine::changeAtomProbability(
+	if (!PeptideIsotopeCalculator::changeAtomProbability(
 			probabilities, atom, sipPct / 100.0) ||
 		!refreshResidueDistributions(iso))
 	{
@@ -1776,7 +1792,7 @@ bool ProNovoConfig::applySipAbundance(char sipAtom, double fraction)
 			naturalAtomIsotopeProbabilities[atomIndexValue];
 	}
 	SIPelement = std::string(1, atom);
-	if (!averagine::changeAtomProbability(
+	if (!PeptideIsotopeCalculator::changeAtomProbability(
 			configIsotopologue.vAtomIsotopicDistribution[static_cast<size_t>(index)].vProb,
 			atom,
 			fraction) ||
@@ -1850,6 +1866,46 @@ bool ProNovoConfig::getPeptideMassWindows(
 			{peptideMass + offset.first, peptideMass + offset.second});
 	}
 	return !vpPeptideMassWindowOffset.empty();
+}
+
+bool ProNovoConfig::getPeptideMassWindows(
+	double peptideMass,
+	double precursorNeutronMass,
+	std::vector<std::pair<double, double>> &peptideMassWindows)
+{
+	if (!(precursorNeutronMass > 0.0) ||
+		!std::isfinite(precursorNeutronMass))
+		return false;
+
+	double lastLower = 0.0;
+	double lastUpper = 0.0;
+	bool haveWindow = false;
+	for (int massWindow : viParentMassWindows)
+	{
+		const double currentLower = peptideMass +
+			massWindow * precursorNeutronMass - dMassAccuracyParentIon;
+		const double currentUpper = peptideMass +
+			massWindow * precursorNeutronMass + dMassAccuracyParentIon;
+		if (!haveWindow)
+		{
+			lastLower = currentLower;
+			lastUpper = currentUpper;
+			haveWindow = true;
+		}
+		else if (currentLower <= lastUpper)
+		{
+			lastUpper = currentUpper;
+		}
+		else
+		{
+			peptideMassWindows.push_back({lastLower, lastUpper});
+			lastLower = currentLower;
+			lastUpper = currentUpper;
+		}
+	}
+	if (haveWindow)
+		peptideMassWindows.push_back({lastLower, lastUpper});
+	return haveWindow;
 }
 
 void ProNovoConfig::setDeductionCoefficient()

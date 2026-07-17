@@ -1,6 +1,6 @@
 #pragma once
 #include "RaxportHdf5Reader.h"
-#include "averagine.h"
+#include "PeptideIsotopeCalculator.h"
 #include "sipPSM.h"
 #include <array>
 #include <functional>
@@ -17,7 +17,7 @@ public:
 
     PSMfeatureExtractor();
 
-    averagine mAveragine;
+    PeptideIsotopeCalculator mPeptideIsotopeCalculator;
     sipros::RaxportMs1Data ms1Data;
     std::vector<sipPSM> sipPSMs;
     sipPSM *mSipPSM;
@@ -29,7 +29,8 @@ public:
     std::pair<int, int> getSeqLengthAndMissCleavageSiteNumber(const std::string &peptideSeq);
     int getPTMnumber(const std::string &peptideSeq);
     std::pair<int, double> getMassWindowShiftAndError(const double observedPrecursorMass,
-                                                      const double calculatedPrecursorMass);
+                                                      const double calculatedPrecursorMass,
+                                                      const double precursorNeutronMass);
     struct Ms1AbundanceResult
     {
         double abundancePct = 0.0;
