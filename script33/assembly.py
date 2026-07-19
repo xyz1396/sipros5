@@ -22,6 +22,16 @@ import pandas as pd
 from lxml import etree
 
 
+# pepXML stores an N-terminal modification as the absolute mass of the
+# modified terminus (H + modification), while Sipros writes the modification
+# delta as a leading '%' token in the bracketed peptide body.
+PROTEIN_N_TERM_ACETYL_SHIFT = 42.010565
+PEPTIDE_N_TERM_HYDROGEN_MASS = 1.007825
+PROTEIN_N_TERM_ACETYL_MASS = (
+    PROTEIN_N_TERM_ACETYL_SHIFT + PEPTIDE_N_TERM_HYDROGEN_MASS
+)
+
+
 class assembly:
     def __init__(self, baseNames: list[str], philosopherPath:str, percolatorPath:str, fastaPath:str, decoyPath:str, outputPath: str,
                 threadNumber: int, logger: Logger, element:str, negative_control = "", label_threshold = 2.0, decoyPrefix: str = "Decoy_") -> None:
@@ -127,6 +137,16 @@ class assembly:
                                           fragment_mass_type="monoisotopic", search_engine="X! Tandem", search_engine_version="Sipros")
         outputPath = os.path.abspath(self.outputPath)
         search_database = etree.SubElement(search_summary, "search_database", local_path=f'{outputPath}/targetDecoy.faa', type="AA")
+        etree.SubElement(
+            search_summary,
+            "terminal_modification",
+            terminus="N",
+            massdiff=f"{PROTEIN_N_TERM_ACETYL_SHIFT:.6f}",
+            mass=f"{PROTEIN_N_TERM_ACETYL_MASS:.6f}",
+            variable="Y",
+            protein_terminus="Y",
+            description="Protein N-terminal acetylation",
+        )
         parameter = etree.SubElement(search_summary, "parameter", name="database_name", value=f'{outputPath}/targetDecoy.faa')
         for i, row in psm.iterrows():
             spectrum_query = etree.SubElement(msms_run_summary, "spectrum_query", 
@@ -147,9 +167,10 @@ class assembly:
                 seqs[0] = "-"
             if not seqs[2] or seqs[2].strip() == "":
                 seqs[2] = "-"
-            seq = seqs[1]
+            sipros_seq = seqs[1]
+            protein_n_term_acetylated = sipros_seq.startswith("%")
             # remove PTM in the pep seq
-            seq = re.sub(r'[^a-zA-Z]', '', seq)
+            seq = re.sub(r'[^a-zA-Z]', '', sipros_seq)
             pros = [self.sanitize_protein_id(pro.strip()) for pro in row['Proteins'][1:-1].split(",") if pro.strip()]
             if not pros:
                 continue
@@ -173,6 +194,13 @@ class assembly:
                                                     peptide_prev_aa=seqs[0], 
                                                     peptide_next_aa=seqs[2], 
                                                     num_tol_term="2")
+            if protein_n_term_acetylated:
+                etree.SubElement(
+                    search_hit,
+                    "modification_info",
+                    modified_peptide=f"n[43]{seq}",
+                    mod_nterm_mass=f"{PROTEIN_N_TERM_ACETYL_MASS:.6f}",
+                )
             prob = str(1 - row['posterior_error_prob'])
             analysis_result = etree.SubElement(search_hit, "analysis_result", analysis="peptideprophet")
             hyperscore = etree.SubElement(search_hit, "hyperscore", value=str(row['score']))

@@ -96,11 +96,19 @@ bool MVH::Preprocess(MS2Scan * Spectrum, multimap<double, double> * IntenSortedP
 			IntenSortedPeakPreData->erase(IntenSortedPeakPreData->begin(), ite);
 		}
 	}
-	//Water Loss
-	double dMinOneWater = Spectrum->dParentMZ - WATER_MONO / Spectrum->iParentChargeState - ProNovoConfig::getMassAccuracyParentIon();
-	double dMinTwoWater = Spectrum->dParentMZ - 2 * WATER_MONO / Spectrum->iParentChargeState - ProNovoConfig::getMassAccuracyParentIon();
-	double dMaxOneWater = Spectrum->dParentMZ - WATER_MONO / Spectrum->iParentChargeState + ProNovoConfig::getMassAccuracyParentIon();
-	double dMaxTwoWater = Spectrum->dParentMZ - 2 * WATER_MONO / Spectrum->iParentChargeState + ProNovoConfig::getMassAccuracyParentIon();
+	// Water-loss removal is tied to the reaction precursor.  In MS1-neighborhood
+	// mode that value is only the isolation-window center and is not a searchable
+	// precursor hypothesis, so do not let its charge alter the shared peak list.
+	double dMinOneWater = 0;
+	double dMinTwoWater = 0;
+	double dMaxOneWater = 0;
+	double dMaxTwoWater = 0;
+	if (Spectrum->bUseReactionChargeForScoring && Spectrum->iParentChargeState > 0) {
+		dMinOneWater = Spectrum->dParentMZ - WATER_MONO / Spectrum->iParentChargeState - ProNovoConfig::getMassAccuracyParentIon();
+		dMinTwoWater = Spectrum->dParentMZ - 2 * WATER_MONO / Spectrum->iParentChargeState - ProNovoConfig::getMassAccuracyParentIon();
+		dMaxOneWater = Spectrum->dParentMZ - WATER_MONO / Spectrum->iParentChargeState + ProNovoConfig::getMassAccuracyParentIon();
+		dMaxTwoWater = Spectrum->dParentMZ - 2 * WATER_MONO / Spectrum->iParentChargeState + ProNovoConfig::getMassAccuracyParentIon();
+	}
 	double maxIntenOneWater = 0;
 	double dTargeMassOneWater = 0;
 	double maxIntenTwoWater = 0;
@@ -166,7 +174,7 @@ bool MVH::Preprocess(MS2Scan * Spectrum, multimap<double, double> * IntenSortedP
 	return true;
 }
 
-bool MVH::CalculateSequenceIons(string & sSequence, int maxIonCharge, bool useSmartPlusThreeModel, vector<double>* sequenceIonMasses,
+bool MVH::CalculateSequenceIons(std::string_view sSequence, int maxIonCharge, bool useSmartPlusThreeModel, vector<double>* sequenceIonMasses,
 		vector<double> * _pdAAforward, vector<double> * _pdAAreverse, vector<char> * seq) {
 	sequenceIonMasses->clear();
 	_pdAAforward->clear();
@@ -295,29 +303,24 @@ bool MVH::CalculateSequenceIons(string & sSequence, int maxIonCharge, bool useSm
 				}
 			}
 			int totalBasicity = totalStrongBasicCount * 4 + totalWeakBasicCount * 2 + iPeptideLength - 2;
-			map<double, int> basicityThresholds;
-			basicityThresholds.clear();
-			basicityThresholds[0.0] = 1;
-			for (int z = 1; z < maxIonCharge - 1; ++z) {
-				basicityThresholds[(double) z / (double) (maxIonCharge - 1)] = z + 1;
-			}
+			const double chargeDenominator = (double) (maxIonCharge - 1);
+			int bStrongBasicCount = 0, bWeakBasicCount = 0;
 			for (int c = 0; c <= iPeptideLength; ++c) {
-				int bStrongBasicCount = 0, bWeakBasicCount = 0;
-				for (i = 0; i < c; ++i) {
-					if (seq->at(i) == 'R' || seq->at(i) == 'K' || seq->at(i) == 'H') {
-						++bStrongBasicCount;
-					} else if (seq->at(i) == 'Q' || seq->at(i) == 'N') {
-						++bWeakBasicCount;
-					}
-				}
 				int bScore = bStrongBasicCount * 4 + bWeakBasicCount * 2 + c;
 				double basicityRatio = (double) bScore / (double) totalBasicity;
-				map<double, int>::iterator itr = basicityThresholds.upper_bound(basicityRatio);
-				if (itr == basicityThresholds.begin()) {
-					cerr << "error 83" << endl;
+				// Equivalent to upper_bound() on thresholds z/(charge-1), but
+				// without constructing a tree map for every candidate.
+				int first = 1;
+				int last = maxIonCharge - 1;
+				while (first < last) {
+					const int middle = first + (last - first) / 2;
+					if ((double) middle / chargeDenominator <= basicityRatio) {
+						first = middle + 1;
+					} else {
+						last = middle;
+					}
 				}
-				--itr;
-				int bZ = itr->second;
+				int bZ = first;
 				int yZ = maxIonCharge - bZ;
 				if (c > 0) {
 					if (fragmentTypes[FragmentType_B]) {
@@ -327,6 +330,14 @@ bool MVH::CalculateSequenceIons(string & sSequence, int maxIonCharge, bool useSm
 				if (c < iPeptideLength) {
 					if (fragmentTypes[FragmentType_Y]) {
 						sequenceIonMasses->push_back((_pdAAreverse->at(iLenMinus1 - c) + (Proton * yZ)) / yZ);
+					}
+				}
+				if (c < iPeptideLength) {
+					const char residue = seq->at(c);
+					if (residue == 'R' || residue == 'K' || residue == 'H') {
+						++bStrongBasicCount;
+					} else if (residue == 'Q' || residue == 'N') {
+						++bWeakBasicCount;
 					}
 				}
 			}
@@ -553,7 +564,7 @@ double MVH::lnCombin(int n, int k) {
 	}
 }
 
-bool MVH::ScoreSequenceVsSpectrum(string & currentPeptide, int precursorCharge, MS2Scan * Spectrum, vector<double>* seqIons, vector<double> * _pdAAforward,
+bool MVH::ScoreSequenceVsSpectrum(std::string_view currentPeptide, int precursorCharge, MS2Scan * Spectrum, vector<double>* seqIons, vector<double> * _pdAAforward,
 		vector<double> * _pdAAreverse, double & dMvh, vector<char> * seq) {
 	if (!CalculateSequenceIons(currentPeptide, precursorCharge, bUseSmartPlusThreeModel, seqIons, _pdAAforward, _pdAAreverse, seq)) {
 		return false;
@@ -561,9 +572,10 @@ bool MVH::ScoreSequenceVsSpectrum(string & currentPeptide, int precursorCharge, 
 	int totalPeaks = (int) seqIons->size();
 	char peakItr;
 	PeakList * pPeakList = Spectrum->pPeakList;
-	vector<int> mvhKey;
-	mvhKey.clear();
-	mvhKey.resize(ProNovoConfig::NumIntensityClasses + 1, 0);
+	// This function runs once per candidate. Reuse one count vector per worker
+	// instead of allocating and freeing it millions of times.
+	static thread_local vector<int> mvhKey;
+	mvhKey.assign(ProNovoConfig::NumIntensityClasses + 1, 0);
 
 	for (int j = 0; j < (int) seqIons->size(); ++j) {
 		if (seqIons->at(j) < Spectrum->mzLowerBound || seqIons->at(j) > Spectrum->mzUpperBound) {
@@ -615,9 +627,8 @@ bool MVH::ScoreSequenceVsSpectrumSIP(string & currentPeptide, int precursorCharg
 	int totalPeaks = (int) seqIons->size();
 	char peakItr;
 	PeakList * pPeakList = Spectrum->pPeakList;
-	vector<int> mvhKey;
-	mvhKey.clear();
-	mvhKey.resize(ProNovoConfig::NumIntensityClasses + 1, 0);
+	static thread_local vector<int> mvhKey;
+	mvhKey.assign(ProNovoConfig::NumIntensityClasses + 1, 0);
 
 	for (int j = 0; j < (int) seqIons->size(); ++j) {
 		if (seqIons->at(j) < Spectrum->mzLowerBound || seqIons->at(j) > Spectrum->mzUpperBound) {

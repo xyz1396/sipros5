@@ -26,6 +26,8 @@ MS2Scan::MS2Scan()
 	dSumIntensity = 0;
 	iScanId = 0;
 	iParentChargeState = 0;
+	bUseReactionChargeForScoring = true;
+	iMaxCandidateCharge = 0;
 	bSetMS2Flag = false;
 	isMS1HighRes = true;
 	dParentNeutralMass = 0;
@@ -146,6 +148,9 @@ void MS2Scan::cleanup()
 void MS2Scan::scoreWeightSum(const tuple<double, int, Peptide *> currentMassChargePeptidePtrTuple)
 {
 	Peptide *currentPeptide = get<2>(currentMassChargePeptidePtrTuple);
+	const int measuredCharge = bUseReactionChargeForScoring
+		? iParentChargeState
+		: get<1>(currentMassChargePeptidePtrTuple);
 	double dScore = 0;
 	// calculate score
 	vector<bool> vbFragmentZ2; // true: y side gets the +2; false: b ion gets +2, only calculated for +3 peptides
@@ -153,7 +158,7 @@ void MS2Scan::scoreWeightSum(const tuple<double, int, Peptide *> currentMassChar
 	double dBweight = 0, dYweight = 0, dExpectedMZ, dExYweight = 0, dExBweight = 0;
 	int iExYreward = 0, iExBreward = 0, iCurrentYreward, iCurrentBreward;
 
-	if (iParentChargeState >= 3)
+	if (measuredCharge >= 3)
 		WeightCompare(currentPeptide->getPeptideSeq(), vbFragmentZ2);
 	iNumFragments = currentPeptide->vdYionMasses.size();
 	for (n = 0; n < iNumFragments; ++n)
@@ -166,7 +171,7 @@ void MS2Scan::scoreWeightSum(const tuple<double, int, Peptide *> currentMassChar
 		dExpectedMZ = currentPeptide->vdBionMasses[iNumFragments - n - 1] + ProNovoConfig::getProtonMass();
 		if (searchMZ2D(dExpectedMZ, iIndex4MostAbundunt))
 			dBweight = ProNovoConfig::scoreError(fabs(vdpreprocessedMZ[iIndex4MostAbundunt] - dExpectedMZ)) + vdpreprocessedIntensity[iIndex4MostAbundunt];
-		if (iParentChargeState >= 3)
+		if (measuredCharge >= 3)
 		{
 			if (vbFragmentZ2[n])
 			{
@@ -343,6 +348,9 @@ void MS2Scan::scoreWeightSum(const tuple<double, int, Peptide *> currentMassChar
 void MS2Scan::scoreRankSumHighMS2(const tuple<double, int, Peptide *> currentMassChargePeptidePtrTuple)
 {
 	Peptide *currentPeptide = get<2>(currentMassChargePeptidePtrTuple);
+	const int measuredCharge = bUseReactionChargeForScoring
+		? iParentChargeState
+		: get<1>(currentMassChargePeptidePtrTuple);
 	double dScore = 0;
 	vector<bool> vbFragmentZ2; // true: y side gets the +2; false: b ion gets +2, only calculated for +3 peptides
 	int iNumFragments = 0, iIndex4MostAbundunt = 0;
@@ -379,7 +387,7 @@ void MS2Scan::scoreRankSumHighMS2(const tuple<double, int, Peptide *> currentMas
 	iEmptyMZ = iMaxMZ - iMinMZ + 1 - iMatchCount;
 	iMZSize = (int)vbMatch.size();
 	dScore = 0;
-	if (iParentChargeState >= 3)
+	if (measuredCharge >= 3)
 	{
 		WeightCompare(currentPeptide->getPeptideSeq(), vbFragmentZ2);
 		for (i = 0; i < iNumFragments; i++)
@@ -444,6 +452,9 @@ void MS2Scan::scoreRankSumHighMS2(const tuple<double, int, Peptide *> currentMas
 void MS2Scan::scoreRankSum(const tuple<double, int, Peptide *> currentMassChargePeptidePtrTuple)
 {
 	Peptide *currentPeptide = get<2>(currentMassChargePeptidePtrTuple);
+	const int measuredCharge = bUseReactionChargeForScoring
+		? iParentChargeState
+		: get<1>(currentMassChargePeptidePtrTuple);
 	double dScore = 0;
 	vector<bool> vbFragmentZ2; // true: y side gets the +2; false: b ion gets +2, only calculated for +3 peptides
 	int iNumFragments = 0, iIndex4MostAbundunt = 0;
@@ -480,7 +491,7 @@ void MS2Scan::scoreRankSum(const tuple<double, int, Peptide *> currentMassCharge
 	iEmptyMZ = iMaxMZ - iMinMZ + 1 - iMatchCount;
 	iMZSize = (int)vbMatch.size();
 	dScore = 0;
-	if (iParentChargeState >= 3)
+	if (measuredCharge >= 3)
 	{
 		WeightCompare(currentPeptide->getPeptideSeq(), vbFragmentZ2);
 		for (i = 0; i < iNumFragments; i++)
@@ -784,8 +795,9 @@ void MS2Scan::scorePeptidesXcorr(bool *pbDuplFragment, double *_pdAAforward, dou
 		Peptide *peptidePtr = get<2>(vMassChargePeptidePtrTuples[i]);
 		if (!mergePeptide(vpWeightSumTopPeptides, peptidePtr->getPeptideSeq(), peptidePtr->getProteinName()))
 		{
-			if (CometSearchMod::ScorePeptides(&(peptidePtr->sNeutralLossPeptide), pbDuplFragment, _pdAAforward, _pdAAreverse, this, _uiBinnedIonMasses,
-											  dXcorr))
+			if (CometSearchMod::ScorePeptides(&(peptidePtr->sNeutralLossPeptide), pbDuplFragment, _pdAAforward, _pdAAreverse, this,
+										  get<1>(vMassChargePeptidePtrTuples[i]), _uiBinnedIonMasses,
+										  dXcorr))
 			{
 				if (dXcorr > 0)
 				{
@@ -1699,7 +1711,8 @@ void MS2Scan::scoreFeatureCalculation()
 	}
 }
 
-double MS2Scan::scoreWeightSum(string *currentPeptide, vector<double> *pvdYionMasses, vector<double> *pvdBionMasses)
+double MS2Scan::scoreWeightSum(string *currentPeptide, int measuredCharge,
+							   vector<double> *pvdYionMasses, vector<double> *pvdBionMasses)
 {
 	double dScore = 0;
 	// calculate score
@@ -1708,7 +1721,7 @@ double MS2Scan::scoreWeightSum(string *currentPeptide, vector<double> *pvdYionMa
 	double dBweight = 0, dYweight = 0, dExpectedMZ, dExYweight = 0, dExBweight = 0;
 	int iExYreward = 0, iExBreward = 0, iCurrentYreward, iCurrentBreward;
 
-	if (iParentChargeState >= 3)
+	if (measuredCharge >= 3)
 	{
 		WeightCompare((*currentPeptide), vbFragmentZ2);
 	}
@@ -1727,7 +1740,7 @@ double MS2Scan::scoreWeightSum(string *currentPeptide, vector<double> *pvdYionMa
 		{
 			dBweight = ProNovoConfig::scoreError(fabs(vdpreprocessedMZ[iIndex4MostAbundunt] - dExpectedMZ)) + vdpreprocessedIntensity[iIndex4MostAbundunt];
 		}
-		if (iParentChargeState >= 3)
+		if (measuredCharge >= 3)
 		{
 			if (vbFragmentZ2[n])
 			{

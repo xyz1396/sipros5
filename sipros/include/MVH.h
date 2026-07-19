@@ -15,6 +15,7 @@ class MS2Scan;
 #include <bitset>
 #include <numeric>
 #include <limits>
+#include <string_view>
 
 using namespace std;
 
@@ -76,7 +77,7 @@ public:
 	// for SIP mode, only larger than this cutoff, peak will be considered
 	static double ProbabilityCutOff;
 
-	static bool CalculateSequenceIons(string & currentPeptide, int maxIonCharge, bool useSmartPlusThreeModel, vector<double>* sequenceIonMasses,
+	static bool CalculateSequenceIons(std::string_view currentPeptide, int maxIonCharge, bool useSmartPlusThreeModel, vector<double>* sequenceIonMasses,
 			vector<double> * _pdAAforward, vector<double> * _pdAAreverse, vector<char> * seq);
 	static bool CalculateSequenceIonsSIP(string & currentPeptide, int maxIonCharge, bool useSmartPlusThreeModel, vector<double>* sequenceIonMasses,
 			vector<vector<double> > & vvdYionMass, vector<vector<double> > & vvdYionProb, vector<vector<double> > & vvdBionMass,
@@ -86,7 +87,7 @@ public:
 	static bool initialLnTable(int maxPeakBins);
 	static double lnCombin(int n, int k);
 	static bool Preprocess(MS2Scan * Spectrum, multimap<double, double> * IntenSortedPeakPreData);
-	static bool ScoreSequenceVsSpectrum(string & currentPeptide, int precursorCharge, MS2Scan * Spectrum, vector<double>* sequenceIonMasses, vector<double> * _pdAAforward,
+	static bool ScoreSequenceVsSpectrum(std::string_view currentPeptide, int precursorCharge, MS2Scan * Spectrum, vector<double>* sequenceIonMasses, vector<double> * _pdAAforward,
 			vector<double> * _pdAAreverse, double & dMvh, vector<char> * seq);
 	static bool ScoreSequenceVsSpectrumSIP(string & currentPeptide, int precursorCharge, MS2Scan * Spectrum, vector<double>* sequenceIonMasses,
 			vector<vector<double> > & vvdYionMass, vector<vector<double> > & vvdYionProb, vector<vector<double> > & vvdBionMass,

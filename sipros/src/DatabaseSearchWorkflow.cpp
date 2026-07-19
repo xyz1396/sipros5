@@ -6,6 +6,7 @@
 #include <omp.h>
 
 #include "SiprosSearchRunner.h"
+#include "performancelog.h"
 
 int DatabaseSearchWorkflow::run(int argc, char **argv)
 {
@@ -19,17 +20,26 @@ int DatabaseSearchWorkflow::run(int argc, char **argv)
 	{
 		return 0;
 	}
-
-#pragma omp parallel
+	const int threadCount = omp_get_max_threads();
+	std::cout << "Sipros FASTA search\n"
+			  << "  Input files: " << args.scanFiles.size() << "\n"
+			  << "  Mode       : "
+			  << (args.prepareOnly ? "prepare peptide cache" : "search H5 scans") << "\n"
+			  << "  Threads    : " << threadCount << "\n";
+	const sipros::PerformanceTimer runTimer;
+	if (runner.prepare(args) != 0)
 	{
-		const int tid = omp_get_thread_num();
-		if (tid == 0)
-		{
-			std::cout << "Number of threads: " << omp_get_num_threads() << std::endl;
-		}
+		return 1;
 	}
-
-	const double begin = omp_get_wtime();
+	if (args.prepareOnly)
+	{
+		sipros::printPerformanceHeader(std::cout, "Run summary", threadCount);
+		sipros::printPerformanceStage(
+			std::cout, "Prepare peptide cache", runTimer.elapsed());
+		sipros::printPerformanceFooter(std::cout);
+		std::cout << "\nSipros peptide-cache preparation complete.\n";
+		return 0;
+	}
 
 	int result = 0;
 	for (const std::string &scanFile : args.scanFiles)
@@ -41,8 +51,12 @@ int DatabaseSearchWorkflow::run(int argc, char **argv)
 		}
 	}
 
-	const double end = omp_get_wtime();
-	std::cout << "Sipros finished in " << double(end - begin) << " Seconds." << std::endl
-			  << std::endl;
+	sipros::printPerformanceHeader(std::cout, "Run summary", threadCount);
+	sipros::printPerformanceStage(
+		std::cout, "Complete FASTA search", runTimer.elapsed(),
+		sipros::formatPerformanceCount(args.scanFiles.size()) +
+			" input file(s)");
+	sipros::printPerformanceFooter(std::cout);
+	std::cout << "\nSipros search complete.\n";
 	return result;
 }

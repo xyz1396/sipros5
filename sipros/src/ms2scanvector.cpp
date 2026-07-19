@@ -1,16 +1,22 @@
 #include "ms2scanvector.h"
 #include "PeptideIsotopeCalculator.h"
 #include "RaxportHdf5Reader.h"
+#include "fragmentindex.h"
+#include "indexeddatabasesearch.h"
+#include "performancelog.h"
 
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <exception>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 MS2ScanVector::MS2ScanVector(const string &sScanFilenameInput,
-							 const string &sOutputDirectory)
+							 const string &sOutputDirectory,
+							 const sipros::RaxportReadOptions &readOptions)
+	: raxportReadOptions(readOptions)
 {
 	unsigned int n;
 	vector<string> vsSingleResidueNames = ProNovoConfig::vsSingleResidueNames;
@@ -57,7 +63,9 @@ void MS2ScanVector::setOutputFile(const string &sScanFilenameInput, const string
 bool MS2ScanVector::loadRaxportHdf5File()
 {
 	std::string error;
-	if (!sipros::readRaxportHdf5Scans(sScanFilename, vpAllMS2Scans, nullptr, error))
+	if (!sipros::readRaxportHdf5Scans(
+			sScanFilename, vpAllMS2Scans, &raxportMs1Data, error, nullptr,
+			raxportReadOptions))
 	{
 		std::cerr << error << std::endl;
 		return false;
@@ -80,6 +88,17 @@ bool MS2ScanVector::loadRaxportHdf5File()
 			continue;
 		}
 		std::vector<std::pair<double, int>> scanPrecursorMassCharges;
+		const bool useReactionCharge =
+			raxportReadOptions.precursorSource == sipros::PrecursorSource::RaxportCandidates;
+		scan->bUseReactionChargeForScoring = useReactionCharge;
+		scan->iMaxCandidateCharge = 0;
+		if (!useReactionCharge)
+		{
+			// Defensively recompute these limits solely from the selected MS1 peak
+			// hypotheses below; the reaction center remains output metadata only.
+			scan->dParentNeutralMass = 0.0;
+			scan->dParentMass = 0.0;
+		}
 
 		auto appendPrecursorMz = [&](double mz, int charge)
 		{
@@ -90,15 +109,19 @@ bool MS2ScanVector::loadRaxportHdf5File()
 			const double chargedMass = mz * charge;
 			const double parentNeutralMass = chargedMass -
 				static_cast<double>(charge) * ProNovoConfig::getProtonMass();
+			const double deduplicationTolerance = useReactionCharge
+				? ProNovoConfig::getMassAccuracyParentIon()
+				: 0.0;
 			for (const auto &existing : scanPrecursorMassCharges)
 			{
 				if (existing.second == charge &&
-					std::abs(existing.first - parentNeutralMass) <= ProNovoConfig::getMassAccuracyParentIon())
+					std::abs(existing.first - parentNeutralMass) <= deduplicationTolerance)
 				{
 					return;
 				}
 			}
 			scanPrecursorMassCharges.push_back({parentNeutralMass, charge});
+			scan->iMaxCandidateCharge = std::max(scan->iMaxCandidateCharge, charge);
 			vAllPrecursorMassChargeMS2ScanPtrTuples.push_back({parentNeutralMass, charge, scan});
 			if (parentNeutralMass > scan->dParentNeutralMass)
 			{
@@ -110,7 +133,8 @@ bool MS2ScanVector::loadRaxportHdf5File()
 			}
 		};
 
-		if (scan->iParentChargeState > 0 && scan->dParentMZ > 0.0)
+		if (raxportReadOptions.precursorSource == sipros::PrecursorSource::RaxportCandidates &&
+			scan->iParentChargeState > 0 && scan->dParentMZ > 0.0)
 		{
 			appendPrecursorMz(scan->dParentMZ, scan->iParentChargeState);
 		}
@@ -121,7 +145,7 @@ bool MS2ScanVector::loadRaxportHdf5File()
 			appendPrecursorMz(scan->dParentMZs[j], scan->iParentChargeStates[j]);
 		}
 
-		if (scan->iParentChargeState <= 0 && nCandidates > 0)
+		if (useReactionCharge && scan->iParentChargeState <= 0 && nCandidates > 0)
 		{
 			// Keep the historical wide-window fallback charge for downstream preprocessing.
 			scan->iParentChargeState = 3;
@@ -140,8 +164,6 @@ bool MS2ScanVector::loadRaxportHdf5File()
 
 bool MS2ScanVector::loadMassData()
 {
-	CLOCKSTART;
-
 	bool bReVal = false;
 	std::string filenameStr = this->sScanFilename;
 	std::transform(filenameStr.begin(), filenameStr.end(), filenameStr.begin(),
@@ -179,11 +201,6 @@ bool MS2ScanVector::loadMassData()
 		if (ProNovoConfig::iMaxPercusorCharge < charge)
 			ProNovoConfig::iMaxPercusorCharge = charge;
 	}
-	if (bReVal)
-	{
-		std::cout << "  Loaded Raxport HDF5 mass data" << std::endl;
-	}
-	CLOCKSTOP;
 	return bReVal;
 }
 
@@ -199,11 +216,9 @@ bool MS2ScanVector::myless(MS2Scan *pMS2Scan1, MS2Scan *pMS2Scan2)
 
 void MS2ScanVector::preProcessAllMs2Mvh()
 {
-	CLOCKSTART;
-
+	const sipros::PerformanceTimer timer;
 	int i, iScanSize;
 	iScanSize = (int)vpAllMS2Scans.size();
-	cout << "  Preprocessing scans: " << vpAllMS2Scans.size() << endl;
 
 	int num_threads = omp_get_max_threads();
 	vector<multimap<double, double> *> vpIntenSortedPeakPreData;
@@ -248,9 +263,11 @@ void MS2ScanVector::preProcessAllMs2Mvh()
 		}
 	}
 
-	cout << "  Preprocessing done" << endl;
-
-	CLOCKSTOP;
+	sipros::printPerformanceStage(
+		cout, "Preprocess spectra", timer.elapsed(),
+		sipros::formatPerformanceCount(vpAllMS2Scans.size()) +
+		" MS2 scans, " +
+		sipros::formatPerformanceCount(iNumSkippedScans) + " skipped");
 }
 
 void MS2ScanVector::preProcessAllMs2WdpSip()
@@ -694,6 +711,133 @@ void MS2ScanVector::searchDatabaseMvh()
 	cout << "  MVH search done" << endl;
 }
 
+void MS2ScanVector::searchDatabaseMvhIndexed()
+{
+	this->preMvh();
+	if (!fragmentIndex)
+	{
+		this->postMvh();
+		throw std::runtime_error(
+			"fragment-index search was started without a prepared index");
+	}
+	const sipros::FragmentIndex &index = *fragmentIndex;
+	if (index.maximumPeptideMass() > ProNovoConfig::dMaxPeptideMass)
+	{
+		ProNovoConfig::dMaxPeptideMass = index.maximumPeptideMass();
+	}
+
+	const sipros::PerformanceTimer querySetupTimer;
+	std::unordered_map<MS2Scan *, size_t> scanIndices;
+	scanIndices.reserve(vpAllMS2Scans.size());
+	for (size_t i = 0; i < vpAllMS2Scans.size(); ++i)
+	{
+		scanIndices.emplace(vpAllMS2Scans[i], i);
+	}
+	std::vector<std::vector<std::pair<double, int>>> scanHypotheses(
+		vpAllMS2Scans.size());
+	for (const auto &entry : vAllPrecursorMassChargeMS2ScanPtrTuples)
+	{
+		const auto found = scanIndices.find(std::get<2>(entry));
+		if (found != scanIndices.end())
+		{
+			scanHypotheses[found->second].push_back(
+				{std::get<0>(entry), std::get<1>(entry)});
+		}
+	}
+	std::unordered_map<MS2Scan *, size_t>().swap(scanIndices);
+
+	const int threadCount = omp_get_max_threads();
+	std::vector<sipros::IndexedSearchScratch> scratch(
+		static_cast<size_t>(threadCount));
+	std::vector<sipros::IndexedSearchCounters> threadCounters(
+		static_cast<size_t>(threadCount));
+
+	sipros::IndexedSearchCounters queryTotals;
+	sipros::IndexedSearchCounters mvhTotals;
+	sipros::PerformanceTiming queryTiming = querySetupTimer.elapsed();
+	sipros::PerformanceTiming mvhTiming;
+	constexpr size_t ScanBatchSize = 512;
+	for (size_t batchBegin = 0; batchBegin < vpAllMS2Scans.size();
+		 batchBegin += ScanBatchSize)
+	{
+		const size_t batchEnd = std::min(
+			vpAllMS2Scans.size(), batchBegin + ScanBatchSize);
+		std::vector<std::vector<sipros::IndexedCandidate>> batchCandidates(
+			batchEnd - batchBegin);
+		threadCounters.assign(
+			static_cast<size_t>(threadCount), sipros::IndexedSearchCounters{});
+		const sipros::PerformanceTimer queryTimer;
+#pragma omp parallel for schedule(guided)
+		for (int64_t i = static_cast<int64_t>(batchBegin);
+			 i < static_cast<int64_t>(batchEnd); ++i)
+		{
+			const int threadId = omp_get_thread_num();
+			sipros::queryIndexedScan(
+				index,
+				*vpAllMS2Scans[static_cast<size_t>(i)],
+				scanHypotheses[static_cast<size_t>(i)],
+				scratch[static_cast<size_t>(threadId)],
+				batchCandidates[static_cast<size_t>(i) - batchBegin],
+				threadCounters[static_cast<size_t>(threadId)]);
+		}
+		queryTiming += queryTimer.elapsed();
+		for (const auto &counter : threadCounters)
+		{
+			queryTotals += counter;
+		}
+
+		threadCounters.assign(
+			static_cast<size_t>(threadCount), sipros::IndexedSearchCounters{});
+		const sipros::PerformanceTimer mvhTimer;
+#pragma omp parallel for schedule(guided)
+		for (int64_t i = static_cast<int64_t>(batchBegin);
+			 i < static_cast<int64_t>(batchEnd); ++i)
+		{
+			const int threadId = omp_get_thread_num();
+			sipros::scoreIndexedScanMvh(
+				index,
+				*vpAllMS2Scans[static_cast<size_t>(i)],
+				batchCandidates[static_cast<size_t>(i) - batchBegin],
+				*psequenceIonMasses[static_cast<size_t>(threadId)],
+				*_ppdAAforward[static_cast<size_t>(threadId)],
+				*_ppdAAreverse[static_cast<size_t>(threadId)],
+				*pSeqs[static_cast<size_t>(threadId)],
+				threadCounters[static_cast<size_t>(threadId)]);
+		}
+		mvhTiming += mvhTimer.elapsed();
+		for (const auto &counter : threadCounters)
+		{
+			mvhTotals += counter;
+		}
+	}
+	std::vector<sipros::IndexedSearchScratch>().swap(scratch);
+	std::vector<std::vector<std::pair<double, int>>>().swap(scanHypotheses);
+	std::ostringstream queryDetail;
+	queryDetail
+		<< sipros::formatPerformanceCount(queryTotals.precursorHypotheses)
+		<< " hypotheses, "
+		<< sipros::formatPerformanceCount(queryTotals.exactMassCandidates)
+		<< " mass matches, "
+		<< sipros::formatPerformanceCount(queryTotals.fragmentPostingsVisited)
+		<< " postings, "
+		<< sipros::formatPerformanceCount(queryTotals.fragmentGateSurvivors)
+		<< " survivors";
+	sipros::printPerformanceStage(
+		cout, "Query peptide cache", queryTiming, queryDetail.str());
+
+	std::ostringstream mvhDetail;
+	mvhDetail << sipros::formatPerformanceCount(mvhTotals.exactMvhCalls)
+			  << " candidates, "
+			  << sipros::formatPerformanceCount(mvhTotals.exactMvhAccepted)
+			  << " accepted";
+	sipros::printPerformanceStage(
+		cout, "MVH scoring", mvhTiming, mvhDetail.str());
+
+	this->postMvh();
+	MVH::destroyLnTable();
+	PeptideUnit::iNumScores = 1;
+}
+
 void MS2ScanVector::searchDatabaseWdpSip()
 {
 	CLOCKSTART;
@@ -817,8 +961,11 @@ void MS2ScanVector::startProcessingMvh()
 	// Preprocessing all MS2 scans by mult-threading
 	preProcessAllMs2Mvh();
 
-	// Search all MS2 scans against the database by mult-threading
-	searchDatabaseMvh();
+	// Search all MS2 scans against the database by mult-threading.
+	if (fragmentIndex)
+		searchDatabaseMvhIndexed();
+	else
+		searchDatabaseMvh();
 
 	// Postprocessing all MS2 scans' results by mult-threading
 	postProcessAllMs2WdpXcorr();
@@ -869,22 +1016,36 @@ void MS2ScanVector::startProcessingWdpSip()
 
 void MS2ScanVector::postProcessAllMs2WdpXcorr()
 {
-	CLOCKSTART;
 	int i, iScanSize;
 	iScanSize = (int)vpAllMS2Scans.size();
+	uint64_t candidateCount = 0;
+	for (const MS2Scan *scan : vpAllMS2Scans)
+	{
+		candidateCount += scan->vpWeightSumTopPeptides.size();
+	}
+	const std::string scoreDetail =
+		sipros::formatPerformanceCount(candidateCount) +
+		" candidate PSMs across " +
+		sipros::formatPerformanceCount(vpAllMS2Scans.size()) + " scans";
 
+	const sipros::PerformanceTimer xcorrTimer;
 	postProcessAllMs2Xcorr();
-	cout << "  Xcorr search done" << endl;
+	sipros::printPerformanceStage(
+		cout, "XCorr scoring", xcorrTimer.elapsed(), scoreDetail);
 
+	const sipros::PerformanceTimer wdpTimer;
 	postProcessAllMs2Wdp();
-	cout << "  WDP search done" << endl;
+	sipros::printPerformanceStage(
+		cout, "WDP scoring", wdpTimer.elapsed(), scoreDetail);
 
+	const sipros::PerformanceTimer featureTimer;
 #pragma omp parallel for schedule(guided)
 	for (i = 0; i < iScanSize; i++)
 	{
 		vpAllMS2Scans.at(i)->scoreFeatureCalculation();
 	}
-	CLOCKSTOP;
+	sipros::printPerformanceStage(
+		cout, "Calculate PSM features", featureTimer.elapsed(), scoreDetail);
 }
 
 void MS2ScanVector::postProcessAllMs2MvhXcorr()
@@ -952,8 +1113,12 @@ void MS2ScanVector::postProcessAllMs2Wdp()
 			}
 			else
 			{
+				const int wdpCharge = vpAllMS2Scans.at(i)->bUseReactionChargeForScoring
+					? vpAllMS2Scans.at(i)->iParentChargeState
+					: vpAllMS2Scans.at(i)->vpWeightSumTopPeptides.at(j)->iMeasuredParentCharge;
 				dWeightSum = vpAllMS2Scans.at(i)->scoreWeightSum(
 					&(vpAllMS2Scans.at(i)->vpWeightSumTopPeptides.at(j)->sPeptideForScoring),
+					wdpCharge,
 					vpvdYionMass.at(iThreadId), vpvdBionMass.at(iThreadId));
 			}
 			vpAllMS2Scans.at(i)->vpWeightSumTopPeptides.at(j)->vdScores[0] = dWeightSum;
@@ -996,11 +1161,13 @@ void MS2ScanVector::postProcessAllMs2Xcorr()
 	num_max_threads = omp_get_max_threads();
 	for (int i = 0; i < num_max_threads; ++i)
 	{
-		vpdTmpRawData.push_back(new double[iArraySizePreprocess]());
-		vpdTmpFastXcorrData.push_back(new double[iArraySizePreprocess]());
-		vpdTmpCorrelationData.push_back(new double[iArraySizePreprocess]());
-		vpdTmpSmoothedSpectrum.push_back(new double[iArraySizePreprocess]());
-		vpdTmpPeakExtracted.push_back(new double[iArraySizePreprocess]());
+		// CometSearchMod::Preprocess clears the active range before every use.
+		// Avoid eagerly touching the full global-maximum allocation here.
+		vpdTmpRawData.push_back(new double[iArraySizePreprocess]);
+		vpdTmpFastXcorrData.push_back(new double[iArraySizePreprocess]);
+		vpdTmpCorrelationData.push_back(new double[iArraySizePreprocess]);
+		vpdTmpSmoothedSpectrum.push_back(new double[iArraySizePreprocess]);
+		vpdTmpPeakExtracted.push_back(new double[iArraySizePreprocess]);
 		vpbDuplFragment.push_back(new bool[iArraySizeScore]());
 		v_pdAAforward.push_back(new double[MAX_PEPTIDE_LEN]());
 		v_pdAAreverse.push_back(new double[MAX_PEPTIDE_LEN]());
@@ -1043,8 +1210,10 @@ void MS2ScanVector::postProcessAllMs2Xcorr()
 			{
 				double dXcorr = 0;
 				CometSearchMod::ScorePeptides(&(vpAllMS2Scans.at(i)->vpWeightSumTopPeptides.at(j)->sPeptideForScoring),
-											  vpbDuplFragment.at(iThreadId), v_pdAAforward.at(iThreadId), v_pdAAreverse.at(iThreadId),
-											  vpAllMS2Scans.at(i), v_uiBinnedIonMasses.at(iThreadId), dXcorr);
+										  vpbDuplFragment.at(iThreadId), v_pdAAforward.at(iThreadId), v_pdAAreverse.at(iThreadId),
+										  vpAllMS2Scans.at(i),
+										  vpAllMS2Scans.at(i)->vpWeightSumTopPeptides.at(j)->iMeasuredParentCharge,
+										  v_uiBinnedIonMasses.at(iThreadId), dXcorr);
 				vpAllMS2Scans.at(i)->vpWeightSumTopPeptides.at(j)->vdScores[1] = dXcorr;
 			}
 			delete pQuery;

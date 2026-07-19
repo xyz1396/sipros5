@@ -16,7 +16,9 @@
 
 #include "CometSearchMod.h"
 #include "MVH.h"
+#include "fragmentindex.h"
 #include "ms2scanvector.h"
+#include "performancelog.h"
 #include "proNovoConfig.h"
 #include "PSMfeatureExtractor.h"
 #include "PinWriter.h"
@@ -31,6 +33,27 @@ static std::string formatElapsedSeconds(double seconds)
 	std::ostringstream out;
 	out << std::fixed << std::setprecision(1) << seconds << "s";
 	return out.str();
+}
+
+static PerformanceTiming performanceTiming(double wallSeconds,
+										double cpuSeconds)
+{
+	return {wallSeconds, cpuSeconds};
+}
+
+static std::string formatMebibytes(uint64_t bytes)
+{
+	std::ostringstream out;
+	out << std::fixed << std::setprecision(1)
+		<< static_cast<double>(bytes) / (1024.0 * 1024.0) << " MiB";
+	return out.str();
+}
+
+static const char *precursorSourceName(PrecursorSource source)
+{
+	return source == PrecursorSource::Ms1Neighborhood
+		? "ms1-neighborhood"
+		: "raxport-candidates";
 }
 
 static std::string enabledPtmSummary()
@@ -448,14 +471,32 @@ static void pruneScoredRowsByScan(std::vector<ScoredPsmRow> &rows, int topPsmsPe
 }
 
 static sipPSM buildSipPsm(const std::string &sampleName,
-						  const std::vector<ScoredPsmRow> &rows,
-						  int topPsmsPerScan)
+						  const std::vector<ScoredPsmRow> &rows)
 {
 	sipPSM psm;
 	psm.fileName = sampleName;
-	std::vector<ScoredPsmRow> prunedRows = rows;
-	pruneScoredRowsByScan(prunedRows, topPsmsPerScan);
-	for (const ScoredPsmRow &row : prunedRows)
+	const size_t count = rows.size();
+	psm.fileNames.reserve(count);
+	psm.scanNumbers.reserve(count);
+	psm.precursorScanNumbers.reserve(count);
+	psm.parentCharges.reserve(count);
+	psm.isolationWindowCenterMZs.reserve(count);
+	psm.measuredParentMasses.reserve(count);
+	psm.calculatedParentMasses.reserve(count);
+	psm.precursorNeutronMasses.reserve(count);
+	psm.MS2IsotopicAbundances.reserve(count);
+	psm.ranks.reserve(count);
+	psm.scores.reserve(count);
+	psm.identifiedPeptides.reserve(count);
+	psm.originalPeptides.reserve(count);
+	psm.nakePeptides.reserve(count);
+	psm.proteinNames.reserve(count);
+	psm.retentionTimes.reserve(count);
+	psm.MVHscores.reserve(count);
+	psm.XcorrScores.reserve(count);
+	psm.WDPscores.reserve(count);
+	psm.isDecoys.reserve(count);
+	for (const ScoredPsmRow &row : rows)
 	{
 		psm.fileNames.push_back(fileNameForSpecId(sampleName, row.searchName, row.isDecoy));
 		psm.scanNumbers.push_back(row.scanNumber);
@@ -488,13 +529,20 @@ void SiprosSearchRunner::printUsage(std::ostream &out, const std::string &prog)
 		<< "[-a C13 -b 1-5 -s 1] [--pin-label 1|-1] [--pin-output name.pin]\n";
 	out << "  " << prog << " -w hdf5_directory -fasta proteins.fasta -o out "
 		<< "[-a C13 -b 1-5 -s 1] [--pin-label 1|-1]\n";
+	out << "  " << prog << " -fasta proteins.fasta --fragment-index-cache cache.sfi "
+		<< "--prepare-only\n";
 	out << "  " << prog << " --list-ptms\n\n";
 	out << "Parameters:\n";
-	out << "  -f <sample.h5>              one Raxport HDF5 scan file\n";
+	out << "  -f <sample.h5>              Raxport HDF5 scan file; repeat for multiple files\n";
 	out << "  -w <directory>              directory of Raxport HDF5 scan files\n";
 	out << "  -fasta <proteins.fasta>     one FASTA database; target/decoy orchestration is external\n";
 	out << "  -o <directory>              output directory, default: out\n";
 	out << "  --pin-output <name.pin>      PIN filename for a single -f input; default: <sample>.pin\n";
+	out << "  --fragment-index-cache <p>  load/build a reusable v5 .sfi peptide cache\n";
+	out << "  --rebuild-fragment-index    ignore an existing cache and rebuild it\n";
+	out << "  --prepare-only              prepare a Regular peptide cache without searching H5 files\n";
+	out << "  --precursor-source <mode>    profile policy: Regular=ms1-neighborhood, SIP=raxport-candidates\n";
+	out << "                              Regular MS1 mode uses linked parent +/-2 scans and peak charge\n";
 	out << "  -a <SIP atom/isotope>       SIP isotope: C13, H2, N15, O18, or S34\n";
 	out << "  -b <pct|lower-upper>        SIP percentage or inclusive range\n";
 	out << "  -s, --step <pct>            SIP percentage step\n";
@@ -543,7 +591,7 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 		}
 		else if (option == "-f")
 		{
-			args.singleWorkingFile = requireValue(i, option);
+			args.scanFiles.push_back(requireValue(i, option));
 		}
 		else if (option == "-fasta")
 		{
@@ -556,6 +604,43 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 		else if (option == "--pin-output")
 		{
 			args.pinOutputFile = requireValue(i, option);
+		}
+		else if (option == "--fragment-index-cache")
+		{
+			args.fragmentIndexCache = requireValue(i, option);
+		}
+		else if (option == "--rebuild-fragment-index")
+		{
+			args.rebuildFragmentIndex = true;
+		}
+		else if (option == "--prepare-only")
+		{
+			args.prepareOnly = true;
+		}
+		else if (option == "--precursor-source")
+		{
+			args.precursorSourceProvided = true;
+			const std::string value = TextUtils::toLower(
+				TextUtils::trim(requireValue(i, option)));
+			if (!valid)
+			{
+				return false;
+			}
+			if (value == "raxport-candidates")
+			{
+				args.raxportReadOptions.precursorSource =
+					PrecursorSource::RaxportCandidates;
+			}
+			else if (value == "ms1-neighborhood")
+			{
+				args.raxportReadOptions.precursorSource =
+					PrecursorSource::Ms1Neighborhood;
+			}
+			else
+			{
+				err << "--precursor-source must be raxport-candidates or ms1-neighborhood\n";
+				return false;
+			}
 		}
 		else if (option == "-a")
 		{
@@ -699,24 +784,89 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 		err << "SIP search requires -a, -b, and -s together; no values are inferred\n";
 		return false;
 	}
-	if (args.workingDirectory.empty() && args.singleWorkingFile.empty())
+	if (allSipControls)
+	{
+		if (!args.fragmentIndexCache.empty() ||
+			args.rebuildFragmentIndex)
+		{
+			err << "SIP FASTA search uses only legacy H5 precursor candidates; "
+				<< "fragment-index options are not allowed\n";
+			return false;
+		}
+		if (args.precursorSourceProvided &&
+			args.raxportReadOptions.precursorSource !=
+				PrecursorSource::RaxportCandidates)
+		{
+			err << "SIP FASTA search requires --precursor-source raxport-candidates\n";
+			return false;
+		}
+		args.raxportReadOptions.precursorSource =
+			PrecursorSource::RaxportCandidates;
+	}
+	else
+	{
+		if (args.precursorSourceProvided &&
+			args.raxportReadOptions.precursorSource !=
+				PrecursorSource::Ms1Neighborhood)
+		{
+			err << "Regular FASTA search requires --precursor-source ms1-neighborhood\n";
+			return false;
+		}
+		args.raxportReadOptions.precursorSource =
+			PrecursorSource::Ms1Neighborhood;
+	}
+	if (args.rebuildFragmentIndex && args.fragmentIndexCache.empty())
+	{
+		err << "--rebuild-fragment-index requires --fragment-index-cache\n";
+		return false;
+	}
+	if (args.prepareOnly)
+	{
+		if (allSipControls)
+		{
+			err << "--prepare-only is available only for Regular FASTA peptide caches\n";
+			return false;
+		}
+		if (args.fragmentIndexCache.empty())
+		{
+			err << "--prepare-only requires --fragment-index-cache\n";
+			return false;
+		}
+		if (!args.workingDirectory.empty() || !args.scanFiles.empty())
+		{
+			err << "--prepare-only does not accept -f or -w scan inputs\n";
+			return false;
+		}
+		if (!args.pinOutputFile.empty())
+		{
+			err << "--prepare-only does not write --pin-output\n";
+			return false;
+		}
+	}
+	else if (args.workingDirectory.empty() && args.scanFiles.empty())
 	{
 		args.workingDirectory = ".";
 	}
-	if (!args.workingDirectory.empty() && !args.singleWorkingFile.empty())
+	if (!args.workingDirectory.empty() && !args.scanFiles.empty())
 	{
-		err << "Either one input scan file or a directory of input scan files must be specified\n";
+		err << "Use either repeatable -f inputs or one -w directory, not both\n";
 		return false;
 	}
-	if (!args.singleWorkingFile.empty())
+	if (args.prepareOnly)
 	{
-		if (!isHdf5Path(args.singleWorkingFile))
+		// Cache preparation intentionally has no scan input.
+	}
+	else if (!args.scanFiles.empty())
+	{
+		for (const std::string &scanFile : args.scanFiles)
 		{
-			err << "Raxport HDF5 scan input required (.h5 or .hdf5); unsupported file: "
-				<< args.singleWorkingFile << "\n";
-			return false;
+			if (!isHdf5Path(scanFile))
+			{
+				err << "Raxport HDF5 scan input required (.h5 or .hdf5); unsupported file: "
+					<< scanFile << "\n";
+				return false;
+			}
 		}
-		args.scanFiles.push_back(args.singleWorkingFile);
 	}
 	else
 	{
@@ -741,20 +891,33 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 			err << "--pin-output must be a .pin filename within the output directory\n";
 			return false;
 		}
-		if (args.singleWorkingFile.empty() || args.scanFiles.size() != 1)
+		if (args.scanFiles.size() != 1 || !args.workingDirectory.empty())
 		{
 			err << "--pin-output requires exactly one -f input file\n";
+			return false;
+		}
+	}
+	if (!args.fragmentIndexCache.empty())
+	{
+		const fs::path cachePath(args.fragmentIndexCache);
+		if (cachePath.extension() != ".sfi")
+		{
+			err << "--fragment-index-cache must use the .sfi extension\n";
 			return false;
 		}
 	}
 	return true;
 }
 
-int SiprosSearchRunner::runScan(const std::string &scanFile,
-							  const DatabaseSearchArguments &args) const
+int SiprosSearchRunner::prepare(const DatabaseSearchArguments &args)
 {
-	const bool directSipMode = !args.sipElementSpec.empty();
-	if (!ProNovoConfig::load(directSipMode
+	if (prepared_)
+	{
+		return preparedSipMode_ == !args.sipElementSpec.empty() ? 0 : 1;
+	}
+
+	preparedSipMode_ = !args.sipElementSpec.empty();
+	if (!ProNovoConfig::load(preparedSipMode_
 			? ProNovoConfig::Profile::Sip
 			: ProNovoConfig::Profile::Regular))
 	{
@@ -784,6 +947,128 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 				? args.toleranceMs2Da
 				: ProNovoConfig::getMassAccuracyFragmentIon());
 	}
+
+	if (preparedSipMode_)
+	{
+		std::string chemistryError;
+		if (!ProNovoConfig::validatePreparationChemistry(
+				ProNovoConfig::configIsotopologue, chemistryError))
+		{
+			std::cerr << chemistryError << "\n";
+			return 1;
+		}
+	}
+	else
+	{
+		fragmentIndex_ = std::make_shared<FragmentIndex>();
+		std::string indexError;
+		if (!fragmentIndex_->loadOrBuild(
+				args.fragmentIndexCache,
+				args.rebuildFragmentIndex,
+				indexError))
+		{
+			std::cerr << "Fragment-index preparation failed: "
+					  << indexError << "\n";
+			fragmentIndex_.reset();
+			return 1;
+		}
+		const FragmentIndexStats &stats = fragmentIndex_->stats();
+		std::cout << "\nRegular-search peptide cache\n"
+				  << "  File    : "
+				  << (args.fragmentIndexCache.empty()
+						  ? "memory only"
+						  : args.fragmentIndexCache)
+				  << "\n"
+				  << "  Status  : "
+				  << (stats.loadedFromCache ? "loaded existing cache" : "generated cache")
+				  << "\n"
+				  << "  Contents: "
+				  << formatPerformanceCount(fragmentIndex_->peptideCount())
+				  << " peptides, "
+				  << formatPerformanceCount(fragmentIndex_->fragmentCount())
+				  << " fragment postings, "
+				  << formatPerformanceCount(fragmentIndex_->fragmentBinCount())
+				  << " occupied fragment bins, "
+				  << formatPerformanceCount(fragmentIndex_->precursorBlockCount())
+				  << " precursor blocks";
+		if (stats.cacheBytes > 0)
+		{
+			std::cout << ", " << formatMebibytes(stats.cacheBytes);
+		}
+		std::cout << "\n";
+		printPerformanceHeader(
+			std::cout, "Peptide-cache timing", omp_get_max_threads());
+		if (stats.loadedFromCache)
+		{
+			printPerformanceStage(
+				std::cout, "Load peptide cache",
+				performanceTiming(stats.loadSeconds, stats.loadCpuSeconds));
+		}
+		else
+		{
+			printPerformanceStage(
+				std::cout, "Read FASTA",
+				performanceTiming(stats.fastaParseSeconds,
+					stats.fastaParseCpuSeconds));
+			printPerformanceStage(
+				std::cout, "Count digested peptides",
+				performanceTiming(stats.digestCountSeconds,
+					stats.digestCountCpuSeconds));
+			printPerformanceStage(
+				std::cout, "Generate peptide records",
+				performanceTiming(stats.digestFillSeconds,
+					stats.digestFillCpuSeconds));
+			printPerformanceStage(
+				std::cout, "Calculate precursor masses",
+				performanceTiming(stats.precursorSeconds,
+					stats.precursorCpuSeconds));
+			printPerformanceStage(
+				std::cout, "Generate fragment postings",
+				performanceTiming(stats.fragmentSeconds,
+					stats.fragmentCpuSeconds));
+			printPerformanceStage(
+				std::cout, "Sort fragment postings",
+				performanceTiming(stats.sortSeconds,
+					stats.sortCpuSeconds));
+			if (stats.saveSeconds > 0.0)
+			{
+				printPerformanceStage(
+					std::cout, "Save peptide cache",
+					performanceTiming(stats.saveSeconds,
+						stats.saveCpuSeconds));
+			}
+			if (stats.mapSeconds > 0.0)
+			{
+				printPerformanceStage(
+					std::cout, "Map generated peptide cache",
+					performanceTiming(stats.mapSeconds,
+						stats.mapCpuSeconds));
+			}
+			printPerformanceStage(
+				std::cout, "Generate peptide cache (total)",
+				performanceTiming(stats.generateSeconds,
+					stats.generateCpuSeconds));
+		}
+		printPerformanceFooter(std::cout);
+	}
+
+	prepared_ = true;
+	return 0;
+}
+
+int SiprosSearchRunner::runScan(const std::string &scanFile,
+								  const DatabaseSearchArguments &args)
+{
+	const bool directSipMode = !args.sipElementSpec.empty();
+	if (!prepared_ && prepare(args) != 0)
+	{
+		return 1;
+	}
+	if (preparedSipMode_ != directSipMode)
+	{
+		std::cerr << "Prepared search profile does not match this scan request.\n";
+		return 1;
+	}
 	const int topKeep = args.topPsmsPerScan > 0 ? args.topPsmsPerScan : ProNovoConfig::INTTOPKEEP;
 	const bool isDecoyLabel = args.pinLabel < 0;
 	char sipAtom = 0;
@@ -797,17 +1082,12 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 					  << args.sipElementSpec << "\n";
 			return 1;
 		}
-		std::string chemistryError;
-		if (!ProNovoConfig::validatePreparationChemistry(
-				ProNovoConfig::configIsotopologue, chemistryError))
-		{
-			std::cerr << chemistryError << "\n";
-			return 1;
-		}
 	}
 	fs::create_directories(args.outputDirectory);
 
-	MS2ScanVector scanVector(scanFile, args.outputDirectory);
+	MS2ScanVector scanVector(scanFile, args.outputDirectory, args.raxportReadOptions);
+	scanVector.configureFragmentIndex(fragmentIndex_);
+	const PerformanceTimer fileTimer;
 	if (directSipMode)
 	{
 		std::cout << "\nSipros FASTA SIP search\n";
@@ -818,23 +1098,50 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 		std::cout << "  Fixed PTMs: " << enabledFixedPtmSummary() << "\n";
 		std::cout << "  Var PTMs  : " << enabledPtmSummary()
 				  << " (max " << ProNovoConfig::getMaxPTMcount() << " per peptide)\n";
+		std::cout << "  Precursors: "
+				  << precursorSourceName(args.raxportReadOptions.precursorSource) << "\n";
 		std::cout << "  TopN      : " << topKeep << " unique peptides per scan across SIP pct\n";
 	}
 	else
 	{
-		std::cout << "Reading Raxport HDF5 scan file: " << scanFile << "\n";
-		std::cout << "Using fasta file: " << ProNovoConfig::getFASTAfilename() << "\n";
-		std::cout << "Using built-in Regular profile\n";
-		std::cout << "Enabled fixed PTMs: " << enabledFixedPtmSummary() << "\n";
-		std::cout << "Enabled variable PTMs: " << enabledPtmSummary()
-				  << " (max " << ProNovoConfig::getMaxPTMcount() << " per peptide)\n";
+		std::cout << "\nRegular FASTA search\n"
+				  << "  Scan file : " << scanFile << "\n"
+				  << "  FASTA     : " << ProNovoConfig::getFASTAfilename()
+				  << (isDecoyLabel ? " (decoy)" : " (target)") << "\n"
+				  << "  Profile   : built-in Regular\n"
+				  << "  Fixed PTMs: " << enabledFixedPtmSummary() << "\n"
+				  << "  Var PTMs  : " << enabledPtmSummary()
+				  << " (max " << ProNovoConfig::getMaxPTMcount() << " per peptide)\n"
+				  << "  Precursors: "
+				  << precursorSourceName(args.raxportReadOptions.precursorSource) << "\n"
+				  << "  Search    : lossless peptide/fragment cache\n";
+		if (!args.fragmentIndexCache.empty())
+		{
+			std::cout << "  Cache     : " << args.fragmentIndexCache << "\n";
+		}
+		printPerformanceHeader(
+			std::cout,
+			"Search timing: " + fs::path(scanFile).filename().string(),
+			omp_get_max_threads());
 	}
 
+	const PerformanceTimer loadTimer;
 	bool loadedScans = scanVector.loadMassData();
 	if (!loadedScans)
 	{
 		std::cerr << "Error: Failed to load file: " << scanFile << "\n";
 		return 1;
+	}
+	if (!directSipMode)
+	{
+		std::ostringstream loadDetail;
+		loadDetail << formatPerformanceCount(scanVector.scanCount())
+				   << " MS2 scans, "
+				   << formatPerformanceCount(
+						  scanVector.precursorHypothesisCount())
+				   << " precursor hypotheses";
+		printPerformanceStage(
+			std::cout, "Load HDF5 scans", loadTimer.elapsed(), loadDetail.str());
 	}
 
 	std::vector<ScoredPsmRow> scoredRows;
@@ -880,17 +1187,33 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 			ProNovoConfig::setSearchName("SE");
 		}
 		scanVector.startProcessingMvh();
+		const PerformanceTimer collectTimer;
 		scanVector.appendScoredPsmRows(scoredRows, isDecoyLabel, topKeep, 1.07);
 		pruneScoredRowsByScan(scoredRows, topKeep);
+		printPerformanceStage(
+			std::cout, "Collect top PSMs", collectTimer.elapsed(),
+			formatPerformanceCount(scoredRows.size()) + " retained rows");
 	}
 
+	const PerformanceTimer pinTotalTimer;
 	const std::string sampleName = fs::path(scanFile).stem().string();
-	sipPSM psm = buildSipPsm(sampleName, scoredRows, topKeep);
+	const PerformanceTimer pinBuildTimer;
+	sipPSM psm = buildSipPsm(sampleName, scoredRows);
+	const PerformanceTiming pinBuildTiming = pinBuildTimer.elapsed();
 	PSMfeatureExtractor extractor;
 	extractor.sipPSMs.push_back(std::move(psm));
+	PerformanceTiming pinMs1LoadTiming;
+	PerformanceTiming pinFeatureTiming;
 	if (!extractor.sipPSMs.front().scanNumbers.empty())
 	{
-		extractor.extractFeaturesForPsm(scanFile, extractor.sipPSMs.front());
+		const PerformanceTimer pinMs1LoadTimer;
+		extractor.ms1Data = scanVector.releaseMs1Data();
+		pinMs1LoadTiming = pinMs1LoadTimer.elapsed();
+		const PerformanceTimer pinFeatureTimer;
+		extractor.mSipPSM = &extractor.sipPSMs.front();
+		extractor.initializeFeatureVectors(extractor.sipPSMs.front());
+		extractor.extractFeaturesOfEachPSM();
+		pinFeatureTiming = pinFeatureTimer.elapsed();
 	}
 	std::string pinFileName = args.pinOutputFile;
 	if (pinFileName.empty())
@@ -898,8 +1221,36 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 		pinFileName = sampleName + ".pin";
 	}
 	const fs::path pinPath = fs::path(args.outputDirectory) / pinFileName;
+	const PerformanceTimer pinWriteTimer;
 	PinWriter::writePecorlatorPin(pinPath.string(), extractor.sipPSMs, false);
-	std::cout << "Wrote PIN: " << pinPath.string() << " (" << scoredRows.size() << " scored rows retained after top-N pruning)\n";
+	const PerformanceTiming pinWriteTiming = pinWriteTimer.elapsed();
+	if (!directSipMode)
+	{
+		printPerformanceStage(
+			std::cout, "Build PIN columns", pinBuildTiming,
+			formatPerformanceCount(scoredRows.size()) + " retained rows");
+		printPerformanceStage(
+			std::cout, "Reuse loaded MS1 for PIN", pinMs1LoadTiming,
+			formatPerformanceCount(scoredRows.size()) + " retained rows");
+		printPerformanceStage(
+			std::cout, "Calculate PIN features", pinFeatureTiming,
+			formatPerformanceCount(scoredRows.size()) + " retained rows");
+		printPerformanceStage(
+			std::cout, "Format and write PIN", pinWriteTiming,
+			pinPath.string());
+		printPerformanceStage(
+			std::cout, "PIN output (total)", pinTotalTimer.elapsed(),
+			pinPath.string());
+		printPerformanceStage(
+			std::cout, "Search file (total)", fileTimer.elapsed());
+		printPerformanceFooter(std::cout);
+	}
+	else
+	{
+		std::cout << "Wrote PIN: " << pinPath.string() << " ("
+				  << scoredRows.size()
+				  << " scored rows retained after top-N pruning)\n";
+	}
 	return 0;
 }
 

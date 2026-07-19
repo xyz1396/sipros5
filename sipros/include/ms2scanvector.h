@@ -3,7 +3,9 @@
 
 #include <string>
 #include <fstream>
+#include <memory>
 #include <sstream>
+#include <utility>
 #include <vector>
 #include <algorithm>
 #include <filesystem>
@@ -13,6 +15,7 @@
 #include "proteindatabase.h"
 #include "MVH.h"
 #include "CometSearchMod.h"
+#include "RaxportHdf5Reader.h"
 
 #define ZERO            0.00000001
 #define PEPTIDE_ARRAY_SIZE  2000000
@@ -22,6 +25,11 @@
 #define TASKPEPTIDE_ARRAY_SIZE  20000
 
 using namespace std;
+
+namespace sipros
+{
+class FragmentIndex;
+}
 
 struct ScoredPsmRow
 {
@@ -60,6 +68,9 @@ class MS2ScanVector {
 	//vector <int> mass_w; // mass window
 	string sScanFilename;    // the scan filename
 	string sOutputFile; // the output file name
+	sipros::RaxportReadOptions raxportReadOptions;
+	sipros::RaxportMs1Data raxportMs1Data;
+	shared_ptr<const sipros::FragmentIndex> fragmentIndex;
 
 	// this should be moved to Peptide or shared through ProNovoConfig
 	map<char, double> mapResidueMass; // mass except N and C termini;
@@ -77,6 +88,7 @@ class MS2ScanVector {
 	// regular search functions
 	void preProcessAllMs2Mvh(); // pre-process all MS2 scans before mvh
 	void searchDatabaseMvh(); // search all ms2 scans against the protein list using mvh
+	void searchDatabaseMvhIndexed(); // lossless precursor/fragment indexed regular search
 	void processPeptideArrayMvh(vector<Peptide*>& vpPeptideArray); // process peptide array using mvh score
 	void searchDatabaseMvhTask(); // search all ms2 scans against the protein list using mvh, task version
 	void processPeptideArrayMvhTask(vector<Peptide*>& vpPeptideArray, omp_lock_t * pLck); // process peptide array using mvh score, task version
@@ -100,12 +112,28 @@ class MS2ScanVector {
 	string ParsePath(string sPath);
 
 public:
-	MS2ScanVector(const string &sScanFilenameInput, const string &sOutputDirectory);
+	MS2ScanVector(const string &sScanFilenameInput,
+				  const string &sOutputDirectory,
+				  const sipros::RaxportReadOptions &readOptions = sipros::RaxportReadOptions{});
 	~MS2ScanVector();
 
 	// Populate vpAllMS2Scans from a Raxport schema v6 HDF5 file.
 	// Return false if there is a problem with the file.
 	bool loadMassData();
+	size_t scanCount() const { return vpAllMS2Scans.size(); }
+	size_t precursorHypothesisCount() const
+	{
+		return vAllPrecursorMassChargeMS2ScanPtrTuples.size();
+	}
+	sipros::RaxportMs1Data releaseMs1Data()
+	{
+		return std::move(raxportMs1Data);
+	}
+	void configureFragmentIndex(
+		const shared_ptr<const sipros::FragmentIndex> &sharedIndex)
+	{
+		fragmentIndex = sharedIndex;
+	}
 
 	// begin the database searching
 	void startProcessingMvh(); // start functions to process the loaded HDF5 file using mvh as the prime score

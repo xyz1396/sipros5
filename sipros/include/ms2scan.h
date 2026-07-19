@@ -235,6 +235,11 @@ public:
 
 	int iParentChargeState;	   // Parent ion charge state
 	double dParentMZ;		   // Parent ion M/Z
+	// The reaction charge belongs to the isolation-window center.  When precursor
+	// hypotheses come from neighboring MS1 peaks, it must remain metadata only;
+	// scoring then uses the charge attached to each individual MS1 peak instead.
+	bool bUseReactionChargeForScoring;
+	int iMaxCandidateCharge;
 	double dParentNeutralMass; // Parent neutral mass
 	// Parent mass with charge
 	double dParentMass;
@@ -330,7 +335,8 @@ public:
 	//-----------Features End----------------
 	//-----------WDP End---------------------
 	// for adding features after first time scoring
-	double scoreWeightSum(string *currentPeptide, vector<double> *pvdYionMass, vector<double> *pvdBionMass);
+	double scoreWeightSum(string *currentPeptide, int measuredCharge,
+					  vector<double> *pvdYionMass, vector<double> *pvdBionMass);
 	// void scoreRankSum_test(Peptide * currentPeptide);
 	// for adding features after first time scoring
 	double scoreWeightSumHighMS2(string *currentPeptide, const int measuredCharge, vector<vector<double>> *vvdYionMass,

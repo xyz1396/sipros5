@@ -12,6 +12,12 @@ ProteinDatabase::ProteinDatabase()
 	scurrentProteinName = "";
 	snextProteinName = "";
 	iclCheck = 0;
+	bPendingMetExcisedPeptide = false;
+	bCurrentPeptideProteinNTerminal = false;
+	bCurrentPeptideMetExcised = false;
+	iPendingMetExcisedEndPos = -1;
+	iCurrentPeptideBeginPos = -1;
+	iCurrentPeptideEndPos = -1;
 	orderstring = "[]";
 	for (i = 0; i < (int)ProNovoConfig::vsSingleResidueNames.size(); i++)
 		if ((ProNovoConfig::vsSingleResidueNames[i].length() == 1) && (isalpha(ProNovoConfig::vsSingleResidueNames[i][0])))
@@ -65,9 +71,27 @@ void ProteinDatabase::initializePtmInfo()
 	int j, residue_id, max_ptm;
 	pair<int, vector<pair<string, double>>> ptm_position;
 	ptm_position_all.clear();
+	// Protein-N-terminal acetylation is a Regular-search proteoform, not a
+	// generic peptide-N-terminal modification.  Position zero is the opening
+	// '['; the existing descending insertion logic therefore places '%' at
+	// the canonical [%PEPTIDE] location.  Because this is an ordinary entry in
+	// ptm_position_all, it consumes one slot in the configured PTM maximum and
+	// combines with residue PTMs through the existing combinator.
+	if (ProNovoConfig::getSearchType() == "Regular" &&
+		bCurrentPeptideProteinNTerminal)
+	{
+		vector<pair<string, double>> terminalPtms;
+		terminalPtms.push_back(make_pair(
+			string("%"), ProNovoConfig::getResidueMass("%")));
+		ptm_position_all.push_back(make_pair(0, terminalPtms));
+	}
 	for (j = 0; j < (int)(sOriginalPeptide.length()); j++)
 	// identify positions on which ptm may happen
 	{
+		// Brackets describe peptide termini rather than residue sites.  Terminal
+		// PTMs are added explicitly above only for biological protein termini.
+		if (sOriginalPeptide.at(j) == '[' || sOriginalPeptide.at(j) == ']')
+			continue;
 		residue_id = orderstring.find(sOriginalPeptide.at(j));
 		if (!(ptm_map[residue_id].empty()))
 		{
@@ -217,6 +241,32 @@ void ProteinDatabase::RemoveIllegalResidue(string &seq)
 		// cout<<seq<<endl;
 		found = seq.find_first_not_of(legalstr);
 	}
+}
+
+bool ProteinDatabase::setProteinEntry(const string &proteinName,
+									  const string &sequence)
+{
+	string normalizedName = proteinName;
+	if (!normalizedName.empty() && normalizedName.front() == '>')
+		normalizedName.erase(normalizedName.begin());
+	const size_t nameEnd = normalizedName.find_first_of(" \t\f\v\n\r");
+	if (nameEnd != string::npos)
+		normalizedName.erase(nameEnd);
+
+	string normalizedSequence = sequence;
+	RemoveIllegalResidue(normalizedSequence);
+	if (normalizedSequence.empty())
+		return false;
+
+	iProteinId = 1;
+	scurrentProteinName = normalizedName;
+	snextProteinName.clear();
+	scurrentProtein = normalizedSequence;
+	iclCheck = 0;
+	bstayCurrentOriginalPeptide = false;
+	bstayCurrentProtein = true;
+	setProtein();
+	return !scurrentProtein.empty();
 }
 
 bool ProteinDatabase::getFirstProtein()
@@ -387,9 +437,26 @@ void ProteinDatabase::setProtein()
 {
 	int i;
 	double msum = 0.0;
-	//"M" sometimes is the test start
-	if ((ProNovoConfig::getTestStartRemoval()) && (scurrentProtein.at(0) == 'M'))
+	// SIP retains its historical clipped-only protein representation.  Regular
+	// search keeps the FASTA sequence intact and emits the clipped N-terminal
+	// peptide as an additional proteoform in getNextOriginalPeptide().
+	if ((ProNovoConfig::getSearchType() != "Regular") &&
+		(ProNovoConfig::getTestStartRemoval()) &&
+		(!scurrentProtein.empty()) && (scurrentProtein.at(0) == 'M'))
 		scurrentProtein = scurrentProtein.substr(1);
+
+	bPendingMetExcisedPeptide = false;
+	bCurrentPeptideProteinNTerminal = false;
+	bCurrentPeptideMetExcised = false;
+	iPendingMetExcisedEndPos = -1;
+	iCurrentPeptideBeginPos = -1;
+	iCurrentPeptideEndPos = -1;
+	if (scurrentProtein.empty())
+	{
+		vicleavageSite.clear();
+		ibeginCleavagePos = -1;
+		return;
+	}
 
 	vicleavageSite.clear();
 	// Technically, the first residue is considered as a residue after cleavage site,
@@ -422,47 +489,73 @@ bool ProteinDatabase::isPeptideLengthGood(int ipepLength)
 
 bool ProteinDatabase::getNextOriginalPeptide(Peptide *originalPeptide)
 {
-	int iendCleavagePos;
-	bool bReVal = true;
 	bstayCurrentOriginalPeptide = true;
-	// get peptides without missed cleavage sites first, then with 1 missed cleavage site,
-	// 2 missed cleavage sites, ...
-	if (iclCheck <= ProNovoConfig::getMaxMissedCleavages())
+
+	const auto emitPeptide = [&](int beginPos, int endPos,
+								 bool proteinNTerminal, bool metExcised)
 	{
-		ibeginCleavagePos++;
-		iendCleavagePos = ibeginCleavagePos + iclCheck + 1;
-		if (iendCleavagePos < (int)vicleavageSite.size())
+		iCurrentPeptideBeginPos = beginPos;
+		iCurrentPeptideEndPos = endPos;
+		bCurrentPeptideProteinNTerminal = proteinNTerminal;
+		bCurrentPeptideMetExcised = metExcised;
+		sOriginalPeptide = "[" + scurrentProtein.substr(
+			static_cast<size_t>(beginPos),
+			static_cast<size_t>(endPos - beginPos + 1)) + "]";
+		// Regular/SIP precursor mass and neutron spacing are finalized in
+		// parallel immediately before scan assignment/index construction.
+		dOriginalPeptideMass = 0.0;
+		setPeptideInfo(originalPeptide, sOriginalPeptide, 0.0);
+	};
+
+	if (bPendingMetExcisedPeptide)
+	{
+		bPendingMetExcisedPeptide = false;
+		emitPeptide(1, iPendingMetExcisedEndPos, true, true);
+		return true;
+	}
+
+	// Generate peptides without missed cleavages first, then one missed
+	// cleavage, and so on.  For each Regular protein-N-terminal endpoint, the
+	// retained form precedes its single initiator-Met-excised counterpart.
+	while (iclCheck <= ProNovoConfig::getMaxMissedCleavages())
+	{
+		++ibeginCleavagePos;
+		const int iendCleavageIndex = ibeginCleavagePos + iclCheck + 1;
+		if (iendCleavageIndex >= (int)vicleavageSite.size())
 		{
-			if (isPeptideLengthGood(vicleavageSite.at(iendCleavagePos) - vicleavageSite.at(ibeginCleavagePos)))
-			{
-				sOriginalPeptide = scurrentProtein.substr(vicleavageSite.at(ibeginCleavagePos) + 1, vicleavageSite.at(iendCleavagePos) - vicleavageSite.at(ibeginCleavagePos));
-				sOriginalPeptide = "[" + sOriginalPeptide + "]";
-				// Regular/SIP precursor mass and neutron spacing are finalized in
-				// parallel by MS2ScanVector immediately before scan assignment.
-				dOriginalPeptideMass = 0.0;
-				setPeptideInfo(originalPeptide, sOriginalPeptide, 0.0);
-				// sOriginalPeptide = "["
-				// 		+ scurrentProtein.substr(vicleavageSite.at(ibeginCleavagePos) + 1,
-				// 				vicleavageSite.at(iendCleavagePos) - vicleavageSite.at(ibeginCleavagePos)) + "]";
-				// dOriginalPeptideMass = msum_map[vicleavageSite.at(iendCleavagePos)] + ProNovoConfig::getTerminusMassN() + ProNovoConfig::getTerminusMassC();
-				// if (vicleavageSite.at(ibeginCleavagePos) >= 0)
-				// 	dOriginalPeptideMass = dOriginalPeptideMass - msum_map[vicleavageSite.at(ibeginCleavagePos)];
-				// setPeptideInfo(originalPeptide, sOriginalPeptide, dOriginalPeptideMass);
-				// originalPeptide->setPeptide(sOriginalPeptide, sOriginalPeptide, scurrentProteinName, vicleavageSite.at(ibeginCleavagePos)+1,dOriginalPeptideMass );
-			}
-			else
-				bReVal = getNextOriginalPeptide(originalPeptide);
-		}
-		else
-		{
-			iclCheck++;
+			++iclCheck;
 			ibeginCleavagePos = -1;
-			bReVal = getNextOriginalPeptide(originalPeptide);
+			continue;
+		}
+
+		const int beginPos = vicleavageSite.at(ibeginCleavagePos) + 1;
+		const int endPos = vicleavageSite.at(iendCleavageIndex);
+		const bool regularMetTerminus =
+			ProNovoConfig::getSearchType() == "Regular" &&
+			ibeginCleavagePos == 0 && !scurrentProtein.empty() &&
+			scurrentProtein.front() == 'M';
+		const bool intactLengthGood =
+			isPeptideLengthGood(endPos - beginPos + 1);
+		const bool clippedLengthGood = regularMetTerminus && endPos >= 1 &&
+			isPeptideLengthGood(endPos);
+
+		if (intactLengthGood)
+		{
+			if (clippedLengthGood)
+			{
+				bPendingMetExcisedPeptide = true;
+				iPendingMetExcisedEndPos = endPos;
+			}
+			emitPeptide(beginPos, endPos, ibeginCleavagePos == 0, false);
+			return true;
+		}
+		if (clippedLengthGood)
+		{
+			emitPeptide(1, endPos, true, true);
+			return true;
 		}
 	}
-	else
-		bReVal = false;
-	return bReVal;
+	return false;
 }
 
 bool ProteinDatabase::getNextOriginalPeptideForMutation(Peptide *originalPeptide)
@@ -485,6 +578,12 @@ bool ProteinDatabase::getNextOriginalPeptideForMutation(Peptide *originalPeptide
 		{
 			if (isPeptideLengthGood(vicleavageSite.at(iendCleavagePos) - vicleavageSite.at(ibeginCleavagePos)))
 			{
+				iCurrentPeptideBeginPos =
+					vicleavageSite.at(ibeginCleavagePos) + 1;
+				iCurrentPeptideEndPos = vicleavageSite.at(iendCleavagePos);
+				bCurrentPeptideProteinNTerminal =
+					iCurrentPeptideBeginPos == 0;
+				bCurrentPeptideMetExcised = false;
 				sOriginalPeptide = "[" + scurrentProtein.substr(vicleavageSite.at(ibeginCleavagePos) + 1, vicleavageSite.at(iendCleavagePos) - vicleavageSite.at(ibeginCleavagePos)) + "]";
 				dOriginalPeptideMass = msum_map[vicleavageSite.at(iendCleavagePos)] + ProNovoConfig::getTerminusMassN() + ProNovoConfig::getTerminusMassC();
 				if (vicleavageSite.at(ibeginCleavagePos) >= 0)
@@ -785,19 +884,24 @@ void ProteinDatabase::setPeptideInfo(Peptide *thePeptide,
 {
 	char cIdentifyPrefix, cIdentifySuffix, cOriginalPrefix, cOriginalSuffix;
 	int iBeginPos, iEndPos; // positions of Peptide on the original protein
-	iBeginPos = vicleavageSite.at(ibeginCleavagePos) + 1;
-	iEndPos = iBeginPos + sOriginalPeptide.length() - 3;
+	iBeginPos = iCurrentPeptideBeginPos;
+	iEndPos = iCurrentPeptideEndPos;
 	if (iBeginPos == 0)
 		cOriginalPrefix = '-'; //  since no good empty character, '-' won't be printed finally
 	else
 		cOriginalPrefix = scurrentProtein.at(iBeginPos - 1);
-	cIdentifyPrefix = cOriginalPrefix;
+	// Initiator-Met excision creates a biological N terminus even though its
+	// original-protein coordinate is one.  Preserve M as original context while
+	// presenting the identified proteoform with a terminal '-'.
+	cIdentifyPrefix = bCurrentPeptideMetExcised
+		? '-'
+		: cOriginalPrefix;
 	if (iEndPos == ((int)scurrentProtein.length() - 1))
 		cOriginalSuffix = '-'; // since no good empty character, '-' won't be printed finally
 	else
 		cOriginalSuffix = scurrentProtein.at(iEndPos + 1);
 	cIdentifySuffix = cOriginalSuffix;
-	thePeptide->setPeptide(sIdentifyPeptide, sOriginalPeptide, scurrentProteinName, vicleavageSite.at(ibeginCleavagePos) + 1, dMass, cIdentifyPrefix,
+	thePeptide->setPeptide(sIdentifyPeptide, sOriginalPeptide, scurrentProteinName, iBeginPos, dMass, cIdentifyPrefix,
 						   cIdentifySuffix, cOriginalPrefix, cOriginalSuffix);
 	thePeptide->setPrecursorNeutronMass(precursorNeutronMass);
 }

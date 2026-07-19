@@ -11,6 +11,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -261,7 +262,40 @@ class WorkflowAllocationTests(unittest.TestCase):
         workflow.ptms = None
         workflow.fixedPtms = None
         workflow.maxPtmCount = None
+        workflow.decoyPrefix = "Decoy_"
         return workflow
+
+    def test_regular_decoy_preserves_protein_n_terminal_residue(self) -> None:
+        with tempfile.TemporaryDirectory() as output:
+            fasta = Path(output, "target.fasta")
+            fasta.write_text(">met\nMABCDEK\n>nonmet\nABCDEK\n")
+            workflow = self.make_search(output)
+            workflow.element = "R"
+            workflow.fastaPath = str(fasta)
+            workflow.decoyPath = str(Path(output, "decoy.fasta"))
+
+            workflow.reverse_fasta_sequences()
+
+            self.assertEqual(
+                Path(workflow.decoyPath).read_text(),
+                ">Decoy_met\nMKEDCBA\n>Decoy_nonmet\nAKEDCB\n",
+            )
+
+    def test_sip_decoy_keeps_legacy_full_reversal(self) -> None:
+        with tempfile.TemporaryDirectory() as output:
+            fasta = Path(output, "target.fasta")
+            fasta.write_text(">protein\nMABCDEK\n")
+            workflow = self.make_search(output)
+            workflow.element = "C13"
+            workflow.fastaPath = str(fasta)
+            workflow.decoyPath = str(Path(output, "decoy.fasta"))
+
+            workflow.reverse_fasta_sequences()
+
+            self.assertEqual(
+                Path(workflow.decoyPath).read_text(),
+                ">Decoy_protein\nKEDCBAM\n",
+            )
 
     def test_spectra_search_divides_cli_threads_between_samples(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -305,31 +339,168 @@ class WorkflowAllocationTests(unittest.TestCase):
 
     def test_fasta_target_and_decoy_share_one_budget(self) -> None:
         with tempfile.TemporaryDirectory() as output:
-            workflow = self.make_search(output)
-            workflow.base_names = ["sample"]
-            workflow.hdf5_paths = {"sample": f"{output}/sample.h5"}
+            workflow = self.make_search(output, threads=24)
+            workflow.base_names = ["one", "two", "three"]
+            workflow.hdf5_paths = {
+                name: f"{output}/{name}.h5" for name in workflow.base_names
+            }
             workflow.element = "R"
             workflow.fastaPath = "target.fasta"
             workflow.decoyPath = "decoy.fasta"
-            workflow.direct_sip_args = lambda: ""
             captured: list[tuple[str, int]] = []
             workflow.run_command_sipros = (
                 lambda command, threads: captured.append((command, threads))
             )
-            workflow.merge_pin_files = lambda *_arguments: None
+            merged: list[tuple[str, str, str]] = []
+            workflow.merge_pin_files = lambda *arguments: merged.append(arguments)
 
             workflow.sipros_search()
 
-            self.assertEqual(sorted(threads for _, threads in captured), [8, 8])
-            self.assertEqual(sum(threads for _, threads in captured), 16)
-            for command, _ in captured:
+            self.assertEqual(len(captured), 8)
+            prepare_calls = captured[:2]
+            search_calls = captured[2:]
+            self.assertEqual(
+                sorted(threads for _, threads in prepare_calls), [12, 12]
+            )
+            self.assertEqual(
+                sum(threads for _, threads in prepare_calls), 24
+            )
+            self.assertEqual(
+                sorted(threads for _, threads in search_calls), [12] * 6
+            )
+            cache_paths: set[str] = set()
+            output_paths: set[str] = set()
+            for command, _ in prepare_calls:
+                arguments = shlex.split(command)
+                self.assertIn("--prepare-only", arguments)
+                self.assertNotIn("-f", arguments)
+                self.assertNotIn("-o", arguments)
+                cache_index = arguments.index("--fragment-index-cache")
+                cache_paths.add(arguments[cache_index + 1])
+                self.assertEqual(
+                    Path(arguments[cache_index + 1]).parent, Path(output)
+                )
+            for command, _ in search_calls:
                 self.assertNotIn(" -c ", command)
                 self.assertIn("--tolerance-ms1 0.01", command)
                 self.assertIn("--tolerance-ms2 0.02", command)
                 arguments = shlex.split(command)
+                self.assertNotIn("--prepare-only", arguments)
+                scan_files = [
+                    arguments[index + 1]
+                    for index, argument in enumerate(arguments)
+                    if argument == "-f"
+                ]
+                self.assertEqual(len(scan_files), 1)
+                self.assertIn(scan_files[0], workflow.hdf5_paths.values())
+                self.assertIn("--pin-output", arguments)
+                pin_index = arguments.index("--pin-output")
+                self.assertIn(
+                    arguments[pin_index + 1],
+                    {f"{name}_target.pin" for name in workflow.base_names}
+                    | {f"{name}_decoy.pin" for name in workflow.base_names},
+                )
+                self.assertIn("--precursor-source", arguments)
+                source_index = arguments.index("--precursor-source")
+                self.assertEqual(arguments[source_index + 1], "ms1-neighborhood")
+                cache_index = arguments.index("--fragment-index-cache")
+                cache_paths.add(arguments[cache_index + 1])
+                output_index = arguments.index("-o")
+                output_paths.add(arguments[output_index + 1])
                 self.assertNotIn("--ptm", arguments)
                 self.assertNotIn("--fixed-ptm", arguments)
                 self.assertNotIn("--max-ptm-count", arguments)
+            self.assertEqual(
+                {Path(path).name for path in cache_paths},
+                {"target.sfi", "decoy.sfi"},
+            )
+            self.assertEqual(
+                output_paths,
+                {str(Path(output) / name) for name in workflow.base_names},
+            )
+            self.assertEqual(len(merged), 3)
+            self.assertFalse((Path(output) / "regular_fasta_search").exists())
+
+    def test_regular_fasta_pairs_split_odd_budget_for_every_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as output:
+            workflow = self.make_search(output, threads=5)
+            workflow.base_names = ["one", "two"]
+            workflow.hdf5_paths = {
+                name: f"{output}/{name}.h5" for name in workflow.base_names
+            }
+            workflow.element = "R"
+            workflow.fastaPath = "target.fasta"
+            workflow.decoyPath = "decoy.fasta"
+            captured: list[tuple[str, int]] = []
+            workflow.run_command_sipros = (
+                lambda command, threads: captured.append((command, threads))
+            )
+            merged: list[tuple[str, str, str]] = []
+            workflow.merge_pin_files = lambda *arguments: merged.append(arguments)
+
+            workflow.sipros_search()
+
+            search_calls = captured[2:]
+            self.assertEqual(len(search_calls), 4)
+            per_sample: dict[str, dict[str, int]] = {
+                name: {} for name in workflow.base_names
+            }
+            for command, threads in search_calls:
+                arguments = shlex.split(command)
+                scan = arguments[arguments.index("-f") + 1]
+                sample = Path(scan).stem
+                label = arguments[arguments.index("--pin-label") + 1]
+                per_sample[sample][label] = threads
+            self.assertEqual(
+                per_sample,
+                {
+                    "one": {"1": 3, "-1": 2},
+                    "two": {"1": 3, "-1": 2},
+                },
+            )
+            self.assertEqual(len(merged), 2)
+
+    def test_regular_fasta_finishes_each_pair_before_next_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as output:
+            workflow = self.make_search(output, threads=8)
+            workflow.base_names = ["one", "two"]
+            workflow.hdf5_paths = {
+                name: f"{output}/{name}.h5" for name in workflow.base_names
+            }
+            workflow.element = "R"
+            workflow.fastaPath = "target.fasta"
+            workflow.decoyPath = "decoy.fasta"
+            barriers = {
+                name: threading.Barrier(2) for name in workflow.base_names
+            }
+            lock = threading.Lock()
+            active_counts = {name: 0 for name in workflow.base_names}
+            maximum_active_samples = 0
+
+            def fake_run(command: str, _threads: int) -> None:
+                nonlocal maximum_active_samples
+                arguments = shlex.split(command)
+                if "--prepare-only" in arguments:
+                    return
+                scan = arguments[arguments.index("-f") + 1]
+                sample = Path(scan).stem
+                with lock:
+                    active_counts[sample] += 1
+                    maximum_active_samples = max(
+                        maximum_active_samples,
+                        sum(count > 0 for count in active_counts.values()),
+                    )
+                barriers[sample].wait(timeout=2)
+                with lock:
+                    active_counts[sample] -= 1
+
+            workflow.run_command_sipros = fake_run
+            workflow.merge_pin_files = lambda *_arguments: None
+
+            workflow.sipros_search()
+
+            self.assertEqual(maximum_active_samples, 1)
+            self.assertTrue(all(barrier.broken is False for barrier in barriers.values()))
 
     def test_fasta_search_passes_custom_ptms_to_target_and_decoy(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -350,7 +521,7 @@ class WorkflowAllocationTests(unittest.TestCase):
 
             workflow.sipros_search()
 
-            self.assertEqual(len(captured), 2)
+            self.assertEqual(len(captured), 4)
             for command in captured:
                 arguments = shlex.split(command)
                 ptms = [
@@ -367,6 +538,38 @@ class WorkflowAllocationTests(unittest.TestCase):
                 self.assertEqual(fixed_ptms, ["none"])
                 max_index = arguments.index("--max-ptm-count")
                 self.assertEqual(arguments[max_index + 1], "2")
+
+    def test_sip_fasta_keeps_per_sample_legacy_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as output:
+            workflow = self.make_search(output, threads=24)
+            workflow.base_names = ["one", "two"]
+            workflow.hdf5_paths = {
+                name: f"{output}/{name}.h5" for name in workflow.base_names
+            }
+            workflow.element = "C13"
+            workflow.sipRange = "0-5"
+            workflow.step = "1"
+            workflow.fastaPath = "target.fasta"
+            workflow.decoyPath = "decoy.fasta"
+            captured: list[tuple[str, int]] = []
+            workflow.run_command_sipros = (
+                lambda command, threads: captured.append((command, threads))
+            )
+            workflow.merge_pin_files = lambda *_arguments: None
+
+            workflow.sipros_search()
+
+            self.assertEqual(len(captured), 4)
+            self.assertEqual(sorted(threads for _, threads in captured), [8] * 4)
+            for command, _ in captured:
+                arguments = shlex.split(command)
+                self.assertEqual(arguments.count("-f"), 1)
+                self.assertIn("--pin-output", arguments)
+                self.assertIn("-a", arguments)
+                self.assertIn("-b", arguments)
+                self.assertIn("-s", arguments)
+                self.assertNotIn("--fragment-index-cache", arguments)
+                self.assertNotIn("--precursor-source", arguments)
 
     def test_generated_spectra_library_receives_fixed_ptms(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -429,23 +632,45 @@ class WorkflowAllocationTests(unittest.TestCase):
             workflow.element = "R"
             workflow.fastaPath = "target.fasta"
             workflow.decoyPath = "decoy.fasta"
-            workflow.direct_sip_args = lambda: ""
             completed = Path(output) / "sample" / "sample_target.pin"
             completed.parent.mkdir(parents=True)
             completed.write_bytes(b"x" * (500 * 1024 + 1))
             captured: list[int] = []
             merged: list[tuple[str, str, str]] = []
-            workflow.run_command_sipros = (
-                lambda _command, threads: captured.append(threads)
-            )
+
+            def fake_run(command: str, threads: int) -> None:
+                captured.append(threads)
+                arguments = shlex.split(command)
+                if "--prepare-only" in arguments:
+                    return
+                output_index = arguments.index("-o")
+                pin_index = arguments.index("--pin-output")
+                label_index = arguments.index("--pin-label")
+                pin_path = (
+                    Path(arguments[output_index + 1]) /
+                    arguments[pin_index + 1]
+                )
+                pin_path.write_bytes(
+                    b"new target"
+                    if arguments[label_index + 1] == "1"
+                    else b"new decoy"
+                )
+
+            workflow.run_command_sipros = fake_run
             workflow.merge_pin_files = (
                 lambda *arguments: merged.append(arguments)
             )
 
             workflow.sipros_search()
 
-            self.assertEqual(captured, [8, 8])
+            self.assertEqual(captured, [8, 8, 8, 8])
             self.assertEqual(len(merged), 1)
+            self.assertEqual(completed.read_bytes(), b"new target")
+            self.assertEqual(
+                (completed.parent / "sample_decoy.pin").read_bytes(),
+                b"new decoy",
+            )
+            self.assertFalse((Path(output) / "regular_fasta_search").exists())
 
     def test_raxport_single_file_uses_dotnet_quota_not_dash_j(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -518,6 +743,88 @@ class WorkflowAllocationTests(unittest.TestCase):
         self.assertEqual(allocation.worker_count, 3)
         self.assertEqual(allocation.peak_threads, 16)
         self.assertEqual(sorted(threads for _, _, threads in captured), [5, 5, 6])
+
+
+class PepXmlModificationTests(unittest.TestCase):
+    def test_protein_n_terminal_acetylation_survives_pepxml_conversion(self) -> None:
+        with tempfile.TemporaryDirectory() as output:
+            sample_dir = Path(output, "sample")
+            sample_dir.mkdir()
+            workflow = object.__new__(assembly_module.assembly)
+            workflow.outputPath = output
+            workflow.decoyPrefix = "Decoy_"
+            workflow.logger = null_logger(f"assembly-pepxml-{id(workflow)}")
+            psms = assembly_module.pd.DataFrame([
+                {
+                    "ScanNr": 101,
+                    "parentCharges": 2,
+                    "SpecId": "sample.101.1",
+                    "ExpMass": 1000.0,
+                    "retentiontime": 12.5,
+                    "Peptide": "[%PEPTIDE]K",
+                    "Proteins": "{protein_one}",
+                    "massErrors": 0.001,
+                    "missCleavageSiteNumbers": 0,
+                    "ranks": 1,
+                    "posterior_error_prob": 0.01,
+                    "score": 2.0,
+                },
+                {
+                    "ScanNr": 102,
+                    "parentCharges": 2,
+                    "SpecId": "sample.102.1",
+                    "ExpMass": 900.0,
+                    "retentiontime": 13.5,
+                    # '%' after K is a residue acetylation, not the special
+                    # protein-N-terminal proteoform.
+                    "Peptide": "[AK%]",
+                    "Proteins": "{protein_two}",
+                    "massErrors": 0.002,
+                    "missCleavageSiteNumbers": 0,
+                    "ranks": 1,
+                    "posterior_error_prob": 0.02,
+                    "score": 1.5,
+                },
+            ])
+
+            workflow.dataframe_to_pepxml(psms, "sample")
+
+            tree = assembly_module.etree.parse(
+                str(sample_dir / "sample.pep.xml")
+            )
+            terminal_modifications = tree.xpath(
+                "//search_summary/terminal_modification"
+            )
+            self.assertEqual(len(terminal_modifications), 1)
+            self.assertEqual(
+                terminal_modifications[0].get("massdiff"), "42.010565"
+            )
+            self.assertEqual(terminal_modifications[0].get("terminus"), "N")
+            self.assertEqual(
+                terminal_modifications[0].get("protein_terminus"), "Y"
+            )
+            summary_children = [
+                child.tag for child in tree.xpath("//search_summary")[0]
+            ]
+            self.assertLess(
+                summary_children.index("terminal_modification"),
+                summary_children.index("parameter"),
+            )
+
+            acetyl_hit = tree.xpath("//search_hit[@peptide='PEPTIDE']")[0]
+            modification_info = acetyl_hit.find("modification_info")
+            self.assertIsNotNone(modification_info)
+            self.assertEqual(
+                modification_info.get("modified_peptide"), "n[43]PEPTIDE"
+            )
+            self.assertAlmostEqual(
+                float(modification_info.get("mod_nterm_mass")),
+                43.018390,
+                places=6,
+            )
+
+            lysine_acetyl_hit = tree.xpath("//search_hit[@peptide='AK']")[0]
+            self.assertIsNone(lysine_acetyl_hit.find("modification_info"))
 
 
 if __name__ == "__main__":

@@ -661,23 +661,18 @@ IsotopeDistribution Isotopologue::sum(const IsotopeDistribution &distribution0, 
 	double ProbabilityCutoff_local = 0.000001;
 
 	IsotopeDistribution sumDistribution;
-	double currentMass;
-	double currentProb;
 	int iSizeDistribution0 = distribution0.vMass.size();
 	int iSizeDistribution1 = distribution1.vMass.size();
-	int iCount = 0;
-	double dSum = 0;
 	size_t newSize = iSizeDistribution0 + iSizeDistribution1 - 1;
 	sumDistribution.vMass.reserve(newSize);
 	sumDistribution.vProb.reserve(newSize);
-#pragma omp simd
 	for (int k = 0; k < newSize; k++)
 	{
 		double sumweight = 0, summass = 0;
 		int start = k < (iSizeDistribution1 - 1) ? 0 : k - iSizeDistribution1 + 1; // max(0, k-f_n+1)
 		int end = k < (iSizeDistribution0 - 1) ? k : iSizeDistribution0 - 1;	   // min(g_n - 1, k)
-		iCount = 0;
-		dSum = 0;
+		int iCount = 0;
+		double dSum = 0;
 		for (int i = start; i <= end; i++)
 		{
 			double weight = distribution0.vProb[i] * distribution1.vProb[k - i];
@@ -689,15 +684,13 @@ IsotopeDistribution Isotopologue::sum(const IsotopeDistribution &distribution0, 
 		}
 		if (sumweight == 0)
 		{
-			currentMass = dSum / ((double)iCount);
+			sumDistribution.vMass.push_back(dSum / ((double)iCount));
 		}
 		else
 		{
-			currentMass = summass / sumweight;
+			sumDistribution.vMass.push_back(summass / sumweight);
 		}
-		currentProb = sumweight;
-		sumDistribution.vMass.push_back(currentMass);
-		sumDistribution.vProb.push_back(currentProb);
+		sumDistribution.vProb.push_back(sumweight);
 	}
 
 	// prune small probabilities
@@ -771,7 +764,6 @@ IsotopeDistribution Isotopologue::multiply(const IsotopeDistribution &distributi
 	if (count < 0)
 	{
 		IsotopeDistribution negativeDistribution = distribution0;
-#pragma omp simd
 		for (unsigned int n = 0; n < negativeDistribution.vMass.size(); n++)
 		{
 			negativeDistribution.vMass[n] = -negativeDistribution.vMass[n];

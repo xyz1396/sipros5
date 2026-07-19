@@ -104,8 +104,10 @@ citation:
         parser.add_argument('-t', '--thread', required=False, type=int, default=0,
                             help=("Total CPU-thread budget for the whole workflow "
                                   "(default: all CPUs available to this process). "
-                                  "Sipros and Percolator jobs receive at least 8 "
-                                  "threads when the budget permits"))
+                                  "Regular FASTA target/decoy searches split the "
+                                  "budget between two processes; other Sipros and "
+                                  "Percolator jobs receive at least 8 threads when "
+                                  "the budget permits"))
         parser.add_argument('--topN', '--top-psms-per-scan', dest='topN', required=False, type=int, default=8,
                             help="Top PSM rows retained per scan for target and decoy searches before merge (default: 8)")
         parser.add_argument('-o', '--output', required=True, help="Output directory path")

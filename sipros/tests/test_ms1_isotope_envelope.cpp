@@ -1067,6 +1067,45 @@ void checkRawCountAndFitScoreFeatures()
 }
 
 
+void checkFollowingScanNeighborhood()
+{
+    const TargetCase &carbon = targetCases()[0];
+    Fixture fixture = makeFixture(carbon, 0.5, 2);
+    check(fixture.ms1.scans.size() == 1,
+          "following-neighborhood fixture has unexpected scan count");
+
+    sipros::RaxportMs1Scan signalScan =
+        std::move(fixture.ms1.scans.front());
+    signalScan.scanNumber = 101;
+    sipros::RaxportMs1Scan parentScan;
+    parentScan.scanNumber = 100;
+    fixture.ms1.scans.clear();
+    fixture.ms1.scans.push_back(std::move(parentScan));
+    fixture.ms1.scans.push_back(std::move(signalScan));
+    fixture.ms1.scanNumberToIndex.clear();
+    fixture.ms1.scanNumberToIndex[100] = 0;
+    fixture.ms1.scanNumberToIndex[101] = 1;
+
+    int scanNumber = 100;
+    const double matchedMz = fixtureMzAt(fixture, fixture.modeIndex);
+    const auto tolerance = [&](double)
+    { return 0.01 / fixture.charge; };
+    const std::vector<isotopicPeak> peaks =
+        PSMfeatureExtractor::findMs1IsotopicPeaks(
+            &fixture.ms1,
+            scanNumber,
+            fixture.charge,
+            fixture.baseMz,
+            matchedMz,
+            fixture.composition,
+            fixture.target->label,
+            fixture.expectedPct,
+            tolerance);
+    check(!peaks.empty() && scanNumber == 101,
+          "MS1 feature extraction did not find a following-scan candidate");
+}
+
+
 void checkEndpointStateIndependence()
 {
     const TargetCase &oxygen = targetCases()[3];
@@ -1131,6 +1170,7 @@ int main(int argc, char **argv)
         checkLargeHydrogenEnvelope();
         checkInvalidEvidenceAndUnsupportedTarget();
         checkRawCountAndFitScoreFeatures();
+        checkFollowingScanNeighborhood();
         checkEndpointStateIndependence();
 
         std::cout

@@ -177,7 +177,7 @@ public:
 	static void print(struct Query *pScoring);
 
 	static bool ScorePeptides(string * currentPeptide, bool *pbDuplFragment, double* _pdAAforward, double * _pdAAreverse, MS2Scan * mstSpectrum,
-			unsigned int *** _uiBinnedIonMasses, double & dXcorr);
+			int precursorCharge, unsigned int *** _uiBinnedIonMasses, double & dXcorr);
 	static bool ScorePeptidesSIPNoCancelOut(vector<vector<double> > & vvdYionMass, vector<vector<double> > & vvdYionProb, vector<vector<double> > & vvdBionMass,
 				vector<vector<double> > & vvdBionProb, MS2Scan * mstSpectrum, vector<bool> & pbDuplFragment, vector<double> & vdBinnedIonMasses,
 				vector<int> & vdBin, double & dXcorr);

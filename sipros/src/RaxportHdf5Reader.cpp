@@ -137,10 +137,12 @@ void updateObservedMzRange(const std::vector<double> &mz)
     }
 }
 
-void finalizeMs2Scan(MS2Scan *scan)
+void finalizeMs2Scan(MS2Scan *scan, bool useReactionChargeForScoring)
 {
     scan->isMS2HighRes = (ProNovoConfig::getMassAccuracyFragmentIon() < 0.1);
     scan->isMS1HighRes = true;
+    scan->bUseReactionChargeForScoring = useReactionChargeForScoring;
+    scan->iMaxCandidateCharge = 0;
 
     double maxChargedMass = 0.0;
     double maxNeutralMass = 0.0;
@@ -156,11 +158,16 @@ void finalizeMs2Scan(MS2Scan *scan)
         maxNeutralMass = std::max(maxNeutralMass, neutralMass);
     };
 
-    considerPrecursor(scan->dParentMZ, scan->iParentChargeState);
+    if (useReactionChargeForScoring)
+    {
+        considerPrecursor(scan->dParentMZ, scan->iParentChargeState);
+    }
     const size_t n = std::min(scan->iParentChargeStates.size(), scan->dParentMZs.size());
     for (size_t i = 0; i < n; ++i)
     {
         considerPrecursor(scan->dParentMZs[i], scan->iParentChargeStates[i]);
+        scan->iMaxCandidateCharge = std::max(
+            scan->iMaxCandidateCharge, scan->iParentChargeStates[i]);
     }
     scan->dParentMass = maxChargedMass;
     scan->dParentNeutralMass = maxNeutralMass;
@@ -205,6 +212,69 @@ void addFallbackPrecursorIfNeeded(MS2Scan *scan)
     scan->dParentMZs.push_back(scan->dParentMZ);
 }
 
+size_t appendNeighborhoodMs1Precursors(MS2Scan *scan,
+                                       const RaxportMs1Data &ms1Data,
+                                       int parentScanNumber,
+                                       double isolationCenterMz,
+                                       double isolationWidth,
+                                       int neighborhoodRadius)
+{
+    if (scan == nullptr || ms1Data.scans.empty() || neighborhoodRadius < 0 ||
+        isolationCenterMz <= 0.0 || isolationWidth <= 0.0 ||
+        !std::isfinite(isolationCenterMz) || !std::isfinite(isolationWidth))
+    {
+        return 0;
+    }
+
+    const auto parent = ms1Data.scanNumberToIndex.find(parentScanNumber);
+    if (parent == ms1Data.scanNumberToIndex.end())
+    {
+        return 0;
+    }
+
+    const size_t parentIndex = parent->second;
+    const size_t radius = static_cast<size_t>(neighborhoodRadius);
+    const size_t first = parentIndex > radius ? parentIndex - radius : 0;
+    const size_t last = std::min(ms1Data.scans.size() - 1, parentIndex + radius);
+    const double lowerMz = isolationCenterMz - isolationWidth / 2.0;
+    const double upperMz = isolationCenterMz + isolationWidth / 2.0;
+    size_t appended = 0;
+
+    for (size_t scanIndex = first; scanIndex <= last; ++scanIndex)
+    {
+        const RaxportMs1Scan &ms1Scan = ms1Data.scans[scanIndex];
+        auto peak = std::lower_bound(ms1Scan.mz.begin(), ms1Scan.mz.end(), lowerMz);
+        for (; peak != ms1Scan.mz.end() && *peak <= upperMz; ++peak)
+        {
+            const double mz = *peak;
+            if (mz <= 0.0 || !std::isfinite(mz))
+            {
+                continue;
+            }
+            const size_t peakIndex = static_cast<size_t>(std::distance(ms1Scan.mz.begin(), peak));
+            const int nativeCharge = peakIndex < ms1Scan.charge.size()
+                                         ? ms1Scan.charge[peakIndex]
+                                         : 0;
+            if (nativeCharge > 0)
+            {
+                scan->iParentChargeStates.push_back(nativeCharge);
+                scan->dParentMZs.push_back(mz);
+                ++appended;
+            }
+            else if (nativeCharge == 0)
+            {
+                for (const int guessedCharge : {2, 3, 4})
+                {
+                    scan->iParentChargeStates.push_back(guessedCharge);
+                    scan->dParentMZs.push_back(mz);
+                    ++appended;
+                }
+            }
+        }
+    }
+    return appended;
+}
+
 bool requestedScan(const std::unordered_set<int> *requested, int scanNumber)
 {
     return requested == nullptr || requested->find(scanNumber) != requested->end();
@@ -242,7 +312,8 @@ bool readRaxportHdf5Scans(const std::string &path,
                           std::vector<MS2Scan *> &ms2Scans,
                           RaxportMs1Data *ms1Data,
                           std::string &error,
-                          const std::unordered_set<int> *requestedMs2ScanNumbers)
+                          const std::unordered_set<int> *requestedMs2ScanNumbers,
+                          const RaxportReadOptions &options)
 {
     error.clear();
     ms2Scans.clear();
@@ -255,15 +326,27 @@ bool readRaxportHdf5Scans(const std::string &path,
         error = "Raxport HDF5 input required (.h5 or .hdf5): " + path;
         return false;
     }
+    if (options.ms1NeighborhoodRadius < 0)
+    {
+        error = "MS1 neighborhood radius must be non-negative";
+        return false;
+    }
+
+    const bool useMs1Neighborhood =
+        options.precursorSource == PrecursorSource::Ms1Neighborhood;
 
     H5::Exception::dontPrint();
     try
     {
         H5::H5File file(path, H5F_ACC_RDONLY);
         if (!hasObject(file.getId(), "scans") || !hasObject(file.getId(), "peaks") ||
-            !hasObject(file.getId(), "reactions") || !hasObject(file.getId(), "precursor_candidates"))
+            !hasObject(file.getId(), "reactions"))
         {
-            throw std::runtime_error("missing one or more required groups: /scans, /peaks, /reactions, /precursor_candidates");
+            throw std::runtime_error("missing one or more required groups: /scans, /peaks, /reactions");
+        }
+        if (!useMs1Neighborhood && !hasObject(file.getId(), "precursor_candidates"))
+        {
+            throw std::runtime_error("missing required group: /precursor_candidates");
         }
 
         int schemaVersion = 0;
@@ -304,30 +387,51 @@ bool readRaxportHdf5Scans(const std::string &path,
 
         const std::vector<double> reactionPrecursorMass = read1D<double>(file, "/reactions/precursor_mass", H5::PredType::NATIVE_DOUBLE);
         const std::vector<int> reactionChargeState = read1D<int>(file, "/reactions/charge_state", H5::PredType::NATIVE_INT);
-        const std::vector<long long> reactionCandidateStart = read1D<long long>(file, "/reactions/candidate_start", H5::PredType::NATIVE_LLONG);
-        const std::vector<int> reactionCandidateCount = read1D<int>(file, "/reactions/candidate_count", H5::PredType::NATIVE_INT);
-        if (reactionChargeState.size() != reactionPrecursorMass.size() ||
-            reactionCandidateStart.size() != reactionPrecursorMass.size() ||
-            reactionCandidateCount.size() != reactionPrecursorMass.size())
+        if (reactionChargeState.size() != reactionPrecursorMass.size())
         {
             throw std::runtime_error("/reactions datasets have inconsistent lengths");
         }
 
-        const std::vector<int> candidateCharge =
-            read1D<int>(file, "/precursor_candidates/charge", H5::PredType::NATIVE_INT);
-        const std::vector<double> candidateMz =
-            read1D<double>(file, "/precursor_candidates/mz", H5::PredType::NATIVE_DOUBLE);
-        // These v6 fields describe candidate provenance and confidence.
-        // Validate their alignment, but search every candidate Raxport selected.
-        const std::vector<int> candidateChargeSource =
-            read1D<int>(file, "/precursor_candidates/charge_source", H5::PredType::NATIVE_INT);
-        const std::vector<int> candidateIsotopeMatchCount =
-            read1D<int>(file, "/precursor_candidates/isotope_match_count", H5::PredType::NATIVE_INT);
-        if (candidateCharge.size() != candidateMz.size() ||
-            candidateChargeSource.size() != candidateMz.size() ||
-            candidateIsotopeMatchCount.size() != candidateMz.size())
+        std::vector<long long> reactionCandidateStart;
+        std::vector<int> reactionCandidateCount;
+        std::vector<double> reactionIsolationWidth;
+        std::vector<double> reactionIsolationOffset;
+        std::vector<int> candidateCharge;
+        std::vector<double> candidateMz;
+        if (useMs1Neighborhood)
         {
-            throw std::runtime_error("Raxport schema 6 precursor-candidate datasets have inconsistent lengths");
+            reactionIsolationWidth = read1D<double>(file, "/reactions/isolation_width", H5::PredType::NATIVE_DOUBLE);
+            reactionIsolationOffset = read1D<double>(file, "/reactions/isolation_width_offset", H5::PredType::NATIVE_DOUBLE);
+            if (reactionIsolationWidth.size() != reactionPrecursorMass.size() ||
+                reactionIsolationOffset.size() != reactionPrecursorMass.size())
+            {
+                throw std::runtime_error("/reactions isolation-window datasets have inconsistent lengths");
+            }
+        }
+        else
+        {
+            reactionCandidateStart = read1D<long long>(file, "/reactions/candidate_start", H5::PredType::NATIVE_LLONG);
+            reactionCandidateCount = read1D<int>(file, "/reactions/candidate_count", H5::PredType::NATIVE_INT);
+            if (reactionCandidateStart.size() != reactionPrecursorMass.size() ||
+                reactionCandidateCount.size() != reactionPrecursorMass.size())
+            {
+                throw std::runtime_error("/reactions candidate datasets have inconsistent lengths");
+            }
+
+            candidateCharge = read1D<int>(file, "/precursor_candidates/charge", H5::PredType::NATIVE_INT);
+            candidateMz = read1D<double>(file, "/precursor_candidates/mz", H5::PredType::NATIVE_DOUBLE);
+            // These v6 fields describe candidate provenance and confidence.
+            // Validate their alignment, but search every candidate Raxport selected.
+            const std::vector<int> candidateChargeSource =
+                read1D<int>(file, "/precursor_candidates/charge_source", H5::PredType::NATIVE_INT);
+            const std::vector<int> candidateIsotopeMatchCount =
+                read1D<int>(file, "/precursor_candidates/isotope_match_count", H5::PredType::NATIVE_INT);
+            if (candidateCharge.size() != candidateMz.size() ||
+                candidateChargeSource.size() != candidateMz.size() ||
+                candidateIsotopeMatchCount.size() != candidateMz.size())
+            {
+                throw std::runtime_error("Raxport schema 6 precursor-candidate datasets have inconsistent lengths");
+            }
         }
 
         H5::DataSet peakMzDataset = file.openDataSet("/peaks/mz");
@@ -354,6 +458,51 @@ bool readRaxportHdf5Scans(const std::string &path,
             }
         }
 
+        // The neighborhood mode needs both preceding and following MS1 scans,
+        // so load the full MS1 series before constructing any MS2 candidates.
+        RaxportMs1Data localMs1Data;
+        RaxportMs1Data *neighborhoodMs1Data = nullptr;
+        if (useMs1Neighborhood)
+        {
+            neighborhoodMs1Data = ms1Data != nullptr ? ms1Data : &localMs1Data;
+            for (size_t i = 0; i < nScans; ++i)
+            {
+                if (msOrder[i] != 1)
+                {
+                    continue;
+                }
+                if (peakStart[i] < 0 || peakCount[i] <= 0)
+                {
+                    appendMs1Data(*neighborhoodMs1Data, scanNumber[i], retentionTime[i], tic[i],
+                                  {}, {}, {});
+                    continue;
+                }
+                const hsize_t start = static_cast<hsize_t>(peakStart[i]);
+                const hsize_t count = static_cast<hsize_t>(peakCount[i]);
+                if (start > peakMzSize || count > peakMzSize - start)
+                {
+                    throw std::runtime_error("scan " + std::to_string(scanNumber[i]) +
+                                             " has an out-of-bounds peak slice");
+                }
+                std::vector<double> mz = readSlice<double>(
+                    peakMzDataset, H5::PredType::NATIVE_DOUBLE, start, count);
+                std::vector<double> intensity = readSlice<double>(
+                    peakIntensityDataset, H5::PredType::NATIVE_DOUBLE, start, count);
+                std::vector<int> charge;
+                if (hasPeakCharge)
+                {
+                    charge = readSlice<int>(
+                        peakChargeDataset, H5::PredType::NATIVE_INT, start, count);
+                }
+                else
+                {
+                    charge.assign(static_cast<size_t>(count), 0);
+                }
+                appendMs1Data(*neighborhoodMs1Data, scanNumber[i], retentionTime[i], tic[i],
+                              std::move(mz), std::move(intensity), std::move(charge));
+            }
+        }
+
         ms2Scans.reserve(requestedMs2ScanNumbers == nullptr ? nScans / 2 : requestedMs2ScanNumbers->size());
         for (size_t i = 0; i < nScans; ++i)
         {
@@ -375,6 +524,10 @@ bool readRaxportHdf5Scans(const std::string &path,
 
             if (order == 1)
             {
+                if (useMs1Neighborhood)
+                {
+                    continue;
+                }
                 if (ms1Data == nullptr)
                 {
                     continue;
@@ -421,15 +574,32 @@ bool readRaxportHdf5Scans(const std::string &path,
                         scan->iParentChargeState = r < reactionChargeState.size() ? reactionChargeState[r] : 0;
                         havePrimaryReaction = true;
                     }
-                    appendCandidatePrecursors(scan.get(),
-                                              r < reactionCandidateStart.size() ? reactionCandidateStart[r] : -1,
-                                              r < reactionCandidateCount.size() ? reactionCandidateCount[r] : 0,
-                                              candidateCharge,
-                                              candidateMz);
+                    if (useMs1Neighborhood)
+                    {
+                        const double isolationCenterMz =
+                            reactionPrecursorMass[r] + reactionIsolationOffset[r];
+                        appendNeighborhoodMs1Precursors(
+                            scan.get(), *neighborhoodMs1Data, parentScanNumber[i],
+                            isolationCenterMz, reactionIsolationWidth[r],
+                            options.ms1NeighborhoodRadius);
+                    }
+                    else
+                    {
+                        appendCandidatePrecursors(scan.get(),
+                                                  reactionCandidateStart[r],
+                                                  reactionCandidateCount[r],
+                                                  candidateCharge,
+                                                  candidateMz);
+                    }
                 }
             }
-            addFallbackPrecursorIfNeeded(scan.get());
-            if (scan->iParentChargeState <= 0 && scan->iParentChargeStates.empty())
+            if (!useMs1Neighborhood)
+            {
+                addFallbackPrecursorIfNeeded(scan.get());
+            }
+            if ((useMs1Neighborhood && scan->iParentChargeStates.empty()) ||
+                (!useMs1Neighborhood && scan->iParentChargeState <= 0 &&
+                 scan->iParentChargeStates.empty()))
             {
                 continue;
             }
@@ -446,7 +616,7 @@ bool readRaxportHdf5Scans(const std::string &path,
             }
             sortPeakTriples(scan->vdMZ, scan->vdIntensity, scan->viCharge);
             updateObservedMzRange(scan->vdMZ);
-            finalizeMs2Scan(scan.get());
+            finalizeMs2Scan(scan.get(), !useMs1Neighborhood);
             ms2Scans.push_back(scan.release());
         }
         return true;
@@ -477,7 +647,13 @@ bool readRaxportHdf5Ms1Data(const std::string &path,
                             std::string &error)
 {
     std::vector<MS2Scan *> ignored;
-    const bool ok = readRaxportHdf5Scans(path, ignored, &ms1Data, error, nullptr);
+    // Feature extraction needs only MS1 scans.  Use the Regular reader policy
+    // so this helper does not accidentally require the legacy
+    // /precursor_candidates group merely to expose /peaks data.
+    RaxportReadOptions options;
+    options.precursorSource = PrecursorSource::Ms1Neighborhood;
+    const bool ok = readRaxportHdf5Scans(
+        path, ignored, &ms1Data, error, nullptr, options);
     for (MS2Scan *scan : ignored)
     {
         delete scan;

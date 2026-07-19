@@ -100,4 +100,56 @@ if(BUILD_TESTING)
     NAME pin_writer_schema
     COMMAND pin_writer_schema_test
   )
+
+  add_executable(fragment_index_test
+    ${PROJECT_SOURCE_DIR}/sipros/tests/test_fragment_index.cpp
+  )
+  target_include_directories(fragment_index_test PUBLIC ${SIPROS_INCLUDE_DIRS})
+  target_link_libraries(fragment_index_test PUBLIC sipros_core)
+  sipros_compile_definitions(fragment_index_test)
+  sipros_optimization_options(fragment_index_test)
+  sipros_static_link_options(fragment_index_test)
+  add_test(
+    NAME fragment_index
+    COMMAND fragment_index_test
+  )
+
+  add_executable(native_precursor_test
+    ${PROJECT_SOURCE_DIR}/sipros/tests/test_native_precursors.cpp
+  )
+  target_include_directories(native_precursor_test PUBLIC ${SIPROS_INCLUDE_DIRS})
+  target_link_libraries(native_precursor_test PUBLIC sipros_core)
+  sipros_compile_definitions(native_precursor_test)
+  sipros_optimization_options(native_precursor_test)
+  sipros_static_link_options(native_precursor_test)
+  add_test(
+    NAME native_precursor
+    COMMAND native_precursor_test
+  )
+
+  add_executable(protein_n_terminal_peptides_test
+    ${PROJECT_SOURCE_DIR}/sipros/tests/test_protein_n_terminal_peptides.cpp
+  )
+  target_include_directories(protein_n_terminal_peptides_test PUBLIC ${SIPROS_INCLUDE_DIRS})
+  target_link_libraries(protein_n_terminal_peptides_test PUBLIC sipros_core)
+  sipros_compile_definitions(protein_n_terminal_peptides_test)
+  sipros_optimization_options(protein_n_terminal_peptides_test)
+  sipros_static_link_options(protein_n_terminal_peptides_test)
+  add_test(
+    NAME protein_n_terminal_peptides
+    COMMAND protein_n_terminal_peptides_test
+  )
+
+  add_executable(search_policy_test
+    ${PROJECT_SOURCE_DIR}/sipros/tests/test_search_policy.cpp
+  )
+  target_include_directories(search_policy_test PUBLIC ${SIPROS_INCLUDE_DIRS})
+  target_link_libraries(search_policy_test PUBLIC sipros_common sipros_core)
+  sipros_compile_definitions(search_policy_test)
+  sipros_optimization_options(search_policy_test)
+  sipros_static_link_options(search_policy_test)
+  add_test(
+    NAME search_policy
+    COMMAND search_policy_test
+  )
 endif()

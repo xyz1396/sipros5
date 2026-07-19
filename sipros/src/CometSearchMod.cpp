@@ -59,18 +59,25 @@ bool CometSearchMod::Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, d
 		cout << "Error 90" << endl;
 	}
 	// seg debug e
-	if (mstSpectrum->iParentChargeState == 1) {
+	const int preprocessingCharge = mstSpectrum->bUseReactionChargeForScoring
+			? mstSpectrum->iParentChargeState
+			: mstSpectrum->iMaxCandidateCharge;
+	if (preprocessingCharge <= 1) {
 		pScoring->_spectrumInfoInternal.iMaxFragCharge = 1;
 	} else {
-		pScoring->_spectrumInfoInternal.iMaxFragCharge = mstSpectrum->iParentChargeState - 1;
+		pScoring->_spectrumInfoInternal.iMaxFragCharge = preprocessingCharge - 1;
 	}
-	if (mstSpectrum->iParentChargeState > ProNovoConfig::iMaxPercusorCharge) {
+	if (preprocessingCharge > ProNovoConfig::iMaxPercusorCharge) {
 		cout << "Error 90" << endl;
 		exit(1);
 	}
 
-	// initialize these temporary arrays before re-using
-	size_t iTmp = (size_t) ((ProNovoConfig::dMaxMS2ScanMass + dCushion + 2.0) * dInverseBinWidth) * sizeof(double);
+	// Initialize only the portion used by this spectrum.  These buffers are
+	// allocated for the largest spectrum in the file, but clearing that global
+	// extent for every scan turns XCorr preprocessing into avoidable memory
+	// traffic when one high-mass precursor hypothesis inflates the maximum.
+	const size_t iTmp = static_cast<size_t>(
+		pScoring->_spectrumInfoInternal.iArraySize) * sizeof(double);
 	//seg debug b
 	if (iTmp > (iArraySizePreprocess * sizeof(double))) {
 		cout << "Error 2" << endl;
@@ -391,25 +398,21 @@ bool CometSearchMod::LoadIons(struct Query *pScoring, double *pdTmpRawData, MS2S
 
 // pdTmpRawData now holds raw data, pdTmpCorrelationData is windowed data after this function
 void CometSearchMod::MakeCorrData(double *pdTmpRawData, double *pdTmpCorrelationData, struct Query *pScoring, struct PreprocessStruct *pPre) {
-	int i, ii, iBin, iWindowSize, iNumWindows = 10;
+	int i, iWindowSize, iNumWindows = 10;
 	double dMaxWindowInten, dTmp1, dTmp2;
 
 	iWindowSize = (int) ((pPre->iHighestIon) / iNumWindows) + 1;
+	const int arraySize = pScoring->_spectrumInfoInternal.iArraySize;
 
 	for (i = 0; i < iNumWindows; i++) {
 		dMaxWindowInten = 0.0;
+		const int windowBegin = i * iWindowSize;
+		const int windowEnd = std::min(windowBegin + iWindowSize, arraySize);
 
-		for (ii = 0; ii < iWindowSize; ii++) { // Find max inten. in window.
-			iBin = i * iWindowSize + ii;
-			//seg debug b
-			if (iBin >= iArraySizePreprocess) {
-				cout << "Error 4" << endl;
-			}
-			//seg debug e
-			if (iBin < pScoring->_spectrumInfoInternal.iArraySize) {
-				if (pdTmpRawData[iBin] > dMaxWindowInten) {
-					dMaxWindowInten = pdTmpRawData[iBin];
-				}
+#pragma omp simd reduction(max : dMaxWindowInten)
+		for (int iBin = windowBegin; iBin < windowEnd; ++iBin) {
+			if (pdTmpRawData[iBin] > dMaxWindowInten) {
+				dMaxWindowInten = pdTmpRawData[iBin];
 			}
 		}
 
@@ -417,17 +420,11 @@ void CometSearchMod::MakeCorrData(double *pdTmpRawData, double *pdTmpCorrelation
 			dTmp1 = 50.0 / dMaxWindowInten;
 			dTmp2 = 0.05 * pPre->dHighestIntensity;
 
-			for (ii = 0; ii < iWindowSize; ii++) { // Normalize to max inten. in window.
-				iBin = i * iWindowSize + ii;
-				//seg debug b
-				if (iBin >= iArraySizePreprocess) {
-					cout << "Error 4" << endl;
-				}
-				//seg debug e
-				if (iBin < pScoring->_spectrumInfoInternal.iArraySize) {
-					if (pdTmpRawData[iBin] > dTmp2) {
-						pdTmpCorrelationData[iBin] = pdTmpRawData[iBin] * dTmp1;
-					}
+
+#pragma omp simd
+			for (int iBin = windowBegin; iBin < windowEnd; ++iBin) {
+				if (pdTmpRawData[iBin] > dTmp2) {
+					pdTmpCorrelationData[iBin] = pdTmpRawData[iBin] * dTmp1;
 				}
 			}
 		}
@@ -631,7 +628,7 @@ void CometSearchMod::print(Query * pScoring) {
 }
 
 bool CometSearchMod::ScorePeptides(string * currentPeptide, bool *pbDuplFragment, double * _pdAAforward, double * _pdAAreverse, MS2Scan * mstSpectrum,
-		unsigned int *** _uiBinnedIonMasses, double & dXcorr) {
+		int precursorCharge, unsigned int *** _uiBinnedIonMasses, double & dXcorr) {
 	double dInverseBinWidth = 0, dOneMinusBinOffset = 0;
 	if (mstSpectrum->isMS2HighRes) {
 		dInverseBinWidth = ProNovoConfig::dHighResInverseBinWidth;
@@ -859,6 +856,9 @@ bool CometSearchMod::ScorePeptides(string * currentPeptide, bool *pbDuplFragment
 	}
 	// seg debug e
 	int iMaxFragCharge = pQuery->_spectrumInfoInternal.iMaxFragCharge;
+	if (!mstSpectrum->bUseReactionChargeForScoring) {
+		iMaxFragCharge = precursorCharge <= 1 ? 1 : precursorCharge - 1;
+	}
 	// seg debug b
 	if (iMaxFragCharge >= iMaxPercusorCharge) {
 		cout << "Error 9" << endl;

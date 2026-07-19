@@ -58,6 +58,17 @@ class ProteinDatabase
     char cRightSubPeptidePrefix;
     string sNonAfterCleavage;
 
+    // Regular search keeps the FASTA protein intact and additionally emits
+    // the biologically processed initiator-Met form for protein-N-terminal
+    // peptides.  These fields describe the original-protein coordinates of
+    // the peptide currently being decorated by the PTM iterator.
+    bool bPendingMetExcisedPeptide;
+    bool bCurrentPeptideProteinNTerminal;
+    bool bCurrentPeptideMetExcised;
+    int iPendingMetExcisedEndPos;
+    int iCurrentPeptideBeginPos;
+    int iCurrentPeptideEndPos;
+
     bool getNextPeptidePTM(Peptide *currentPeptide); // return false if there is no more peptide from this protein
     bool getNextProtein();                           // return false if no new protein
     void RemoveIllegalResidue(string &seq);
@@ -109,6 +120,14 @@ public:
     // currentPeptide: a Peptide object that has been set to be this peptide by calling setPeptide()
     bool getNextPeptide(Peptide *currentPeptide);
     bool getFirstProtein();
+
+    // Install one already-parsed FASTA entry.  A separate ProteinDatabase
+    // instance can use this API to digest one entry without sharing a FASTA
+    // stream, which permits deterministic parallel database construction.
+    // The name may be either a bare accession or a FASTA header beginning
+    // with '>'; sequence characters outside the active residue alphabet are
+    // removed in the same way as the streaming reader.
+    bool setProteinEntry(const string &proteinName, const string &sequence);
 };
 
 #endif // PROTEINDATABASE_H

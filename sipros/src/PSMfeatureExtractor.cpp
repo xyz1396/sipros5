@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <exception>
 #include <locale>
 #include <numeric>
 #include <sstream>
@@ -417,11 +418,20 @@ std::vector<isotopicPeak> PSMfeatureExtractor::findMs1IsotopicPeaks(
     if (assignedIndex < 0)
         return peaks;
 
-    size_t scanIdx = scanIt->second;
+    const size_t parentScanIdx = scanIt->second;
     size_t anchorIdx = std::numeric_limits<size_t>::max();
     const sipros::RaxportMs1Scan *anchorScan = nullptr;
-    for (int attempt = 0; attempt < 3; ++attempt)
+    // Candidate assignment uses every MS1 scan in the parent +/-2
+    // neighborhood.  Search the same neighborhood here so a candidate found
+    // only in a following MS1 scan is not assigned zero-valued features.
+    for (const int offset : {0, -1, 1, -2, 2})
     {
+        const int64_t candidateIndex =
+            static_cast<int64_t>(parentScanIdx) + offset;
+        if (candidateIndex < 0 ||
+            candidateIndex >= static_cast<int64_t>(ms1Data->scans.size()))
+            continue;
+        const size_t scanIdx = static_cast<size_t>(candidateIndex);
         const sipros::RaxportMs1Scan &scan = ms1Data->scans[scanIdx];
         anchorIdx = findEnvelopePeak(
             scan, matchedPrecursorMz, mzToleranceDaAt, precursorCharge);
@@ -431,9 +441,6 @@ std::vector<isotopicPeak> PSMfeatureExtractor::findMs1IsotopicPeaks(
             anchorScan = &scan;
             break;
         }
-        if (scanIdx == 0)
-            break;
-        --scanIdx;
     }
     if (!anchorScan)
         return peaks;
@@ -1169,69 +1176,107 @@ void PSMfeatureExtractor::extractFeaturesOfEachPSM()
         throw std::runtime_error(
             "PSM precursor neutron spacings do not match the number of PSM rows.");
     }
+    // diffScores depend on rank order within a scan; calculate this small
+    // prefix-dependent field before parallelizing the independent features.
     float topScore = 0;
-    for (size_t i = 0; i < mSipPSM->isotopicPeakss.size(); i++)
+    for (size_t i = 0; i < mSipPSM->isotopicPeakss.size(); ++i)
     {
-        const std::string compositionPeptide = peptideSequenceForComposition(mSipPSM->identifiedPeptides[i]);
-        const int precursorCharge = mSipPSM->parentCharges[i];
-        if (precursorCharge > 0)
-        {
-            const double baseMass = mPeptideIsotopeCalculator.calPrecursorBaseMass(compositionPeptide);
-            const double monoPrecursorMz = baseMass / precursorCharge + ProNovoConfig::getProtonMass();
-            const double matchedPrecursorMz =
-                mSipPSM->measuredParentMasses[i] / precursorCharge + ProNovoConfig::getProtonMass();
-            const std::string sipIsotope =
-                canonicalSipIsotope(ProNovoConfig::getSetSIPelement());
-            const auto mzToleranceDaAt = [precursorCharge](double)
-            { return 0.01 / precursorCharge; };
-            mSipPSM->isotopicPeakss[i] = findMs1IsotopicPeaks(
-                &ms1Data,
-                mSipPSM->precursorScanNumbers[i],
-                precursorCharge,
-                monoPrecursorMz,
-                matchedPrecursorMz,
-                mPeptideIsotopeCalculator.pepComposition,
-                sipIsotope,
-                mSipPSM->MS2IsotopicAbundances[i],
-                mzToleranceDaAt);
-            const Ms1AbundanceResult ms1Abundance = getSIPelementAbundanceFromMS1Peaks(
-                mSipPSM->isotopicPeakss[i],
-                baseMass,
-                compositionPeptide,
-                precursorCharge,
-                sipIsotope,
-                mSipPSM->MS2IsotopicAbundances[i]);
-            mSipPSM->isotopicPeakNumbers[i] =
-                ms1Abundance.rawIsotopicPeakCount;
-            mSipPSM->MS1IsotopeFitScores[i] =
-                ms1Abundance.fitScore;
-            mSipPSM->MS1IsotopicAbundances[i] = ms1Abundance.abundancePct;
-        }
-        std::tie(mSipPSM->peptideLengths[i], mSipPSM->missCleavageSiteNumbers[i]) =
-            getSeqLengthAndMissCleavageSiteNumber(mSipPSM->originalPeptides[i]);
-        mSipPSM->PTMnumbers[i] = getPTMnumber(mSipPSM->identifiedPeptides[i]);
-
         if (mSipPSM->ranks[i] == 1)
         {
-            // topScore = mSipPSM->MVHscores[i];
             topScore = mSipPSM->WDPscores[i];
         }
-        // mSipPSM->MVHdiffScores[i] = topMVHscore - mSipPSM->MVHscores[i];
         mSipPSM->diffScores[i] = topScore - mSipPSM->WDPscores[i];
-
-        mSipPSM->mzShiftFromisolationWindowCenters[i] = std::abs(
-            mSipPSM->isolationWindowCenterMZs[i] -
-            mSipPSM->measuredParentMasses[i] / mSipPSM->parentCharges[i] - ProNovoConfig::getProtonMass());
-        std::tie(mSipPSM->isotopicMassWindowShifts[i], mSipPSM->massErrors[i]) = getMassWindowShiftAndError(
-            mSipPSM->measuredParentMasses[i], mSipPSM->calculatedParentMasses[i],
-            mSipPSM->precursorNeutronMasses[i]);
-
-        mSipPSM->precursorIntensities[i] = 0;
-        for (auto &peak : mSipPSM->isotopicPeakss[i])
-        {
-            mSipPSM->precursorIntensities[i] += peak.intensity;
-        }
-
-        mSipPSM->isotopicAbundanceDiffs[i] = mSipPSM->MS1IsotopicAbundances[i] - mSipPSM->MS2IsotopicAbundances[i];
     }
+
+    const std::string sipIsotope =
+        canonicalSipIsotope(ProNovoConfig::getSetSIPelement());
+    std::vector<PeptideIsotopeCalculator> calculators(
+        static_cast<size_t>(omp_get_max_threads()));
+    std::exception_ptr featureError;
+#pragma omp parallel for schedule(guided, 64)
+    for (int64_t rowIndex = 0;
+         rowIndex < static_cast<int64_t>(mSipPSM->isotopicPeakss.size());
+         ++rowIndex)
+    {
+        try
+        {
+            const size_t i = static_cast<size_t>(rowIndex);
+            PeptideIsotopeCalculator &calculator =
+                calculators[static_cast<size_t>(omp_get_thread_num())];
+            const std::string compositionPeptide =
+                peptideSequenceForComposition(mSipPSM->identifiedPeptides[i]);
+            const int precursorCharge = mSipPSM->parentCharges[i];
+            if (precursorCharge > 0)
+            {
+                const double baseMass =
+                    calculator.calPrecursorBaseMass(compositionPeptide);
+                const double monoPrecursorMz =
+                    baseMass / precursorCharge + ProNovoConfig::getProtonMass();
+                const double matchedPrecursorMz =
+                    mSipPSM->measuredParentMasses[i] / precursorCharge +
+                    ProNovoConfig::getProtonMass();
+                const auto mzToleranceDaAt = [precursorCharge](double)
+                { return 0.01 / precursorCharge; };
+                mSipPSM->isotopicPeakss[i] = findMs1IsotopicPeaks(
+                    &ms1Data,
+                    mSipPSM->precursorScanNumbers[i],
+                    precursorCharge,
+                    monoPrecursorMz,
+                    matchedPrecursorMz,
+                    calculator.pepComposition,
+                    sipIsotope,
+                    mSipPSM->MS2IsotopicAbundances[i],
+                    mzToleranceDaAt);
+                const Ms1AbundanceResult ms1Abundance =
+                    getSIPelementAbundanceFromMS1Peaks(
+                        mSipPSM->isotopicPeakss[i],
+                        baseMass,
+                        compositionPeptide,
+                        precursorCharge,
+                        sipIsotope,
+                        mSipPSM->MS2IsotopicAbundances[i]);
+                mSipPSM->isotopicPeakNumbers[i] =
+                    ms1Abundance.rawIsotopicPeakCount;
+                mSipPSM->MS1IsotopeFitScores[i] = ms1Abundance.fitScore;
+                mSipPSM->MS1IsotopicAbundances[i] = ms1Abundance.abundancePct;
+            }
+            std::tie(mSipPSM->peptideLengths[i],
+                     mSipPSM->missCleavageSiteNumbers[i]) =
+                getSeqLengthAndMissCleavageSiteNumber(
+                    mSipPSM->originalPeptides[i]);
+            mSipPSM->PTMnumbers[i] =
+                getPTMnumber(mSipPSM->identifiedPeptides[i]);
+
+            mSipPSM->mzShiftFromisolationWindowCenters[i] = std::abs(
+                mSipPSM->isolationWindowCenterMZs[i] -
+                mSipPSM->measuredParentMasses[i] /
+                    mSipPSM->parentCharges[i] -
+                ProNovoConfig::getProtonMass());
+            std::tie(mSipPSM->isotopicMassWindowShifts[i],
+                     mSipPSM->massErrors[i]) = getMassWindowShiftAndError(
+                mSipPSM->measuredParentMasses[i],
+                mSipPSM->calculatedParentMasses[i],
+                mSipPSM->precursorNeutronMasses[i]);
+
+            mSipPSM->precursorIntensities[i] = 0;
+            for (const auto &peak : mSipPSM->isotopicPeakss[i])
+            {
+                mSipPSM->precursorIntensities[i] += peak.intensity;
+            }
+
+            mSipPSM->isotopicAbundanceDiffs[i] =
+                mSipPSM->MS1IsotopicAbundances[i] -
+                mSipPSM->MS2IsotopicAbundances[i];
+        }
+        catch (...)
+        {
+#pragma omp critical(sipros_pin_feature_error)
+            {
+                if (!featureError)
+                    featureError = std::current_exception();
+            }
+        }
+    }
+    if (featureError)
+        std::rethrow_exception(featureError);
 }

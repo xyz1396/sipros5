@@ -410,6 +410,10 @@ public:
 	static bool getPeptideMassWindows(double dPeptideMass,
 									  double precursorNeutronMass,
 									  vector<pair<double, double>> &vpPeptideMassWindows);
+	static const vector<int> &getParentMassWindows()
+	{
+		return viParentMassWindows;
+	}
 
 	// Return the active maximum number of variable PTMs per peptide.
 	static int getMaxPTMcount()

@@ -83,6 +83,7 @@ void slaveProcess(const std::vector<UnitOfWork> &workload, const sipros::Databas
 	int currentWorkId = 0;
 	int rank = 0;
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	sipros::SiprosSearchRunner runner;
 	while (true)
 	{
 		MPI_Recv(&currentWorkId, 1, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
@@ -94,7 +95,6 @@ void slaveProcess(const std::vector<UnitOfWork> &workload, const sipros::Databas
 		std::cout << "Slave process " << rank << " started " << work.scanFile
 				  << std::endl;
 		ProNovoConfig::iRank = rank;
-		sipros::SiprosSearchRunner runner;
 		const int result = runner.runScan(work.scanFile, args);
 		std::cout << "Slave process " << rank << " finished " << work.scanFile << std::endl;
 		MPI_Send(&result, 1, MPI_INT, 0, 0, MPI_COMM_WORLD);

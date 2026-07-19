@@ -143,16 +143,24 @@ class search:
         with open(self.fastaPath, 'r') as fasta, open(self.decoyPath, 'w') as output:
             sequence = ''
             header = ''
+            def decoy_sequence(value: str) -> str:
+                if self.element == 'R' and value:
+                    # Regular search explicitly models intact and excised
+                    # protein N termini.  Preserve the first target residue in
+                    # the decoy so those terminal proteoforms have a symmetric
+                    # target/decoy search space; SIP keeps its legacy reversal.
+                    return value[0] + value[:0:-1]
+                return value[::-1]
             for line in fasta:
                 if line.startswith('>'):
                     if header:
-                        output.write(header + '\n' + sequence[::-1] + '\n')
+                        output.write(header + '\n' + decoy_sequence(sequence) + '\n')
                     header = '>' + self.decoyPrefix + line[1:].strip()
                     sequence = ''
                 else:
                     sequence += line.strip()
             if header:
-                output.write(header + '\n' + sequence[::-1] + '\n')
+                output.write(header + '\n' + decoy_sequence(sequence) + '\n')
 
     def input_entries(self, input_path: str) -> list[str]:
         path = Path(input_path)
@@ -346,14 +354,126 @@ class search:
             for row in merged_rows:
                 merged.write("\t".join(row) + "\n")
 
-    def sipros_search(self):
+    def regular_fasta_search(self):
+        """Prepare caches, then search each H5 with one target/decoy pair."""
+        ptm_args = self.direct_ptm_args()
+        tolerance_args = (
+            f' --tolerance-ms1 {self.q(self.toleranceMS1)}'
+            f' --tolerance-ms2 {self.q(self.toleranceMS2)}'
+        )
+        output_root = Path(self.outPutPath)
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        chemistry_args = (
+            f'{tolerance_args}{ptm_args}'
+            ' --precursor-source ms1-neighborhood'
+        )
+        target_cache = output_root / 'target.sfi'
+        decoy_cache = output_root / 'decoy.sfi'
+
+        # Build/load both persistent caches first.  Unlike search jobs, these
+        # two preparation processes may receive fewer than eight cores when
+        # -t is small so they can remain concurrent while using the full
+        # requested CPU budget.
+        prepare_commands = [
+            (
+                f'{self.q(self.siprosPath)} search-fasta '
+                f'-fasta {self.q(self.fastaPath)} --prepare-only'
+                f'{chemistry_args} --fragment-index-cache '
+                f'{self.q(target_cache)}'
+            ),
+            (
+                f'{self.q(self.siprosPath)} search-fasta '
+                f'-fasta {self.q(self.decoyPath)} --prepare-only'
+                f'{chemistry_args} --fragment-index-cache '
+                f'{self.q(decoy_cache)}'
+            ),
+        ]
+        prepare_allocation = allocate_threads(
+            self.threadNumber,
+            len(prepare_commands),
+        )
+        self.log_thread_allocation(
+            'Sipros Regular FASTA cache preparation', prepare_allocation
+        )
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=prepare_allocation.worker_count) as executor:
+            futures = [
+                executor.submit(self.run_command_sipros, cmd, threads)
+                for cmd, threads in zip(
+                    prepare_commands, prepare_allocation.task_threads
+                )
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+
+        common_search_args = (
+            f' --top-psms-per-scan {self.topPsmsPerScan}'
+            f'{chemistry_args}'
+        )
+        search_pairs: list[tuple[str, str]] = []
+        merge_jobs: list[tuple[str, str, str]] = []
+        for base_name in self.base_names:
+            scan_arg = f' -f {self.q(self.hdf5_paths[base_name])}'
+            sample_dir = output_root / base_name
+            sample_dir.mkdir(parents=True, exist_ok=True)
+            target_pin_name = f'{base_name}_target.pin'
+            decoy_pin_name = f'{base_name}_decoy.pin'
+            search_pairs.append((
+                (
+                    f'{self.q(self.siprosPath)} search-fasta '
+                    f'-fasta {self.q(self.fastaPath)}{scan_arg} '
+                    f'-o {self.q(sample_dir)} '
+                    f'--pin-output {self.q(target_pin_name)} --pin-label 1'
+                    f'{common_search_args} --fragment-index-cache '
+                    f'{self.q(target_cache)}'
+                ),
+                (
+                    f'{self.q(self.siprosPath)} search-fasta '
+                    f'-fasta {self.q(self.decoyPath)}{scan_arg} '
+                    f'-o {self.q(sample_dir)} '
+                    f'--pin-output {self.q(decoy_pin_name)} --pin-label -1'
+                    f'{common_search_args} --fragment-index-cache '
+                    f'{self.q(decoy_cache)}'
+                ),
+            ))
+            merge_jobs.append((
+                str(sample_dir / target_pin_name),
+                str(sample_dir / decoy_pin_name),
+                str(sample_dir / f'{base_name}.pin'),
+            ))
+
+        # Regular search is most efficient with two cache-query processes.
+        # Split the complete -t budget between the target and decoy for one
+        # sample, wait for both, then advance to the next sample.  With an odd
+        # budget the target receives the extra thread.  A one-thread budget
+        # necessarily runs the pair sequentially rather than oversubscribing.
+        search_allocation = allocate_threads(self.threadNumber, 2)
+        self.log_thread_allocation(
+            'Sipros Regular FASTA paired target/decoy cache-H5 search',
+            search_allocation,
+        )
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=search_allocation.worker_count) as executor:
+            for commands, merge_job in zip(search_pairs, merge_jobs):
+                futures = [
+                    executor.submit(self.run_command_sipros, command, threads)
+                    for command, threads in zip(
+                        commands, search_allocation.task_threads
+                    )
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
+                self.merge_pin_files(*merge_job)
+
+    def sip_fasta_search(self):
+        """Keep SIP FASTA assignment on Raxport's precursor candidates."""
         sip_args = self.direct_sip_args()
         ptm_args = self.direct_ptm_args()
         tolerance_args = (
             f' --tolerance-ms1 {self.q(self.toleranceMS1)}'
             f' --tolerance-ms2 {self.q(self.toleranceMS2)}'
         )
-        direct_top_psms_per_scan = self.topPsmsPerScan
         commands: list[str] = []
         merge_jobs: list[tuple[str, str, str]] = []
         for base_name in self.base_names:
@@ -367,12 +487,12 @@ class search:
             commands.append(
                 f'{self.q(self.siprosPath)} search-fasta -fasta {self.q(self.fastaPath)} '
                 f'-f {self.q(hdf5_path)} -o {self.q(sample_dir)} --pin-output {self.q(target_pin_name)}{sip_args} '
-                f'--pin-label 1 --top-psms-per-scan {direct_top_psms_per_scan}{tolerance_args}{ptm_args}'
+                f'--pin-label 1 --top-psms-per-scan {self.topPsmsPerScan}{tolerance_args}{ptm_args}'
             )
             commands.append(
                 f'{self.q(self.siprosPath)} search-fasta -fasta {self.q(self.decoyPath)} '
                 f'-f {self.q(hdf5_path)} -o {self.q(sample_dir)} --pin-output {self.q(decoy_pin_name)}{sip_args} '
-                f'--pin-label -1 --top-psms-per-scan {direct_top_psms_per_scan}{tolerance_args}{ptm_args}'
+                f'--pin-label -1 --top-psms-per-scan {self.topPsmsPerScan}{tolerance_args}{ptm_args}'
             )
             merge_jobs.append((target_pin, decoy_pin, final_pin))
         allocation = allocate_threads(
@@ -395,6 +515,12 @@ class search:
                     future.result()
         for target_pin, decoy_pin, final_pin in merge_jobs:
             self.merge_pin_files(target_pin, decoy_pin, final_pin)
+
+    def sipros_search(self):
+        if self.element == 'R':
+            self.regular_fasta_search()
+        else:
+            self.sip_fasta_search()
 
     def resolve_or_convert_unlabeled_hdf5(self) -> str:
         if self.unlabeledInput is None or self.unlabeledInput == '':
