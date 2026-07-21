@@ -107,6 +107,7 @@ function(sipros_static_link_options target_name)
 endfunction()
 
 add_subdirectory(sipros)
+add_subdirectory(aerith)
 
 if(MSVC)
   set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MT")

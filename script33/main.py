@@ -9,7 +9,7 @@ from search import search
 from filter import filter
 from assembly import assembly
 from thread_allocation import (
-    MIN_SIPROS_OR_PERCOLATOR_THREADS,
+    MIN_SIPROS_THREADS,
     available_cpu_count,
     effective_thread_count,
 )
@@ -25,7 +25,7 @@ class SIPROSWorkflow:
         self.defaultToolsPaths: dict[str, str] = {
             'raxport': f'{upper_path}/tools/Raxport-linux-x64',
             'sipros': f'{upper_path}/tools/sipros',
-            'filter': f'{upper_path}/tools/percolator',
+            'filter': f'{upper_path}/tools/aerith',
             'deepfilter': f'{upper_path}/tools/deepfilter',
             'assembly': f'{upper_path}/tools/philosopher-v5.1.2',
             'metaLP': f'{upper_path}/tools/metaLP',
@@ -106,7 +106,7 @@ citation:
                                   "(default: all CPUs available to this process). "
                                   "Regular FASTA target/decoy searches split the "
                                   "budget between two processes; other Sipros and "
-                                  "Percolator jobs receive at least 8 threads when "
+                                  "Sipros search jobs receive at least 8 threads when "
                                   "the budget permits"))
         parser.add_argument('--topN', '--top-psms-per-scan', dest='topN', required=False, type=int, default=8,
                             help="Top PSM rows retained per scan for target and decoy searches before merge (default: 8)")
@@ -132,10 +132,10 @@ citation:
                 f"using {available_threads} threads"
             )
         args.thread = effective_thread_count(args.thread, available_threads)
-        if args.thread < MIN_SIPROS_OR_PERCOLATOR_THREADS:
+        if args.thread < MIN_SIPROS_THREADS:
             warnings.warn(
-                f"The {MIN_SIPROS_OR_PERCOLATOR_THREADS}-thread minimum for "
-                f"Sipros and Percolator cannot fit within a {args.thread}-thread "
+                f"The {MIN_SIPROS_THREADS}-thread minimum for "
+                f"Sipros cannot fit within a {args.thread}-thread "
                 "workflow budget; those jobs will run serially using the full budget"
             )
         if args.topN <= 0:
@@ -218,16 +218,17 @@ citation:
 
         sipros_filter = filter(baseNames=sipros_search.base_names,
                                outputPath=self.args.output,
-                               percolatorPath=self.toolsPaths['filter'],
+                               aerithPath=self.toolsPaths['filter'],
                                threadNumber=sipros_search.threadNumber,
                                logger=self.logger,
+                               decoyPrefix=sipros_search.decoyPrefix,
                                ignorePCT=self.args.ignorePCT,
                                dryrun=self.args.dryrun)
         sipros_filter.run()
 
         sipros_assembly = assembly(baseNames=sipros_search.base_names,
                                    philosopherPath=self.toolsPaths['assembly'],
-                                   percolatorPath=self.toolsPaths['filter'],
+                                   aerithPath=self.toolsPaths['filter'],
                                    fastaPath=self.args.fasta,
                                    decoyPath=sipros_search.decoyPath,
                                    outputPath=self.args.output,

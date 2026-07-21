@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import os
 
 
-MIN_SIPROS_OR_PERCOLATOR_THREADS = 8
+MIN_SIPROS_THREADS = 8
 
 
 @dataclass(frozen=True)

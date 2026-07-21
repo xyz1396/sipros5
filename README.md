@@ -122,7 +122,9 @@ spacing.
 - For each raw-file subdirectory:
   - `<sample>.h5`: Raxport scan data.
   - `<sample>_target.pin`, `<sample>_decoy.pin`: target and decoy search intermediates.
-  - `<sample>.pin`: merged target/decoy PIN consumed by Percolator.
+  - `<sample>_target_psms.tsv`, `<sample>_decoy_psms.tsv`: Aerith reranked score tables.
+  - `<sample>_filtered_psms.tsv`: Aerith 1% FDR PSMs with original search and RT features.
+  - `<sample>.pep.xml`: Aerith pepXML consumed directly by Philosopher.
   - `peptide.tsv`, `protein.tsv`: peptides, and proteins passing 1% FDR decoy filtering.
   - `*_filtered_psms.tsv`: PSMs passing 1% FDR decoy filtering with `isotopicPeakNumbers`, `MS1IsotopeFitScore`, `MS1IsotopicAbundances`, and `MS2IsotopicAbundances`.
 

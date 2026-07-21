@@ -217,16 +217,14 @@ def run_flat_fasta_layout(scan_file: Path) -> None:
     hdf5_path = sample_dir / f"{base}.h5"
     target_pin = sample_dir / f"{base}_target.pin"
     decoy_pin = sample_dir / f"{base}_decoy.pin"
-    merged_pin = sample_dir / f"{base}.pin"
-    for path in (hdf5_path, target_pin, decoy_pin, merged_pin):
+    for path in (hdf5_path, target_pin, decoy_pin):
         assert path.is_file(), f"Missing flat FASTA-search output: {path}"
     for legacy_dir in ("hdf5", "target", "decoy"):
         assert not (sample_dir / legacy_dir).exists(), f"Legacy output directory exists: {legacy_dir}"
 
     target_header, target_rows = read_pin(target_pin)
     decoy_header, decoy_rows = read_pin(decoy_pin)
-    merged_header, merged_rows = read_pin(merged_pin)
-    assert target_header == decoy_header == merged_header
+    assert target_header == decoy_header
     assert target_header.count("MS1IsotopeFitScore") == 1
     raw_count_index = target_header.index("isotopicPeakNumbers")
     fit_score_index = target_header.index("MS1IsotopeFitScore")
@@ -235,7 +233,7 @@ def run_flat_fasta_layout(scan_file: Path) -> None:
     label_index = target_header.index("Label")
     assert all(row[label_index] == "1" for row in target_rows)
     assert all(row[label_index] == "-1" for row in decoy_rows)
-    assert len(merged_rows) == len(target_rows) + len(decoy_rows)
+    assert not (sample_dir / f"{base}.pin").exists()
 
 
 def main() -> None:

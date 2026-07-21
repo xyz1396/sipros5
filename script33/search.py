@@ -6,7 +6,7 @@ import shlex
 from pathlib import Path
 from command_runner import run_logged_command
 from thread_allocation import (
-    MIN_SIPROS_OR_PERCOLATOR_THREADS,
+    MIN_SIPROS_THREADS,
     ThreadAllocation,
     allocate_threads,
     available_cpu_count,
@@ -280,80 +280,6 @@ class search:
             f' --fixed-ptm {self.q(ptm)}' for ptm in (self.fixedPtms or [])
         )
 
-    def pin_score_value(self, row: list[str], score_idx: int) -> float:
-        try:
-            return float(row[score_idx])
-        except (ValueError, IndexError):
-            return float("-inf")
-
-    def pin_spec_id_with_rank(self, spec_id: str, rank: int) -> str:
-        if "." not in spec_id:
-            return spec_id
-        prefix, _ = spec_id.rsplit(".", 1)
-        return f"{prefix}.{rank}"
-
-    def merge_pin_files(self, target_pin: str, decoy_pin: str, final_pin: str):
-        os.makedirs(os.path.dirname(final_pin), exist_ok=True)
-        header: str | None = None
-        rows: list[list[str]] = []
-        for pin_path in (target_pin, decoy_pin):
-            if not os.path.exists(pin_path):
-                raise FileNotFoundError(f"Expected direct search PIN was not created: {pin_path}")
-            with open(pin_path, "r") as pin_file:
-                current_header = pin_file.readline()
-                if not current_header:
-                    raise ValueError(f"PIN file is empty: {pin_path}")
-                if header is None:
-                    header = current_header
-                elif current_header != header:
-                    raise ValueError(f"PIN header mismatch while merging {pin_path}")
-                for line in pin_file:
-                    if line.strip():
-                        rows.append(line.rstrip("\n").split("\t"))
-        if header is None:
-            raise ValueError("No PIN rows were available to merge")
-
-        columns = header.rstrip("\n").split("\t")
-        column_index = {name: idx for idx, name in enumerate(columns)}
-        required_columns = ["SpecId", "ScanNr", "ranks", "WDPscores"]
-        missing_columns = [name for name in required_columns if name not in column_index]
-        if missing_columns:
-            raise ValueError(f"Merged PIN is missing required columns: {missing_columns}")
-
-        spec_idx = column_index["SpecId"]
-        scan_idx = column_index["ScanNr"]
-        rank_idx = column_index["ranks"]
-        score_idx = column_index["WDPscores"]
-        diff_idx = column_index.get("diffScores")
-        grouped_rows: dict[str, list[list[str]]] = {}
-        for row in rows:
-            if len(row) != len(columns):
-                raise ValueError(f"PIN row has {len(row)} fields but expected {len(columns)}: {row}")
-            grouped_rows.setdefault(row[scan_idx], []).append(row)
-
-        def scan_sort_key(scan: str):
-            try:
-                return (0, int(scan))
-            except ValueError:
-                return (1, scan)
-
-        merged_rows: list[list[str]] = []
-        for scan in sorted(grouped_rows, key=scan_sort_key):
-            scan_rows = grouped_rows[scan]
-            scan_rows.sort(key=lambda row: self.pin_score_value(row, score_idx), reverse=True)
-            top_score = self.pin_score_value(scan_rows[0], score_idx) if scan_rows else 0.0
-            for rank, row in enumerate(scan_rows, start=1):
-                row[rank_idx] = str(rank)
-                row[spec_idx] = self.pin_spec_id_with_rank(row[spec_idx], rank)
-                if diff_idx is not None:
-                    row[diff_idx] = f"{top_score - self.pin_score_value(row, score_idx):.10g}"
-                merged_rows.append(row)
-
-        with open(final_pin, "w") as merged:
-            merged.write(header)
-            for row in merged_rows:
-                merged.write("\t".join(row) + "\n")
-
     def regular_fasta_search(self):
         """Prepare caches, then search each H5 with one target/decoy pair."""
         ptm_args = self.direct_ptm_args()
@@ -412,7 +338,6 @@ class search:
             f'{chemistry_args}'
         )
         search_pairs: list[tuple[str, str]] = []
-        merge_jobs: list[tuple[str, str, str]] = []
         for base_name in self.base_names:
             scan_arg = f' -f {self.q(self.hdf5_paths[base_name])}'
             sample_dir = output_root / base_name
@@ -437,11 +362,6 @@ class search:
                     f'{self.q(decoy_cache)}'
                 ),
             ))
-            merge_jobs.append((
-                str(sample_dir / target_pin_name),
-                str(sample_dir / decoy_pin_name),
-                str(sample_dir / f'{base_name}.pin'),
-            ))
 
         # Regular search is most efficient with two cache-query processes.
         # Split the complete -t budget between the target and decoy for one
@@ -455,7 +375,7 @@ class search:
         )
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=search_allocation.worker_count) as executor:
-            for commands, merge_job in zip(search_pairs, merge_jobs):
+            for commands in search_pairs:
                 futures = [
                     executor.submit(self.run_command_sipros, command, threads)
                     for command, threads in zip(
@@ -464,7 +384,6 @@ class search:
                 ]
                 for future in concurrent.futures.as_completed(futures):
                     future.result()
-                self.merge_pin_files(*merge_job)
 
     def sip_fasta_search(self):
         """Keep SIP FASTA assignment on Raxport's precursor candidates."""
@@ -475,15 +394,11 @@ class search:
             f' --tolerance-ms2 {self.q(self.toleranceMS2)}'
         )
         commands: list[str] = []
-        merge_jobs: list[tuple[str, str, str]] = []
         for base_name in self.base_names:
             hdf5_path = self.hdf5_paths[base_name]
             sample_dir = f'{self.outPutPath}/{base_name}'
             target_pin_name = f'{base_name}_target.pin'
             decoy_pin_name = f'{base_name}_decoy.pin'
-            target_pin = f'{sample_dir}/{target_pin_name}'
-            decoy_pin = f'{sample_dir}/{decoy_pin_name}'
-            final_pin = f'{sample_dir}/{base_name}.pin'
             commands.append(
                 f'{self.q(self.siprosPath)} search-fasta -fasta {self.q(self.fastaPath)} '
                 f'-f {self.q(hdf5_path)} -o {self.q(sample_dir)} --pin-output {self.q(target_pin_name)}{sip_args} '
@@ -494,11 +409,10 @@ class search:
                 f'-f {self.q(hdf5_path)} -o {self.q(sample_dir)} --pin-output {self.q(decoy_pin_name)}{sip_args} '
                 f'--pin-label -1 --top-psms-per-scan {self.topPsmsPerScan}{tolerance_args}{ptm_args}'
             )
-            merge_jobs.append((target_pin, decoy_pin, final_pin))
         allocation = allocate_threads(
             self.threadNumber,
             len(commands),
-            minimum_threads_per_task=MIN_SIPROS_OR_PERCOLATOR_THREADS,
+            minimum_threads_per_task=MIN_SIPROS_THREADS,
         )
         self.log_thread_allocation('Sipros FASTA search', allocation)
         if allocation.worker_count > 0:
@@ -513,8 +427,6 @@ class search:
                 ]
                 for future in concurrent.futures.as_completed(futures):
                     future.result()
-        for target_pin, decoy_pin, final_pin in merge_jobs:
-            self.merge_pin_files(target_pin, decoy_pin, final_pin)
 
     def sipros_search(self):
         if self.element == 'R':
@@ -599,7 +511,7 @@ class search:
         allocation = allocate_threads(
             self.threadNumber,
             len(samples),
-            minimum_threads_per_task=MIN_SIPROS_OR_PERCOLATOR_THREADS,
+            minimum_threads_per_task=MIN_SIPROS_THREADS,
         )
         self.log_thread_allocation('Sipros spectra search', allocation)
         if allocation.worker_count == 0:

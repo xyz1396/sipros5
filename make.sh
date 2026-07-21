@@ -42,10 +42,10 @@ CONDA_BUILD_DIR="$BUILD_ROOT/conda"
 CONDA_DEBUG_BUILD_DIR="$BUILD_ROOT/conda-debug"
 RUNTIME_TOOL_BINARIES=(
     Raxport-linux-x64
-    percolator
     philosopher-v5.1.2
     sipros
     siprosMPI
+    aerith
     deepfilter
     metaLP
     ionquant
@@ -194,7 +194,7 @@ verify_fully_dynamic_conda() {
 
 stage_publish_tools() {
     local source_bin_dir="$1"
-    local binaries=(sipros siprosMPI)
+    local binaries=(sipros siprosMPI aerith)
     local destinations=("$REPO_DIR/bin" "$REPO_DIR/tools")
     local binary destination tmpdir
 

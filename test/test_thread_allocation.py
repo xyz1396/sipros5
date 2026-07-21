@@ -351,8 +351,6 @@ class WorkflowAllocationTests(unittest.TestCase):
             workflow.run_command_sipros = (
                 lambda command, threads: captured.append((command, threads))
             )
-            merged: list[tuple[str, str, str]] = []
-            workflow.merge_pin_files = lambda *arguments: merged.append(arguments)
 
             workflow.sipros_search()
 
@@ -418,7 +416,7 @@ class WorkflowAllocationTests(unittest.TestCase):
                 output_paths,
                 {str(Path(output) / name) for name in workflow.base_names},
             )
-            self.assertEqual(len(merged), 3)
+            self.assertFalse(any(Path(output).glob('*/*.pin')))
             self.assertFalse((Path(output) / "regular_fasta_search").exists())
 
     def test_regular_fasta_pairs_split_odd_budget_for_every_sample(self) -> None:
@@ -435,8 +433,6 @@ class WorkflowAllocationTests(unittest.TestCase):
             workflow.run_command_sipros = (
                 lambda command, threads: captured.append((command, threads))
             )
-            merged: list[tuple[str, str, str]] = []
-            workflow.merge_pin_files = lambda *arguments: merged.append(arguments)
 
             workflow.sipros_search()
 
@@ -458,7 +454,6 @@ class WorkflowAllocationTests(unittest.TestCase):
                     "two": {"1": 3, "-1": 2},
                 },
             )
-            self.assertEqual(len(merged), 2)
 
     def test_regular_fasta_finishes_each_pair_before_next_sample(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -495,7 +490,6 @@ class WorkflowAllocationTests(unittest.TestCase):
                     active_counts[sample] -= 1
 
             workflow.run_command_sipros = fake_run
-            workflow.merge_pin_files = lambda *_arguments: None
 
             workflow.sipros_search()
 
@@ -517,7 +511,6 @@ class WorkflowAllocationTests(unittest.TestCase):
             workflow.run_command_sipros = (
                 lambda command, _threads: captured.append(command)
             )
-            workflow.merge_pin_files = lambda *_arguments: None
 
             workflow.sipros_search()
 
@@ -555,7 +548,6 @@ class WorkflowAllocationTests(unittest.TestCase):
             workflow.run_command_sipros = (
                 lambda command, threads: captured.append((command, threads))
             )
-            workflow.merge_pin_files = lambda *_arguments: None
 
             workflow.sipros_search()
 
@@ -636,7 +628,6 @@ class WorkflowAllocationTests(unittest.TestCase):
             completed.parent.mkdir(parents=True)
             completed.write_bytes(b"x" * (500 * 1024 + 1))
             captured: list[int] = []
-            merged: list[tuple[str, str, str]] = []
 
             def fake_run(command: str, threads: int) -> None:
                 captured.append(threads)
@@ -657,14 +648,10 @@ class WorkflowAllocationTests(unittest.TestCase):
                 )
 
             workflow.run_command_sipros = fake_run
-            workflow.merge_pin_files = (
-                lambda *arguments: merged.append(arguments)
-            )
 
             workflow.sipros_search()
 
             self.assertEqual(captured, [8, 8, 8, 8])
-            self.assertEqual(len(merged), 1)
             self.assertEqual(completed.read_bytes(), b"new target")
             self.assertEqual(
                 (completed.parent / "sample_decoy.pin").read_bytes(),
@@ -692,11 +679,12 @@ class WorkflowAllocationTests(unittest.TestCase):
             self.assertEqual(captured[0][1], 6)
             self.assertNotIn(" -j ", captured[0][0])
 
-    def test_filter_divides_percolator_threads(self) -> None:
+    def test_filter_runs_one_cross_sample_aerith_team(self) -> None:
         workflow = object.__new__(filter_module.filter)
         workflow.baseNames = ["one", "two", "three"]
         workflow.outPutPath = "/output"
-        workflow.percolatorPath = "percolator"
+        workflow.aerithPath = "aerith"
+        workflow.decoyPrefix = "Decoy_"
         workflow.threadNumber = 16
         workflow.logger = null_logger(f"filter-allocation-{id(workflow)}")
         workflow.ignorePCT = False
@@ -714,17 +702,16 @@ class WorkflowAllocationTests(unittest.TestCase):
                 filter_module, "run_logged_command", side_effect=fake_logged_command):
             workflow.run()
 
-        command_threads = sorted(
-            int(re.search(r"--num-threads (\d+)", command).group(1))
-            for command, _, _ in captured
-        )
-        self.assertEqual(command_threads, [8, 8, 8])
-        self.assertEqual(
-            sorted(int(environment["OMP_NUM_THREADS"])
-                   for _, environment, _ in captured),
-            [8, 8, 8],
-        )
-        self.assertEqual(sorted(cores for _, _, cores in captured), [8, 8, 8])
+        self.assertEqual(len(captured), 1)
+        command, environment, cores = captured[0]
+        arguments = shlex.split(command)
+        self.assertEqual(arguments[0], "aerith")
+        self.assertEqual(arguments.count("--target-pin"), 3)
+        self.assertEqual(arguments.count("--decoy-pin"), 3)
+        self.assertEqual(arguments.count("--output-prefix"), 3)
+        self.assertNotIn("--augmented-pin", arguments)
+        self.assertEqual(int(environment["OMP_NUM_THREADS"]), 16)
+        self.assertEqual(cores, 16)
 
     def test_philosopher_jobs_receive_balanced_gomaxprocs(self) -> None:
         workflow = object.__new__(assembly_module.assembly)
@@ -745,86 +732,9 @@ class WorkflowAllocationTests(unittest.TestCase):
         self.assertEqual(sorted(threads for _, _, threads in captured), [5, 5, 6])
 
 
-class PepXmlModificationTests(unittest.TestCase):
-    def test_protein_n_terminal_acetylation_survives_pepxml_conversion(self) -> None:
-        with tempfile.TemporaryDirectory() as output:
-            sample_dir = Path(output, "sample")
-            sample_dir.mkdir()
-            workflow = object.__new__(assembly_module.assembly)
-            workflow.outputPath = output
-            workflow.decoyPrefix = "Decoy_"
-            workflow.logger = null_logger(f"assembly-pepxml-{id(workflow)}")
-            psms = assembly_module.pd.DataFrame([
-                {
-                    "ScanNr": 101,
-                    "parentCharges": 2,
-                    "SpecId": "sample.101.1",
-                    "ExpMass": 1000.0,
-                    "retentiontime": 12.5,
-                    "Peptide": "[%PEPTIDE]K",
-                    "Proteins": "{protein_one}",
-                    "massErrors": 0.001,
-                    "missCleavageSiteNumbers": 0,
-                    "ranks": 1,
-                    "posterior_error_prob": 0.01,
-                    "score": 2.0,
-                },
-                {
-                    "ScanNr": 102,
-                    "parentCharges": 2,
-                    "SpecId": "sample.102.1",
-                    "ExpMass": 900.0,
-                    "retentiontime": 13.5,
-                    # '%' after K is a residue acetylation, not the special
-                    # protein-N-terminal proteoform.
-                    "Peptide": "[AK%]",
-                    "Proteins": "{protein_two}",
-                    "massErrors": 0.002,
-                    "missCleavageSiteNumbers": 0,
-                    "ranks": 1,
-                    "posterior_error_prob": 0.02,
-                    "score": 1.5,
-                },
-            ])
-
-            workflow.dataframe_to_pepxml(psms, "sample")
-
-            tree = assembly_module.etree.parse(
-                str(sample_dir / "sample.pep.xml")
-            )
-            terminal_modifications = tree.xpath(
-                "//search_summary/terminal_modification"
-            )
-            self.assertEqual(len(terminal_modifications), 1)
-            self.assertEqual(
-                terminal_modifications[0].get("massdiff"), "42.010565"
-            )
-            self.assertEqual(terminal_modifications[0].get("terminus"), "N")
-            self.assertEqual(
-                terminal_modifications[0].get("protein_terminus"), "Y"
-            )
-            summary_children = [
-                child.tag for child in tree.xpath("//search_summary")[0]
-            ]
-            self.assertLess(
-                summary_children.index("terminal_modification"),
-                summary_children.index("parameter"),
-            )
-
-            acetyl_hit = tree.xpath("//search_hit[@peptide='PEPTIDE']")[0]
-            modification_info = acetyl_hit.find("modification_info")
-            self.assertIsNotNone(modification_info)
-            self.assertEqual(
-                modification_info.get("modified_peptide"), "n[43]PEPTIDE"
-            )
-            self.assertAlmostEqual(
-                float(modification_info.get("mod_nterm_mass")),
-                43.018390,
-                places=6,
-            )
-
-            lysine_acetyl_hit = tree.xpath("//search_hit[@peptide='AK']")[0]
-            self.assertIsNone(lysine_acetyl_hit.find("modification_info"))
+class NativePepXmlOwnershipTests(unittest.TestCase):
+    def test_python_assembly_does_not_rewrite_aerith_pepxml(self) -> None:
+        self.assertFalse(hasattr(assembly_module.assembly, "dataframe_to_pepxml"))
 
 
 if __name__ == "__main__":

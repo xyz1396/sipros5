@@ -19,24 +19,13 @@ from thread_allocation import (
 configure_process_worker(1)
 
 import pandas as pd
-from lxml import etree
-
-
-# pepXML stores an N-terminal modification as the absolute mass of the
-# modified terminus (H + modification), while Sipros writes the modification
-# delta as a leading '%' token in the bracketed peptide body.
-PROTEIN_N_TERM_ACETYL_SHIFT = 42.010565
-PEPTIDE_N_TERM_HYDROGEN_MASS = 1.007825
-PROTEIN_N_TERM_ACETYL_MASS = (
-    PROTEIN_N_TERM_ACETYL_SHIFT + PEPTIDE_N_TERM_HYDROGEN_MASS
-)
 
 
 class assembly:
-    def __init__(self, baseNames: list[str], philosopherPath:str, percolatorPath:str, fastaPath:str, decoyPath:str, outputPath: str,
+    def __init__(self, baseNames: list[str], philosopherPath:str, aerithPath:str, fastaPath:str, decoyPath:str, outputPath: str,
                 threadNumber: int, logger: Logger, element:str, negative_control = "", label_threshold = 2.0, decoyPrefix: str = "Decoy_") -> None:
         self.philosopherPath = philosopherPath
-        self.percolatorPath = percolatorPath
+        self.aerithPath = aerithPath
         self.fastaPath = fastaPath
         self.decoyPath = decoyPath
         self.baseNames = baseNames
@@ -100,124 +89,6 @@ class assembly:
                 output.write("\n")
             self.write_sanitized_fasta(decoyPath, output)
         
-    def intergrate_filtered_psms_with_feature(self, baseName: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-        self.logger.info(f'Intergrating filtered psms with feature for {baseName}')
-        target = pd.read_csv(f'{self.outputPath}/{baseName}/{baseName}_target_psms.tsv', sep='\t')
-        decoy = pd.read_csv(f'{self.outputPath}/{baseName}/{baseName}_decoy_psms.tsv', sep='\t')
-        pin = pd.read_csv(f'{self.outputPath}/{baseName}/{baseName}.pin', sep='\t')
-        # for filtered PSMs
-        filtered_target = target[target['q-value'] <= 0.01]
-        filtered_decoy = decoy[decoy['q-value'] <= 0.01]
-        psm = pd.concat([filtered_target, filtered_decoy], ignore_index=True)
-        psm = psm[['PSMId', 'score', 'q-value', 'posterior_error_prob']]
-        psm = pd.merge(psm, pin, left_on='PSMId', right_on='SpecId', how='left')
-        psm = psm.drop(columns=['SpecId'])
-        psm['ScanNr'] = psm['ScanNr'].astype(int)
-        psm.sort_values(by='ScanNr', inplace=True)
-        psm.to_csv(f'{self.outputPath}/{baseName}/{baseName}_filtered_psms.tsv', sep='\t', index=False)
-        # for philosopher input
-        filtered_target = target[target['posterior_error_prob'] < 0.5]
-        if self.decoyPrefix == 'DECOY_':
-            filtered_decoy = decoy.iloc[0:0]
-        else:
-            filtered_decoy = decoy[decoy['posterior_error_prob'] < 0.5]
-        psm_phi = pd.concat([filtered_target, filtered_decoy], ignore_index=True)
-        psm_phi = psm_phi[['PSMId', 'score', 'q-value', 'posterior_error_prob']]
-        psm_phi = pd.merge(psm_phi, pin, left_on='PSMId', right_on='SpecId', how='left')
-        psm_phi['ScanNr'] = psm_phi['ScanNr'].astype(int)
-        psm_phi.sort_values(by='ScanNr', inplace=True)
-        return psm, psm_phi
-    
-    def dataframe_to_pepxml(self, psm: pd.DataFrame, baseName: str) -> None:
-        self.logger.info(f'Converting dataframe to pepxml for {baseName}')
-        root = etree.Element("msms_pipeline_analysis")
-        analysis_summary = etree.SubElement(root, "analysis_summary")
-        msms_run_summary = etree.SubElement(root, "msms_run_summary")
-        search_summary = etree.SubElement(msms_run_summary, "search_summary", precursor_mass_type="monoisotopic",
-                                          fragment_mass_type="monoisotopic", search_engine="X! Tandem", search_engine_version="Sipros")
-        outputPath = os.path.abspath(self.outputPath)
-        search_database = etree.SubElement(search_summary, "search_database", local_path=f'{outputPath}/targetDecoy.faa', type="AA")
-        etree.SubElement(
-            search_summary,
-            "terminal_modification",
-            terminus="N",
-            massdiff=f"{PROTEIN_N_TERM_ACETYL_SHIFT:.6f}",
-            mass=f"{PROTEIN_N_TERM_ACETYL_MASS:.6f}",
-            variable="Y",
-            protein_terminus="Y",
-            description="Protein N-terminal acetylation",
-        )
-        parameter = etree.SubElement(search_summary, "parameter", name="database_name", value=f'{outputPath}/targetDecoy.faa')
-        for i, row in psm.iterrows():
-            spectrum_query = etree.SubElement(msms_run_summary, "spectrum_query", 
-                                            start_scan=str(row['ScanNr']), 
-                                            assumed_charge=str(row['parentCharges']), 
-                                            spectrum=str(row['SpecId']), 
-                                            end_scan=str(row['ScanNr']), 
-                                            index=str(i), 
-                                            precursor_neutral_mass=str(row['ExpMass']), 
-                                            retention_time_sec=str(row['retentiontime']))
-            search_result = etree.SubElement(spectrum_query, "search_result")
-            # split peptide sequence by "[" and "]" to get previous, current and next amino acids
-            seqs = re.split(r'[\[\]]', row['Peptide']) 
-            if len(seqs) < 3:
-                raise ValueError(f"Unexpected peptide format: {row['Peptide']}")
-            # handle terminal amino acids to avoid empty strings making crash in philosopher
-            if not seqs[0] or seqs[0].strip() == "":
-                seqs[0] = "-"
-            if not seqs[2] or seqs[2].strip() == "":
-                seqs[2] = "-"
-            sipros_seq = seqs[1]
-            protein_n_term_acetylated = sipros_seq.startswith("%")
-            # remove PTM in the pep seq
-            seq = re.sub(r'[^a-zA-Z]', '', sipros_seq)
-            pros = [self.sanitize_protein_id(pro.strip()) for pro in row['Proteins'][1:-1].split(",") if pro.strip()]
-            if not pros:
-                continue
-            search_hit = etree.SubElement(search_result, "search_hit", 
-                                        peptide=seq, 
-                                        massdiff=str(row['massErrors']), 
-                                        calc_neutral_pep_mass=str(row['ExpMass']), 
-                                        num_missed_cleavages=str(row['missCleavageSiteNumbers']), 
-                                        num_tol_term="2", 
-                                        protein_descr=pros[0], 
-                                        num_tot_proteins=str(len(pros)), 
-                                        hit_rank=str(row['ranks']), 
-                                        protein=pros[0], 
-                                        peptide_prev_aa=seqs[0], 
-                                        peptide_next_aa=seqs[2],
-                                        is_rejected="0")
-            for k in range(1, len(pros)):
-                alternative_protein = etree.SubElement(search_hit, "alternative_protein", 
-                                                    protein_descr=pros[k], 
-                                                    protein=pros[k], 
-                                                    peptide_prev_aa=seqs[0], 
-                                                    peptide_next_aa=seqs[2], 
-                                                    num_tol_term="2")
-            if protein_n_term_acetylated:
-                etree.SubElement(
-                    search_hit,
-                    "modification_info",
-                    modified_peptide=f"n[43]{seq}",
-                    mod_nterm_mass=f"{PROTEIN_N_TERM_ACETYL_MASS:.6f}",
-                )
-            prob = str(1 - row['posterior_error_prob'])
-            analysis_result = etree.SubElement(search_hit, "analysis_result", analysis="peptideprophet")
-            hyperscore = etree.SubElement(search_hit, "hyperscore", value=str(row['score']))
-            nextscore = etree.SubElement(search_hit, "nextscore", value="0")
-            expect = etree.SubElement(search_hit, "expect", value="0")
-            peptideprophet_result = etree.SubElement(analysis_result, "peptideprophet_result", 
-                                                    probability=prob, 
-                                                    all_ntt_prob=f"({prob},{prob},{prob})")
-
-        tree = etree.ElementTree(root)
-        tree.write(f"{self.outputPath}/{baseName}/{baseName}.pep.xml", pretty_print=True, xml_declaration=True, encoding="UTF-8")
-        
-    def intergrate_and_convert(self, baseName: str) -> tuple[str, pd.DataFrame]:
-        psm, psm_phi = self.intergrate_filtered_psms_with_feature(baseName)
-        self.dataframe_to_pepxml(psm_phi, baseName)
-        return baseName, psm
-        
     def filterSIPlabeledPSMs(self, filteredPSMsDict: dict[str, pd.DataFrame]) -> pd.DataFrame:
         """
         Merge all filtered PSMs with SIP labeling information.
@@ -241,7 +112,10 @@ class assembly:
         
         # Process each sample
         for baseName in self.baseNames:
-            SIP_df = filteredPSMsDict[baseName].drop(columns=['score','posterior_error_prob'])
+            SIP_df = filteredPSMsDict[baseName].drop(
+                columns=['score', 'posterior_error_prob', 'sqrtAbsDeltaRT'],
+                errors='ignore',
+            )
             SIP_df = SIP_df[(SIP_df['q-value'] <= 0.01) & (SIP_df['Label'] == 1) &
                             (SIP_df['MS2IsotopicAbundances'] >= self.label_threshold)]
             SIP_df.drop(columns=['q-value'], inplace=True)
@@ -254,6 +128,10 @@ class assembly:
                 self.logger.info(f'Added {len(SIP_df)} decoy SIP labeled PSMs from {baseName}')
             else:
                 self.logger.info(f'Added {len(SIP_df)} target SIP labeled PSMs from {baseName}')
+            SIP_df['SampleName'] = baseName
+            SIP_df['MS1IsotopicAbundances'] = SIP_df['MS1IsotopicAbundances'].clip(
+                lower=0, upper=100
+            )
             SIP_df.rename(columns={'PSMId': 'SpecId'}, inplace=True)  
             all_psms.append(SIP_df)
         merged_psms = pd.DataFrame()
@@ -266,30 +144,15 @@ class assembly:
         else:
             self.logger.warning('No SIP labeled PSMs found that meet the filtering criteria')
             return pd.DataFrame()
-        cmd = f'{self.percolatorPath} --only-psms --no-terminate -Y --num-threads {self.threadNumber} \
-                    --results-psms {self.outputPath}/SIP_target_psms.tsv \
-                    --decoy-results-psms {self.outputPath}/SIP_decoy_psms.tsv \
-                    {self.outputPath}/SIP.pin'
-        self.logger.info(f'Running percolator for SIP labeled PSMs')
+        cmd = (
+            f'{self.aerithPath} --input {self.outputPath}/SIP.pin '
+            f'--output-prefix {self.outputPath}/SIP '
+            f'--database {self.outputPath}/targetDecoy.faa '
+            f'--decoy-prefix {self.decoyPrefix}'
+        )
+        self.logger.info('Running Aerith for SIP labeled PSMs')
         self.run_command(cmd)
-        self.logger.info(f'Intergrating filtered SIP labeled PSMs with feature')
-        target = pd.read_csv(f'{self.outputPath}/SIP_target_psms.tsv', sep='\t')
-        decoy = pd.read_csv(f'{self.outputPath}/SIP_decoy_psms.tsv', sep='\t')
-        # for filtered SIP labeled PSMs
-        filtered_target = target[target['q-value'] <= 0.01]
-        filtered_decoy = decoy[decoy['q-value'] <= 0.01]
-        psm = pd.concat([filtered_target, filtered_decoy], ignore_index=True)
-        psm = psm[['PSMId', 'score', 'q-value', 'posterior_error_prob']]
-        psm = pd.merge(psm, merged_psms, left_on='PSMId', right_on='SpecId', how='left')
-        # Split baseName from PSMId column
-        psm['SampleName'] = psm['PSMId'].str.split('.').str[0]
-        psm.drop(columns=['SpecId'], inplace=True)
-        psm['ScanNr'] = psm['ScanNr'].astype(int)
-        psm.sort_values(by=['SampleName', 'ScanNr'], inplace=True)
-        # In case Non-carbon elements SIP exceed 100. Clamp to [0, 100]
-        psm['MS1IsotopicAbundances'] = psm['MS1IsotopicAbundances'].clip(lower=0, upper=100)
-        psm.to_csv(f'{self.outputPath}/SIP_filtered_psms.tsv', sep='\t', index=False)
-        return psm
+        return pd.read_csv(f'{self.outputPath}/SIP_filtered_psms.tsv', sep='\t')
 
     def match_PSMs_to_proteins(self, filteredPSMsDict: dict[str, pd.DataFrame]) -> None:
         """
@@ -415,31 +278,22 @@ class assembly:
     def run(self) -> None:
         self.combine_fasta_files(self.fastaPath, self.decoyPath)
 
-        conversion_allocation = allocate_threads(
-            self.threadNumber, len(self.baseNames)
-        )
-        filteredPSMsDict = {}
-        if conversion_allocation.worker_count == 0:
+        if not self.baseNames:
             self.logger.warning('No samples available for protein assembly')
             return
-        self.logger.info(
-            f'Convert PSM TSV to pepXML with up to '
-            f'{conversion_allocation.worker_count} single-threaded processes'
-        )
-        with concurrent.futures.ProcessPoolExecutor(
-                max_workers=conversion_allocation.worker_count,
-                initializer=configure_process_worker,
-                initargs=(1,)) as executor:
-            future_to_baseName = {executor.submit(self.intergrate_and_convert, baseName): baseName for baseName in self.baseNames}
-            for future in concurrent.futures.as_completed(future_to_baseName):
-                baseName, psm_df = future.result()
-                filteredPSMsDict[baseName] = psm_df
+        self.logger.info('Loading Aerith filtered PSM feature tables')
+        filteredPSMsDict = {
+            baseName: pd.read_csv(
+                f'{self.outputPath}/{baseName}/{baseName}_filtered_psms.tsv', sep='\t'
+            )
+            for baseName in self.baseNames
+        }
         # filter SIP labeled PSMs for SIP search
         SIPfilteredPSMs = pd.DataFrame()
         if (self.element != None and self.element != ""):
             SIPfilteredPSMs = self.filterSIPlabeledPSMs(filteredPSMsDict)
         if all(psm_df.empty for psm_df in filteredPSMsDict.values()):
-            self.logger.warning("No filtered PSMs found after Percolator; skipping protein inference")
+            self.logger.warning("No filtered PSMs found after Aerith; skipping protein inference")
             return
         
         pepxmls_dir = os.path.join(self.outputPath, 'pepxmls')
