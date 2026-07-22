@@ -31,6 +31,15 @@ Summary run(const Config& config) {
     const std::clock_t read_cpu_end = std::clock();
     const auto read_end = Clock::now();
 
+    // This stage intentionally covers the whole generated entropy feature:
+    // unique peptide-charge preparation, Torch spectrum prediction, HDF5
+    // spectrum loading, fragment matching, and entropy calculation.
+    const auto spectrum_entropy_begin = Clock::now();
+    const std::clock_t spectrum_entropy_cpu_begin = std::clock();
+    SpectralEntropyFeature::add(config, data);
+    const std::clock_t spectrum_entropy_cpu_end = std::clock();
+    const auto spectrum_entropy_end = Clock::now();
+
     Summary summary;
     summary.input_paths = data.input_paths;
     summary.output_prefixes = config.output_prefixes;
@@ -140,6 +149,9 @@ Summary run(const Config& config) {
     summary.read_timing = {
         elapsed_seconds(read_begin, read_end),
         cpu_seconds(read_cpu_begin, read_cpu_end)};
+    summary.spectrum_entropy_timing = {
+        elapsed_seconds(spectrum_entropy_begin, spectrum_entropy_end),
+        cpu_seconds(spectrum_entropy_cpu_begin, spectrum_entropy_cpu_end)};
     summary.fold_setup_timing = {
         elapsed_seconds(fold_begin, fold_end),
         cpu_seconds(fold_cpu_begin, fold_cpu_end)};

@@ -127,6 +127,11 @@ void ResultWriter::write_filtered_results(
     stream << "PSMId\tscore\tq-value\tposterior_error_prob";
     for (const auto& header : data.headers) {
         if (header == "SpecId") continue;
+        if (header == "Peptide") {
+            for (const auto& generated : data.generated_feature_names) {
+                stream << '\t' << generated;
+            }
+        }
         stream << '\t' << header;
         if (header == "parentCharges") stream << "\tsqrtAbsDeltaRT";
     }
@@ -145,6 +150,15 @@ void ResultWriter::write_filtered_results(
         stream << psm.id << '\t' << scores[i] << '\t' << q[i] << '\t' << pep[i];
         for (std::size_t column = 0; column < data.headers.size(); ++column) {
             if (data.headers[column] == "SpecId") continue;
+            if (data.headers[column] == "Peptide") {
+                const std::size_t first_generated =
+                    data.feature_names.size() - data.generated_feature_names.size();
+                for (std::size_t generated = 0;
+                     generated < data.generated_feature_names.size(); ++generated) {
+                    stream << '\t' << formatted_number(
+                        psm.features[first_generated + generated]);
+                }
+            }
             stream << '\t';
             write_original_field(stream, data, psm, fields, column);
             if (data.headers[column] == "parentCharges") {
@@ -393,6 +407,11 @@ void print_summary(std::ostream& output, const Summary& summary) {
                << std::setw(10) << speedup << "x\n";
     };
     print_timing("Read, merge, and rerank PIN files", summary.read_timing);
+    if (std::find(summary.feature_names.begin(), summary.feature_names.end(),
+                  "unweighted_spectral_entropy") != summary.feature_names.end()) {
+        print_timing("Predict spectra and compute entropy",
+                     summary.spectrum_entropy_timing);
+    }
     print_timing("Assign folds and seed q-values", summary.fold_setup_timing);
     print_timing("Fit nested RT models", summary.rt_model_timing);
     print_timing("Fit and score SVM folds", summary.svm_model_timing);

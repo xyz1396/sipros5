@@ -689,6 +689,7 @@ class WorkflowAllocationTests(unittest.TestCase):
         workflow.logger = null_logger(f"filter-allocation-{id(workflow)}")
         workflow.ignorePCT = False
         workflow.dryrun = False
+        workflow.spectraPaths = ["/spectra/one.h5", "/spectra/two.h5", "/spectra/three.h5"]
         captured: list[tuple[str, dict[str, str], int]] = []
 
         def fake_logged_command(command, _logger, **kwargs):
@@ -709,8 +710,15 @@ class WorkflowAllocationTests(unittest.TestCase):
         self.assertEqual(arguments.count("--target-pin"), 3)
         self.assertEqual(arguments.count("--decoy-pin"), 3)
         self.assertEqual(arguments.count("--output-prefix"), 3)
+        self.assertEqual(arguments.count("--spectra"), 3)
+        self.assertEqual(
+            [arguments[index + 1] for index, value in enumerate(arguments)
+             if value == "--spectra"],
+            workflow.spectraPaths,
+        )
         self.assertNotIn("--augmented-pin", arguments)
         self.assertEqual(int(environment["OMP_NUM_THREADS"]), 16)
+        self.assertEqual(int(environment["MKL_NUM_THREADS"]), 16)
         self.assertEqual(cores, 16)
 
     def test_philosopher_jobs_receive_balanced_gomaxprocs(self) -> None:

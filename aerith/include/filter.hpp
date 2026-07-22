@@ -28,7 +28,9 @@ struct Config {
     std::vector<std::string> target_pins;
     std::vector<std::string> decoy_pins;
     std::vector<std::string> output_prefixes;
+    std::vector<std::string> spectrum_paths;
     std::string database_path;
+    std::string spectrum_model_path;
     std::string decoy_prefix = "Decoy_";
     std::string initial_score = "WDPscores";
     double q_threshold = 0.01;
@@ -37,6 +39,7 @@ struct Config {
     double svm_c_pos = 1.0;
     double svm_c_neg = 1.0;
     unsigned int max_iterations = 10;
+    double fragment_ppm = 20.0;
     bool ignore_pct = false;
 };
 
@@ -52,6 +55,7 @@ struct Summary {
     std::size_t distinct_target_peptides = 0;
     double rt_r2 = 0.0;
     StageTiming read_timing;
+    StageTiming spectrum_entropy_timing;
     StageTiming fold_setup_timing;
     StageTiming rt_model_timing;
     StageTiming svm_model_timing;

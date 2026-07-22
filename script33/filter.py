@@ -19,7 +19,8 @@ class filter:
 
     def __init__(self, baseNames: list[str], outputPath: str, aerithPath: str,
                  threadNumber: int, logger: Logger, decoyPrefix: str = "Decoy_",
-                 ignorePCT: bool = False, dryrun: bool = False) -> None:
+                 ignorePCT: bool = False, dryrun: bool = False,
+                 spectraPaths: list[str] | None = None) -> None:
         self.aerithPath = aerithPath
         self.baseNames = baseNames
         self.outPutPath = outputPath
@@ -29,6 +30,9 @@ class filter:
         self.decoyPrefix = decoyPrefix
         self.ignorePCT = ignorePCT
         self.dryrun = dryrun
+        self.spectraPaths = [] if spectraPaths is None else list(spectraPaths)
+        if self.spectraPaths and len(self.spectraPaths) != len(self.baseNames):
+            raise ValueError("Aerith requires one spectra path per sample")
 
     def command(self) -> str:
         arguments = [
@@ -38,13 +42,15 @@ class filter:
         ]
         if self.ignorePCT:
             arguments.append("--ignore-pct")
-        for baseName in self.baseNames:
+        for index, baseName in enumerate(self.baseNames):
             sample = f"{self.outPutPath}/{baseName}/{baseName}"
             arguments.extend([
                 "--target-pin", f"{sample}_target.pin",
                 "--decoy-pin", f"{sample}_decoy.pin",
                 "--output-prefix", sample,
             ])
+            if self.spectraPaths:
+                arguments.extend(["--spectra", self.spectraPaths[index]])
         return shlex.join(arguments)
 
     def run(self) -> None:
@@ -59,9 +65,14 @@ class filter:
         self.logger.info(command)
         if self.dryrun:
             return
+        environment = thread_env_updates(self.threadNumber)
+        # LibTorch gives MKL_NUM_THREADS precedence over OMP_NUM_THREADS when
+        # initializing its OpenMP pool. Aerith runs as one process, so give
+        # spectrum prediction the full CPU team allocated to this job.
+        environment["MKL_NUM_THREADS"] = str(self.threadNumber)
         run_logged_command(
             command,
             self.logger,
-            env_updates=thread_env_updates(self.threadNumber),
+            env_updates=environment,
             cpu_cores=self.threadNumber,
         )

@@ -2,9 +2,11 @@
 
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 
 class CommandLine final {
 public:
@@ -33,6 +35,9 @@ void CommandLine::usage(std::ostream& out) {
         << "  --train-fdr FLOAT        RT/SVM selection threshold (default 0.01)\n"
         << "  --rt-ridge FLOAT         RT OLS regularization (default 1e-4)\n"
         << "  --database FILE          FASTA path recorded in Philosopher pepXML\n"
+        << "  --spectra FILE           Raxport HDF5 MS2 file; repeat once per sample\n"
+        << "  --spectrum-model FILE    DIA-NN TorchScript model (default: beside aerith)\n"
+        << "  --fragment-ppm FLOAT     Fragment matching tolerance (default 20)\n"
         << "  --decoy-prefix TEXT      Philosopher decoy prefix (default Decoy_)\n"
         << "  --ignore-pct             Exclude SIP abundance columns from the SVM\n"
         << "  -h, --help               Show this help\n\n"
@@ -74,6 +79,10 @@ void CommandLine::validate(const aerith::Config& config, int& exit_status) {
         throw std::runtime_error(
             "Repeat --target-pin, --decoy-pin, and --output-prefix equally");
     }
+    const std::size_t samples = paired ? config.target_pins.size() : config.inputs.size();
+    if (!config.spectrum_paths.empty() && config.spectrum_paths.size() != samples) {
+        throw std::runtime_error("Repeat --spectra exactly once per input sample");
+    }
     if (!paired && config.output_prefixes.size() != 1 &&
         config.output_prefixes.size() != config.inputs.size()) {
         throw std::runtime_error(
@@ -82,9 +91,10 @@ void CommandLine::validate(const aerith::Config& config, int& exit_status) {
     if (!(config.q_threshold > 0.0 && config.q_threshold <= 1.0) ||
         !(config.train_fdr > 0.0 && config.train_fdr <= 1.0) ||
         config.rt_ridge < 0.0 || config.svm_c_pos <= 0.0 ||
-        config.svm_c_neg <= 0.0) {
+        config.svm_c_neg <= 0.0 || config.fragment_ppm <= 0.0) {
         throw std::runtime_error(
-            "FDR thresholds must be in (0,1], SVM costs positive, and RT ridge non-negative");
+            "FDR thresholds must be in (0,1], SVM costs and fragment ppm positive, "
+            "and RT ridge non-negative");
     }
     exit_status = EXIT_SUCCESS;
 }
@@ -113,6 +123,12 @@ bool CommandLine::parse(
             config.output_prefixes.push_back(value("--output-prefix"));
         } else if (arg == "--database") {
             config.database_path = value("--database");
+        } else if (arg == "--spectra") {
+            config.spectrum_paths.push_back(value("--spectra"));
+        } else if (arg == "--spectrum-model") {
+            config.spectrum_model_path = value("--spectrum-model");
+        } else if (arg == "--fragment-ppm") {
+            config.fragment_ppm = number(value("--fragment-ppm"), "--fragment-ppm");
         } else if (arg == "--decoy-prefix") {
             config.decoy_prefix = value("--decoy-prefix");
         } else if (arg == "--ignore-pct") {
@@ -144,6 +160,19 @@ bool CommandLine::parse(
 int main(int argc, char** argv) {
     try {
         aerith::Config config;
+        std::error_code executable_error;
+        auto executable_path =
+            std::filesystem::read_symlink("/proc/self/exe", executable_error);
+        if (executable_error) executable_path = std::filesystem::absolute(argv[0]);
+        const auto executable = executable_path.parent_path();
+        constexpr const char* model_name = "diann-2.6.1-fragmentation.pt";
+        const auto sibling_model = executable / model_name;
+        const auto source_model = std::filesystem::current_path() / "tools" / model_name;
+        if (std::filesystem::exists(sibling_model)) {
+            config.spectrum_model_path = sibling_model.string();
+        } else if (std::filesystem::exists(source_model)) {
+            config.spectrum_model_path = source_model.string();
+        }
         int exit_status = EXIT_SUCCESS;
         if (!CommandLine::parse(argc, argv, config, exit_status)) {
             return exit_status;

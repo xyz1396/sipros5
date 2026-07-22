@@ -126,7 +126,62 @@ spacing.
   - `<sample>_filtered_psms.tsv`: Aerith 1% FDR PSMs with original search and RT features.
   - `<sample>.pep.xml`: Aerith pepXML consumed directly by Philosopher.
   - `peptide.tsv`, `protein.tsv`: peptides, and proteins passing 1% FDR decoy filtering.
-  - `*_filtered_psms.tsv`: PSMs passing 1% FDR decoy filtering with `isotopicPeakNumbers`, `MS1IsotopeFitScore`, `MS1IsotopicAbundances`, and `MS2IsotopicAbundances`.
+  - `*_filtered_psms.tsv`: PSMs passing 1% FDR decoy filtering with `isotopicPeakNumbers`, `MS1IsotopeFitScore`, `MS1IsotopicAbundances`, `MS2IsotopicAbundances`, and, for regular FASTA search, `unweighted_spectral_entropy`.
+
+### Native predicted-spectrum entropy in Aerith
+
+Aerith can predict DIA-NN fragment spectra directly through LibTorch and add
+MSBooster-compatible `unweighted_spectral_entropy` to SVM rescoring. The
+renamed DIA-NN 2.6.1 fragmentation checkpoint is
+`tools/diann-2.6.1-fragmentation.pt`; the exact DIA-NN token dictionary is
+compiled into Aerith.
+The implementation keeps DIA-NN's predicted top fragments, applies each
+Raxport scan's MS2 m/z window, matches experimental peaks at 20 ppm by default,
+and computes the entropy similarity when at least two predicted ions have
+experimental matches.
+
+Build Sipros and dynamic-LibTorch Aerith from the `sipros5` environment with:
+
+```bash
+./make.sh buildConda
+```
+
+`make.sh` obtains `Torch_DIR` from the environment's Python package and checks
+that Aerith dynamically resolves `libtorch` and `libc10`; LibTorch is not
+statically embedded in Aerith.
+
+Pass one Raxport HDF5 file for every input sample, in the same order as the PIN
+pairs:
+
+```bash
+build/conda/bin/aerith \
+  --target-pin sample_target.pin \
+  --decoy-pin sample_decoy.pin \
+  --spectra sample.h5 \
+  --output-prefix results/sample
+```
+
+Use `--spectrum-model` to override the checkpoint file and `--fragment-ppm` to
+change the matching tolerance. A build configured with
+`-DAERITH_ENABLE_TORCH=OFF` remains usable for filtering without `--spectra`.
+
+The complete regular FASTA workflow supplies each sample's Raxport HDF5 file
+to Aerith automatically, so no extra flag is needed:
+
+```bash
+siproswf -i raw -f Ecoli.fasta -t 40 -o regular_output
+```
+
+This automatic predicted-spectrum feature is limited to regular FASTA search;
+SIP and search-spectra workflows keep their existing feature sets. The DIA-NN
+license notice available for the checkpoint is reproduced in `LICENSE`;
+review the version-specific terms before redistributing the checkpoint or a
+package containing it.
+
+When this feature is enabled, Aerith's timing report includes `Predict spectra
+and compute entropy`. This measures the complete feature-generation stage,
+including unique peptide-charge preparation, Torch inference, HDF5 loading,
+fragment matching, and entropy calculation.
 
 ## Sipros5 Setup Guide (set the python and binary by yourself)
 

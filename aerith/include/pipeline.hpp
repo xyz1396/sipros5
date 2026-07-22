@@ -27,6 +27,7 @@ struct Psm {
     std::size_t file_id = 0;
     std::uint64_t scan = 0;
     std::size_t rank = 0;
+    int charge = 0;
     double merge_score = 0.0;
     double diff_score = 0.0;
     std::string raw_line;
@@ -40,6 +41,7 @@ struct Dataset {
     std::vector<std::string> headers;
     std::unordered_map<std::string, std::size_t> columns;
     std::vector<std::size_t> numeric_columns;
+    std::vector<std::string> generated_feature_names;
 };
 
 struct RtResult {
@@ -67,6 +69,11 @@ private:
         const std::string& name);
     static Dataset read_file(const Config& config, const std::string& input_path,
                              std::size_t file_id, int expected_label);
+};
+
+class SpectralEntropyFeature {
+public:
+    static void add(const Config& config, Dataset& data);
 };
 
 class RetentionTimeModel {

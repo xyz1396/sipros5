@@ -223,7 +223,16 @@ citation:
                                logger=self.logger,
                                decoyPrefix=sipros_search.decoyPrefix,
                                ignorePCT=self.args.ignorePCT,
-                               dryrun=self.args.dryrun)
+                               dryrun=self.args.dryrun,
+                               spectraPaths=(
+                                   [sipros_search.hdf5_paths.get(
+                                       name,
+                                       sipros_search.expected_hdf5_path(name),
+                                   )
+                                    for name in sipros_search.base_names]
+                                   if self.args.element == "R" and not spectra_mode
+                                   else None
+                               ))
         sipros_filter.run()
 
         sipros_assembly = assembly(baseNames=sipros_search.base_names,

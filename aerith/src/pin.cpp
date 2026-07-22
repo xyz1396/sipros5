@@ -91,6 +91,7 @@ Dataset PinReader::read_file(const Config& config, const std::string& input_path
     const auto initial_col = required_column(columns, config.initial_score);
     const auto merge_col = required_column(columns, "WDPscores");
     const auto rank_col = required_column(columns, "ranks");
+    const auto charge_col = required_column(columns, "parentCharges");
     const auto diff_col = columns.find("diffScores");
 
     const std::unordered_set<std::string> excluded{
@@ -155,6 +156,12 @@ Dataset PinReader::read_file(const Config& config, const std::string& input_path
         row.merge_score = parse_number(fields[merge_col], "WDPscores", line_number);
         row.rank = static_cast<std::size_t>(
             parse_number(fields[rank_col], "ranks", line_number));
+        row.charge = static_cast<int>(
+            parse_number(fields[charge_col], "parentCharges", line_number));
+        if (row.charge <= 0) {
+            throw std::runtime_error("parentCharges must be positive at line " +
+                                     std::to_string(line_number));
+        }
         if (diff_col != columns.end()) {
             row.diff_score = parse_number(fields[diff_col->second], "diffScores", line_number);
         }

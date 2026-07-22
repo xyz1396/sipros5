@@ -12,7 +12,7 @@ set -e
 # Micromamba/Conda build (./make.sh buildConda):
 #   micromamba create -n sipros5 -c conda-forge \
 #     hdf5 h5py openmpi cmake ninja gcc_linux-64 gxx_linux-64 gdb gperftools \
-#     python=3.12 lxml pandas sysroot_linux-64=2.34 matplotlib
+#     python=3.12 lxml pandas sysroot_linux-64=2.34 matplotlib pytorch
 #
 # Static HDF5 used by the system build:
 #   git clone --depth 1 https://github.com/microsoft/vcpkg.git vcpkg
@@ -40,6 +40,7 @@ BUILD_ROOT="$REPO_DIR/build"
 SYSTEM_BUILD_DIR="$BUILD_ROOT/system"
 CONDA_BUILD_DIR="$BUILD_ROOT/conda"
 CONDA_DEBUG_BUILD_DIR="$BUILD_ROOT/conda-debug"
+DIANN_MODEL_NAME="diann-2.6.1-fragmentation.pt"
 RUNTIME_TOOL_BINARIES=(
     Raxport-linux-x64
     philosopher-v5.1.2
@@ -94,9 +95,11 @@ prepare_vcpkg_build_dir() {
     local cache="$1/CMakeCache.txt"
     local hdf5_dir="=$VCPKG_HDF5_DIR"
     local compiler="=$SYSTEM_CXX"
+    local torch_dir="=$TORCH_CMAKE_DIR"
     if [ -f "$cache" ] &&
        { ! grep -F 'HDF5_DIR:' "$cache" | grep -Fq "$hdf5_dir" ||
-         ! grep -F 'CMAKE_CXX_COMPILER:' "$cache" | grep -Fq "$compiler"; }; then
+         ! grep -F 'CMAKE_CXX_COMPILER:' "$cache" | grep -Fq "$compiler" ||
+         ! grep -F 'Torch_DIR:' "$cache" | grep -Fq "$torch_dir"; }; then
         echo "Reconfiguring $1 with vcpkg toolchain"
         rm -rf "$cache" "$1/CMakeFiles"
     fi
@@ -106,15 +109,31 @@ prepare_conda_build_dir() {
     mkdir -p "$1"
     local cache="$1/CMakeCache.txt"
     local hdf5_dir="=$CONDA_PREFIX/cmake"
+    local torch_dir="=$TORCH_CMAKE_DIR"
     if [ -f "$cache" ] &&
-       ! grep -F 'HDF5_DIR:' "$cache" | grep -Fq "$hdf5_dir"; then
-        echo "Reconfiguring $1 with dynamic Conda HDF5"
+       { ! grep -F 'HDF5_DIR:' "$cache" | grep -Fq "$hdf5_dir" ||
+         ! grep -F 'Torch_DIR:' "$cache" | grep -Fq "$torch_dir"; }; then
+        echo "Reconfiguring $1 with dynamic Conda HDF5 and LibTorch"
         rm -rf "$cache" "$1/CMakeFiles"
     fi
 }
 
 run_sipros5() {
     "$MAMBA_EXE" run -n sipros5 "$@"
+}
+
+resolve_torch_cmake() {
+    local torch_prefix
+    torch_prefix=$(run_sipros5 python -c \
+        'import torch; print(torch.utils.cmake_prefix_path)') || {
+        echo "PyTorch is required in the sipros5 Conda environment." >&2
+        exit 1
+    }
+    TORCH_CMAKE_DIR="$torch_prefix/Torch"
+    if [ ! -f "$TORCH_CMAKE_DIR/TorchConfig.cmake" ]; then
+        echo "Missing dynamic LibTorch CMake package: $TORCH_CMAKE_DIR" >&2
+        exit 1
+    fi
 }
 
 # Ignore broken MPI wrappers left behind when a Conda environment is moved.
@@ -192,16 +211,40 @@ verify_fully_dynamic_conda() {
     fi
 }
 
+verify_dynamic_torch() {
+    local binary="$1"
+    local dependencies
+    dependencies=$(ldd "$binary" 2>&1) || {
+        echo "Expected Aerith to dynamically link LibTorch: $binary" >&2
+        echo "$dependencies" >&2
+        return 1
+    }
+    if grep -Fq 'not found' <<<"$dependencies" ||
+       ! grep -Eq 'libtorch(_cpu)?\.so' <<<"$dependencies" ||
+       ! grep -Eq 'libc10\.so' <<<"$dependencies"; then
+        echo "Aerith does not have a complete dynamic LibTorch linkage: $binary" >&2
+        echo "$dependencies" >&2
+        return 1
+    fi
+}
+
 stage_publish_tools() {
     local source_bin_dir="$1"
     local binaries=(sipros siprosMPI aerith)
+    local assets=("$DIANN_MODEL_NAME")
     local destinations=("$REPO_DIR/bin" "$REPO_DIR/tools")
-    local binary destination tmpdir
+    local asset binary destination tmpdir
 
     # Validate the complete build before replacing any published executable.
     for binary in "${binaries[@]}"; do
         if [ ! -x "$source_bin_dir/$binary" ]; then
             echo "Missing built executable: $source_bin_dir/$binary" >&2
+            return 1
+        fi
+    done
+    for asset in "${assets[@]}"; do
+        if [ ! -f "$source_bin_dir/$asset" ]; then
+            echo "Missing built runtime asset: $source_bin_dir/$asset" >&2
             return 1
         fi
     done
@@ -212,8 +255,14 @@ stage_publish_tools() {
         for binary in "${binaries[@]}"; do
             install -m 0755 "$source_bin_dir/$binary" "$tmpdir/$binary"
         done
+        for asset in "${assets[@]}"; do
+            install -m 0644 "$source_bin_dir/$asset" "$tmpdir/$asset"
+        done
         for binary in "${binaries[@]}"; do
             mv -f "$tmpdir/$binary" "$destination/$binary"
+        done
+        for asset in "${assets[@]}"; do
+            mv -f "$tmpdir/$asset" "$destination/$asset"
         done
         rmdir "$tmpdir"
     done
@@ -244,6 +293,7 @@ case $1 in
     require_executable "$SYSTEM_CC"
     require_executable "$SYSTEM_CXX"
     require_executable "$SYSTEM_MPI_CXX"
+    resolve_torch_cmake
     cmake_args+=("-DMPI_CXX_COMPILER=$SYSTEM_MPI_CXX" "-DMPI_CXX_SKIP_MPICXX=ON")
     prepare_vcpkg_build_dir "$SYSTEM_BUILD_DIR"
     mkdir -p tools
@@ -252,6 +302,7 @@ case $1 in
         -DCMAKE_MAKE_PROGRAM="$SYSTEM_NINJA" \
         -DCMAKE_C_COMPILER="$SYSTEM_CC" -DCMAKE_CXX_COMPILER="$SYSTEM_CXX" \
         -DCMAKE_BUILD_TYPE=Release -DSIPROS_STATIC_HDF5=ON \
+        -DAERITH_ENABLE_TORCH=ON -DTorch_DIR="$TORCH_CMAKE_DIR" \
         -DCMAKE_TOOLCHAIN_FILE="$VCPKG_TOOLCHAIN_FILE" \
         -DVCPKG_TARGET_TRIPLET="$VCPKG_TARGET_TRIPLET" \
         -DZLIB_DIR="$VCPKG_ROOT/installed/$VCPKG_TARGET_TRIPLET/share/zlib" \
@@ -259,6 +310,7 @@ case $1 in
         -DHDF5_DIR="$VCPKG_HDF5_DIR" "$REPO_DIR"
     "$SYSTEM_NINJA"
     verify_fully_static_omp "$SYSTEM_BUILD_DIR/bin"
+    verify_dynamic_torch "$SYSTEM_BUILD_DIR/bin/aerith"
     # add share lib for mpi version
     cd ..
     # deplist=$(ldd bin/siprosMPI | awk '{if (match($3,"/")){ print $3}}')
@@ -272,6 +324,7 @@ case $1 in
     export MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-$HOME/micromamba}"
     eval "$("$MAMBA_EXE" shell hook --shell=bash)"
     micromamba activate sipros5
+    resolve_torch_cmake
     configure_mpi
     saved_ld_library_path="${LD_LIBRARY_PATH-}"
     unset LD_LIBRARY_PATH
@@ -279,11 +332,13 @@ case $1 in
     cd "$CONDA_BUILD_DIR"
     cmake -G Ninja "${cmake_args[@]}" -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_CONDA=ON -DSIPROS_STATIC_HDF5=OFF \
+        -DAERITH_ENABLE_TORCH=ON -DTorch_DIR="$TORCH_CMAKE_DIR" \
         -DHDF5_USE_STATIC_LIBRARIES=OFF \
         -DHDF5_DIR="$CONDA_PREFIX/cmake" "$REPO_DIR"
     export LD_LIBRARY_PATH="${saved_ld_library_path:+$saved_ld_library_path:}${CONDA_PREFIX}/lib"
     ninja
     verify_fully_dynamic_conda "$CONDA_BUILD_DIR/bin"
+    verify_dynamic_torch "$CONDA_BUILD_DIR/bin/aerith"
     # add share lib for mpi version
     cd ..
     # deplist=$(ldd bin/siprosMPI | awk '{if (match($3,"/")){ print $3}}')
@@ -297,13 +352,15 @@ case $1 in
     export MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-$HOME/micromamba}"
     eval "$($MAMBA_EXE shell hook --shell=bash)"
     micromamba activate sipros5
+    resolve_torch_cmake
     configure_mpi
     saved_ld_library_path="${LD_LIBRARY_PATH-}"
     unset LD_LIBRARY_PATH
     mkdir -p "$CONDA_DEBUG_BUILD_DIR"
     cd "$CONDA_DEBUG_BUILD_DIR"
     cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS_DEBUG="-O0 -g3" \
-        -DBUILD_CONDA=true "$REPO_DIR"
+        -DBUILD_CONDA=true -DAERITH_ENABLE_TORCH=ON \
+        -DTorch_DIR="$TORCH_CMAKE_DIR" "$REPO_DIR"
     export LD_LIBRARY_PATH="${saved_ld_library_path:+$saved_ld_library_path:}${CONDA_PREFIX}/lib"
     ninja
     ;;
