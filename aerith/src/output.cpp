@@ -129,11 +129,17 @@ void ResultWriter::write_filtered_results(
         if (header == "SpecId") continue;
         if (header == "Peptide") {
             for (const auto& generated : data.generated_feature_names) {
+                if (generated == "delta_RT_loess") continue;
                 stream << '\t' << generated;
             }
         }
         stream << '\t' << header;
-        if (header == "parentCharges") stream << "\tsqrtAbsDeltaRT";
+        if (header == "retentiontime" && data.has_predicted_rt_diagnostics) {
+            stream << "\tpred_RT_real_units\tdelta_RT_loess_real";
+        }
+        if (header == "parentCharges" && !rt_residual.empty()) {
+            stream << "\tsqrtAbsDeltaRT";
+        }
     }
     stream << '\n' << std::setprecision(10);
     auto rows = selected_rows(data, file);
@@ -155,13 +161,22 @@ void ResultWriter::write_filtered_results(
                     data.feature_names.size() - data.generated_feature_names.size();
                 for (std::size_t generated = 0;
                      generated < data.generated_feature_names.size(); ++generated) {
+                    if (data.generated_feature_names[generated] ==
+                        "delta_RT_loess") {
+                        continue;
+                    }
                     stream << '\t' << formatted_number(
                         psm.features[first_generated + generated]);
                 }
             }
             stream << '\t';
             write_original_field(stream, data, psm, fields, column);
-            if (data.headers[column] == "parentCharges") {
+            if (data.headers[column] == "retentiontime" &&
+                data.has_predicted_rt_diagnostics) {
+                stream << '\t' << formatted_number(psm.predicted_rt_real_units)
+                       << '\t' << formatted_number(psm.delta_rt_loess_real);
+            }
+            if (data.headers[column] == "parentCharges" && !rt_residual.empty()) {
                 stream << '\t' << rt_residual[i];
             }
         }
@@ -316,12 +331,26 @@ void ResultWriter::write(
     const std::vector<double>& scores, const std::vector<double>& q,
     const std::vector<double>& pep, const RtResult& rt,
     const std::vector<std::size_t>& outer_folds) {
-    std::vector<double> held_out_rt_residuals(data.rows.size());
-    #pragma omp parallel for simd schedule(static)
-    for (std::ptrdiff_t row = 0;
-         row < static_cast<std::ptrdiff_t>(data.rows.size()); ++row) {
-        const auto i = static_cast<std::size_t>(row);
-        held_out_rt_residuals[i] = rt.residuals[outer_folds[i]][i];
+    const bool has_internal_rt = std::all_of(
+        rt.residuals.begin(), rt.residuals.end(),
+        [&](const auto& residuals) {
+            return residuals.size() == data.rows.size();
+        });
+    const bool has_partial_internal_rt = std::any_of(
+        rt.residuals.begin(), rt.residuals.end(),
+        [](const auto& residuals) { return !residuals.empty(); });
+    if (!has_internal_rt && has_partial_internal_rt) {
+        throw std::runtime_error("Incomplete internal RT residuals");
+    }
+    std::vector<double> held_out_rt_residuals;
+    if (has_internal_rt) {
+        held_out_rt_residuals.resize(data.rows.size());
+        #pragma omp parallel for simd schedule(static)
+        for (std::ptrdiff_t row = 0;
+             row < static_cast<std::ptrdiff_t>(data.rows.size()); ++row) {
+            const auto i = static_cast<std::size_t>(row);
+            held_out_rt_residuals[i] = rt.residuals[outer_folds[i]][i];
+        }
     }
     const bool aggregate =
         config.output_prefixes.size() == 1 && data.input_paths.size() > 1;
@@ -368,11 +397,16 @@ void print_summary(std::ostream& output, const Summary& summary) {
            << "  Score model                   " << summary.score_model << "\n\n"
            << "Results\n"
            << "  Target PSMs at threshold      " << summary.target_ids << '\n'
-           << "  Distinct target peptides      " << summary.distinct_target_peptides << '\n'
-           << "  RT training targets/fold      " << summary.rt_training_targets << '\n'
-           << std::fixed << std::setprecision(6)
-           << "  Held-out RT R2                " << summary.rt_r2
-           << "\n\nSample-specific SVM results\n";
+           << "  Distinct target peptides      " << summary.distinct_target_peptides << '\n';
+    output << std::fixed << std::setprecision(6);
+    if (summary.used_internal_rt_model) {
+        output << "  RT training targets/fold      " << summary.rt_training_targets << '\n'
+               << "  Held-out RT R2                " << summary.rt_r2 << '\n';
+    } else {
+        output << "  RT feature source             DIA-NN prediction\n"
+               << "  Aerith internal RT model      skipped\n";
+    }
+    output << "\nSample-specific SVM results\n";
     output << std::left << std::setw(30) << "Sample"
            << std::right << std::setw(14) << "Input PSMs"
            << std::setw(12) << "IDs"
@@ -411,9 +445,27 @@ void print_summary(std::ostream& output, const Summary& summary) {
                   "unweighted_spectral_entropy") != summary.feature_names.end()) {
         print_timing("Predict spectra and compute entropy",
                      summary.spectrum_entropy_timing);
+        if (!summary.spectrum_prediction_device.empty()) {
+            print_timing(
+                "  DIA-NN spectra prediction (" +
+                    summary.spectrum_prediction_device + ")",
+                summary.spectrum_prediction_timing);
+        }
+    }
+    if (std::find(summary.feature_names.begin(), summary.feature_names.end(),
+                  "delta_RT_loess") != summary.feature_names.end()) {
+        print_timing("Predict RT and compute delta-RT",
+                     summary.predicted_rt_timing);
+        if (!summary.rt_prediction_device.empty()) {
+            print_timing(
+                "  DIA-NN RT prediction (" + summary.rt_prediction_device + ")",
+                summary.rt_prediction_inference_timing);
+        }
     }
     print_timing("Assign folds and seed q-values", summary.fold_setup_timing);
-    print_timing("Fit nested RT models", summary.rt_model_timing);
+    if (summary.used_internal_rt_model) {
+        print_timing("Fit nested RT models", summary.rt_model_timing);
+    }
     print_timing("Fit and score SVM folds", summary.svm_model_timing);
     print_timing("Compute q-values and PEPs", summary.statistics_timing);
     print_timing("Write result files", summary.write_timing);

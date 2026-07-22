@@ -31,6 +31,8 @@ struct Config {
     std::vector<std::string> spectrum_paths;
     std::string database_path;
     std::string spectrum_model_path;
+    std::string rt_model_path;
+    bool predict_rt = true;
     std::string decoy_prefix = "Decoy_";
     std::string initial_score = "WDPscores";
     double q_threshold = 0.01;
@@ -54,8 +56,14 @@ struct Summary {
     std::size_t target_ids = 0;
     std::size_t distinct_target_peptides = 0;
     double rt_r2 = 0.0;
+    bool used_internal_rt_model = false;
+    std::string spectrum_prediction_device;
+    std::string rt_prediction_device;
     StageTiming read_timing;
+    StageTiming spectrum_prediction_timing;
     StageTiming spectrum_entropy_timing;
+    StageTiming rt_prediction_inference_timing;
+    StageTiming predicted_rt_timing;
     StageTiming fold_setup_timing;
     StageTiming rt_model_timing;
     StageTiming svm_model_timing;

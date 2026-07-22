@@ -11,6 +11,7 @@ add_library(aerith_filter
   src/filter.cpp
   src/output.cpp
   src/pin.cpp
+  src/predicted_rt.cpp
   src/rt.cpp
   src/spectrum_entropy.cpp
   src/statistics.cpp
@@ -27,10 +28,42 @@ if(BUILD_CONDA)
 else()
   set(AERITH_TORCH_DEFAULT OFF)
 endif()
-option(AERITH_ENABLE_TORCH "Enable native DIA-NN spectrum entropy prediction"
+option(AERITH_ENABLE_TORCH "Enable native DIA-NN spectrum and RT prediction"
        ${AERITH_TORCH_DEFAULT})
 if(AERITH_ENABLE_TORCH)
-  find_package(Torch REQUIRED)
+  if(DEFINED AERITH_TORCH_PACKAGE_VERSION)
+    message(STATUS
+      "Aerith: configuring with PyTorch ${AERITH_TORCH_PACKAGE_VERSION}")
+  endif()
+  # Conda's compiler root-path policy can hide NVTX3 from a system CUDA
+  # toolkit. Locate the header from either the active Conda environment or the
+  # toolkit containing nvcc before loading TorchConfig.cmake.
+  if(NOT nvtx3_dir)
+    find_path(AERITH_NVTX3_INCLUDE_DIR
+      NAMES nvtx3/nvToolsExt.h
+      HINTS "$ENV{CONDA_PREFIX}/include")
+    if(NOT AERITH_NVTX3_INCLUDE_DIR)
+      find_program(AERITH_NVCC_EXECUTABLE NAMES nvcc)
+      if(AERITH_NVCC_EXECUTABLE)
+        get_filename_component(AERITH_CUDA_BIN_DIR
+          "${AERITH_NVCC_EXECUTABLE}" DIRECTORY)
+        get_filename_component(AERITH_CUDA_ROOT
+          "${AERITH_CUDA_BIN_DIR}" DIRECTORY)
+        find_path(AERITH_NVTX3_INCLUDE_DIR
+          NAMES nvtx3/nvToolsExt.h
+          HINTS
+            "${AERITH_CUDA_ROOT}/include"
+            "${AERITH_CUDA_ROOT}/targets/x86_64-linux/include"
+          NO_DEFAULT_PATH)
+      endif()
+    endif()
+    if(AERITH_NVTX3_INCLUDE_DIR)
+      set(nvtx3_dir "${AERITH_NVTX3_INCLUDE_DIR}" CACHE PATH
+          "Directory containing the NVTX3 include directory" FORCE)
+      message(STATUS "Aerith: found NVTX3 in ${nvtx3_dir}")
+    endif()
+  endif()
+  find_package(Torch 2.12.1 REQUIRED)
 endif()
 if(Torch_FOUND)
   if(NOT HDF5_FOUND)
@@ -53,7 +86,7 @@ if(Torch_FOUND)
 elseif(AERITH_ENABLE_TORCH)
   message(FATAL_ERROR "AERITH_ENABLE_TORCH requires a dynamic LibTorch installation")
 else()
-  message(STATUS "LibTorch not found: Aerith will build without --spectra support")
+  message(STATUS "LibTorch not found: Aerith will build without predicted-spectrum or predicted-RT features")
 endif()
 if(MSVC)
   target_compile_options(aerith_filter PRIVATE /W4 /O2)
@@ -69,10 +102,19 @@ if(Torch_FOUND)
   if(NOT EXISTS "${AERITH_DIANN_MODEL}")
     message(FATAL_ERROR "Missing DIA-NN fragmentation model: ${AERITH_DIANN_MODEL}")
   endif()
+  get_filename_component(AERITH_DIANN_RT_MODEL
+    "${CMAKE_CURRENT_SOURCE_DIR}/../tools/diann-2.6.1-retention-time.pt" ABSOLUTE)
+  if(NOT EXISTS "${AERITH_DIANN_RT_MODEL}")
+    message(FATAL_ERROR "Missing DIA-NN RT model: ${AERITH_DIANN_RT_MODEL}")
+  endif()
   add_custom_command(TARGET aerith POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${AERITH_DIANN_MODEL}"
             "$<TARGET_FILE_DIR:aerith>/diann-2.6.1-fragmentation.pt")
+  add_custom_command(TARGET aerith POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${AERITH_DIANN_RT_MODEL}"
+            "$<TARGET_FILE_DIR:aerith>/diann-2.6.1-retention-time.pt")
 endif()
 
 include(CTest)

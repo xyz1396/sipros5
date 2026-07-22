@@ -40,12 +40,34 @@ Summary run(const Config& config) {
     const std::clock_t spectrum_entropy_cpu_end = std::clock();
     const auto spectrum_entropy_end = Clock::now();
 
+    // DIA-NN RT inference and the sample-specific MSBooster-compatible LOESS
+    // calibration are timed together as one generated-feature stage.
+    const auto predicted_rt_begin = Clock::now();
+    const std::clock_t predicted_rt_cpu_begin = std::clock();
+    PredictedRetentionTimeFeature::add(config, data);
+    const std::clock_t predicted_rt_cpu_end = std::clock();
+    const auto predicted_rt_end = Clock::now();
+    const bool has_diann_rt = std::find(
+        data.feature_names.begin(), data.feature_names.end(),
+        "delta_RT_loess") != data.feature_names.end();
+    const bool use_internal_rt_model = !has_diann_rt;
+
     Summary summary;
     summary.input_paths = data.input_paths;
     summary.output_prefixes = config.output_prefixes;
     summary.threads = static_cast<unsigned int>(omp_get_max_threads());
     summary.feature_names = data.feature_names;
-    summary.feature_names.push_back("sqrtAbsDeltaRT");
+    summary.used_internal_rt_model = use_internal_rt_model;
+    summary.spectrum_prediction_device = data.spectrum_prediction_device;
+    summary.rt_prediction_device = data.rt_prediction_device;
+    summary.spectrum_prediction_timing = data.spectrum_prediction_timing;
+    summary.rt_prediction_inference_timing = data.rt_prediction_timing;
+    if (use_internal_rt_model) {
+        summary.feature_names.push_back("sqrtAbsDeltaRT");
+    } else {
+        summary.score_model =
+            "global_diann_rt_samplewise_omp_simd_l2_svm_3fold";
+    }
     summary.files = data.input_paths.size();
     summary.psms = data.rows.size();
     for (const auto& row : data.rows) {
@@ -64,24 +86,32 @@ Summary run(const Config& config) {
     const auto fold_begin = Clock::now();
     const std::clock_t fold_cpu_begin = std::clock();
     const auto outer_folds = SvmRescorer::assign_folds(data);
-    // Diagnostic only: every fitted value is recomputed inside training folds.
-    const auto diagnostic_q = target_decoy_qvalues(initial_scores, labels);
+    std::vector<double> diagnostic_q;
+    if (use_internal_rt_model) {
+        // Diagnostic only: every fitted value is recomputed inside training folds.
+        diagnostic_q = target_decoy_qvalues(initial_scores, labels);
+    }
     const std::clock_t fold_cpu_end = std::clock();
     const auto fold_end = Clock::now();
 
     const auto rt_begin = Clock::now();
     const std::clock_t rt_cpu_begin = std::clock();
-    const auto rt = RetentionTimeModel::fit(
-        data, outer_folds, initial_scores, labels, diagnostic_q,
-        config.train_fdr, config.rt_ridge);
-    const bool complete_rt = std::all_of(
-        rt.residuals.begin(), rt.residuals.end(),
-        [&](const auto& residuals) { return residuals.size() == data.rows.size(); });
-    if (!complete_rt || !std::isfinite(rt.r2)) {
-        throw std::runtime_error("Unable to fit the nested chemical RT models");
+    RtResult rt;
+    if (use_internal_rt_model) {
+        rt = RetentionTimeModel::fit(
+            data, outer_folds, initial_scores, labels, diagnostic_q,
+            config.train_fdr, config.rt_ridge);
+        const bool complete_rt = std::all_of(
+            rt.residuals.begin(), rt.residuals.end(),
+            [&](const auto& residuals) {
+                return residuals.size() == data.rows.size();
+            });
+        if (!complete_rt || !std::isfinite(rt.r2)) {
+            throw std::runtime_error("Unable to fit the nested chemical RT models");
+        }
+        summary.rt_training_targets = rt.training_count;
+        summary.rt_r2 = rt.r2;
     }
-    summary.rt_training_targets = rt.training_count;
-    summary.rt_r2 = rt.r2;
     const std::clock_t rt_cpu_end = std::clock();
     const auto rt_end = Clock::now();
 
@@ -152,6 +182,9 @@ Summary run(const Config& config) {
     summary.spectrum_entropy_timing = {
         elapsed_seconds(spectrum_entropy_begin, spectrum_entropy_end),
         cpu_seconds(spectrum_entropy_cpu_begin, spectrum_entropy_cpu_end)};
+    summary.predicted_rt_timing = {
+        elapsed_seconds(predicted_rt_begin, predicted_rt_end),
+        cpu_seconds(predicted_rt_cpu_begin, predicted_rt_cpu_end)};
     summary.fold_setup_timing = {
         elapsed_seconds(fold_begin, fold_end),
         cpu_seconds(fold_cpu_begin, fold_cpu_end)};

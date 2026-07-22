@@ -62,10 +62,19 @@ class filter:
             f"Running Aerith cross-sample SVM+RT filtering with "
             f"{self.threadNumber} CPU cores"
         )
+        if self.spectraPaths:
+            self.logger.info(
+                "Aerith DIA-NN device policy: CUDA preferred; "
+                "automatic CPU fallback when CUDA is unavailable or fails; "
+                "legacy Aerith RT modeling is skipped"
+            )
         self.logger.info(command)
         if self.dryrun:
             return
         environment = thread_env_updates(self.threadNumber)
+        # Do not set CUDA_VISIBLE_DEVICES here. Inherit the GPU visibility
+        # assigned by the user or scheduler; Aerith selects CUDA when one of
+        # those devices is accessible and otherwise retries on the CPU.
         # LibTorch gives MKL_NUM_THREADS precedence over OMP_NUM_THREADS when
         # initializing its OpenMP pool. Aerith runs as one process, so give
         # spectrum prediction the full CPU team allocated to this job.

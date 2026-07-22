@@ -30,6 +30,8 @@ struct Psm {
     int charge = 0;
     double merge_score = 0.0;
     double diff_score = 0.0;
+    float delta_rt_loess_real = 0.0f;
+    float predicted_rt_real_units = 0.0f;
     std::string raw_line;
     std::vector<float> features;
 };
@@ -42,6 +44,11 @@ struct Dataset {
     std::unordered_map<std::string, std::size_t> columns;
     std::vector<std::size_t> numeric_columns;
     std::vector<std::string> generated_feature_names;
+    bool has_predicted_rt_diagnostics = false;
+    std::string spectrum_prediction_device;
+    std::string rt_prediction_device;
+    StageTiming spectrum_prediction_timing;
+    StageTiming rt_prediction_timing;
 };
 
 struct RtResult {
@@ -72,6 +79,11 @@ private:
 };
 
 class SpectralEntropyFeature {
+public:
+    static void add(const Config& config, Dataset& data);
+};
+
+class PredictedRetentionTimeFeature {
 public:
     static void add(const Config& config, Dataset& data);
 };

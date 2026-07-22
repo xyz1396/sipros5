@@ -172,8 +172,9 @@ If you distribute this Software to others, you agree to:
 
 DIA-NN SOFTWARE LICENSE NOTICE
 
-tools/diann-2.6.1-fragmentation.pt originates as models/fr.d0.pt in the
-DIA-NN 2.6.1 Academia distribution. The DIA-NN project describes its Academia
+tools/diann-2.6.1-fragmentation.pt and tools/diann-2.6.1-retention-time.pt
+originate as models/fr.d0.pt and models/rt.d0.pt in the DIA-NN 2.6.1 Academia
+distribution. The DIA-NN project describes its Academia
 build as limited to non-profit academic research and directs users to the
 license supplied with each respective version. The license text below is the
 DIA-NN license supplied with the DIA-NN FragPipe distribution. It is included

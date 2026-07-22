@@ -68,10 +68,15 @@ SvmImplementation::SvmMatrix SvmImplementation::make_matrix(
     SvmMatrix matrix;
     matrix.row_begin = row_begin;
     matrix.rows = row_end - row_begin;
-    matrix.columns = data.feature_names.size() + 1;
+    if (!extra.empty() && extra.size() != data.rows.size()) {
+        throw std::runtime_error("SVM extra feature has the wrong row count");
+    }
+    const bool has_extra = !extra.empty();
+    matrix.columns = data.feature_names.size() + (has_extra ? 1 : 0);
     auto raw = [&](std::size_t i, std::size_t j) {
         return j < data.feature_names.size()
-                   ? static_cast<double>(data.rows[i].features[j]) : extra[i];
+                   ? static_cast<double>(data.rows[i].features[j])
+                   : extra[i];
     };
     std::vector<double> mean(matrix.columns), sum2(matrix.columns), scale(matrix.columns, 1.0);
     for (const auto i : training_rows) {

@@ -12,7 +12,9 @@ set -e
 # Micromamba/Conda build (./make.sh buildConda):
 #   micromamba create -n sipros5 -c conda-forge \
 #     hdf5 h5py openmpi cmake ninja gcc_linux-64 gxx_linux-64 gdb gperftools \
-#     python=3.12 lxml pandas sysroot_linux-64=2.34 matplotlib pytorch
+#     python=3.12 lxml pandas sysroot_linux-64=2.34 scikit-learn matplotlib \
+#     pytorch-gpu=2.12.1 cuda-cudart-dev=12.9 libcublas-dev=12.9 \
+#     cuda-nvrtc-dev=12.9 cuda-nvcc=12.9 cuda-nvtx-dev=12.9
 #
 # Static HDF5 used by the system build:
 #   git clone --depth 1 https://github.com/microsoft/vcpkg.git vcpkg
@@ -41,6 +43,8 @@ SYSTEM_BUILD_DIR="$BUILD_ROOT/system"
 CONDA_BUILD_DIR="$BUILD_ROOT/conda"
 CONDA_DEBUG_BUILD_DIR="$BUILD_ROOT/conda-debug"
 DIANN_MODEL_NAME="diann-2.6.1-fragmentation.pt"
+DIANN_RT_MODEL_NAME="diann-2.6.1-retention-time.pt"
+AERITH_MIN_TORCH_VERSION="2.12.1"
 RUNTIME_TOOL_BINARIES=(
     Raxport-linux-x64
     philosopher-v5.1.2
@@ -110,10 +114,15 @@ prepare_conda_build_dir() {
     local cache="$1/CMakeCache.txt"
     local hdf5_dir="=$CONDA_PREFIX/cmake"
     local torch_dir="=$TORCH_CMAKE_DIR"
+    local torch_version="=$TORCH_VERSION"
+    local cuda_compiler="=$CONDA_PREFIX/bin/nvcc"
     if [ -f "$cache" ] &&
        { ! grep -F 'HDF5_DIR:' "$cache" | grep -Fq "$hdf5_dir" ||
-         ! grep -F 'Torch_DIR:' "$cache" | grep -Fq "$torch_dir"; }; then
-        echo "Reconfiguring $1 with dynamic Conda HDF5 and LibTorch"
+         ! grep -F 'Torch_DIR:' "$cache" | grep -Fq "$torch_dir" ||
+         ! grep -F 'AERITH_TORCH_PACKAGE_VERSION:' "$cache" | grep -Fq "$torch_version" ||
+         { [ -x "$CONDA_PREFIX/bin/nvcc" ] &&
+           ! grep -F 'CMAKE_CUDA_COMPILER:' "$cache" | grep -Fq "$cuda_compiler"; }; }; then
+        echo "Reconfiguring $1 with the current Conda HDF5, CUDA, and LibTorch"
         rm -rf "$cache" "$1/CMakeFiles"
     fi
 }
@@ -123,12 +132,21 @@ run_sipros5() {
 }
 
 resolve_torch_cmake() {
-    local torch_prefix
-    torch_prefix=$(run_sipros5 python -c \
-        'import torch; print(torch.utils.cmake_prefix_path)') || {
-        echo "PyTorch is required in the sipros5 Conda environment." >&2
+    local torch_info torch_prefix
+    torch_info=$(run_sipros5 python -c \
+        'import re, sys, torch
+required = tuple(map(int, sys.argv[1].split(".")))
+installed = tuple(map(int, re.match(r"\d+(?:\.\d+)+", torch.__version__).group().split(".")))
+installed += (0,) * (len(required) - len(installed))
+if installed < required:
+    raise SystemExit(f"PyTorch {sys.argv[1]} or newer is required; found {torch.__version__}")
+print(torch.__version__.split("+")[0] + "\t" + torch.utils.cmake_prefix_path)' \
+        "$AERITH_MIN_TORCH_VERSION") || {
+        echo "PyTorch $AERITH_MIN_TORCH_VERSION or newer is required in the sipros5 Conda environment." >&2
         exit 1
     }
+    TORCH_VERSION="${torch_info%%$'\t'*}"
+    torch_prefix="${torch_info#*$'\t'}"
     TORCH_CMAKE_DIR="$torch_prefix/Torch"
     if [ ! -f "$TORCH_CMAKE_DIR/TorchConfig.cmake" ]; then
         echo "Missing dynamic LibTorch CMake package: $TORCH_CMAKE_DIR" >&2
@@ -231,7 +249,7 @@ verify_dynamic_torch() {
 stage_publish_tools() {
     local source_bin_dir="$1"
     local binaries=(sipros siprosMPI aerith)
-    local assets=("$DIANN_MODEL_NAME")
+    local assets=("$DIANN_MODEL_NAME" "$DIANN_RT_MODEL_NAME")
     local destinations=("$REPO_DIR/bin" "$REPO_DIR/tools")
     local asset binary destination tmpdir
 
@@ -329,10 +347,19 @@ case $1 in
     saved_ld_library_path="${LD_LIBRARY_PATH-}"
     unset LD_LIBRARY_PATH
     prepare_conda_build_dir "$CONDA_BUILD_DIR"
+    conda_cuda_args=()
+    if [ -x "$CONDA_PREFIX/bin/nvcc" ]; then
+        conda_cuda_args+=(
+            "-DCMAKE_CUDA_COMPILER=$CONDA_PREFIX/bin/nvcc"
+            "-DCUDAToolkit_ROOT=$CONDA_PREFIX"
+        )
+    fi
     cd "$CONDA_BUILD_DIR"
     cmake -G Ninja "${cmake_args[@]}" -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_CONDA=ON -DSIPROS_STATIC_HDF5=OFF \
         -DAERITH_ENABLE_TORCH=ON -DTorch_DIR="$TORCH_CMAKE_DIR" \
+        -DAERITH_TORCH_PACKAGE_VERSION="$TORCH_VERSION" \
+        "${conda_cuda_args[@]}" \
         -DHDF5_USE_STATIC_LIBRARIES=OFF \
         -DHDF5_DIR="$CONDA_PREFIX/cmake" "$REPO_DIR"
     export LD_LIBRARY_PATH="${saved_ld_library_path:+$saved_ld_library_path:}${CONDA_PREFIX}/lib"

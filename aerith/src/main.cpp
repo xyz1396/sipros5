@@ -22,7 +22,7 @@ private:
 };
 
 void CommandLine::usage(std::ostream& out) {
-    out << "Aerith: SAGE RT modeling and Percolator-style SVM filtering for Sipros PIN files\n\n"
+    out << "Aerith: DIA-NN features and Percolator-style SVM filtering for Sipros PIN files\n\n"
         << "Usage: aerith --target-pin TARGET.pin --decoy-pin DECOY.pin\n"
         << "              --output-prefix PATH [repeat the three options per sample] [options]\n"
         << "       aerith --input MERGED.pin --output-prefix PATH [options]\n\n"
@@ -37,6 +37,8 @@ void CommandLine::usage(std::ostream& out) {
         << "  --database FILE          FASTA path recorded in Philosopher pepXML\n"
         << "  --spectra FILE           Raxport HDF5 MS2 file; repeat once per sample\n"
         << "  --spectrum-model FILE    DIA-NN TorchScript model (default: beside aerith)\n"
+        << "  --rt-model FILE          DIA-NN RT TorchScript model (default: beside aerith)\n"
+        << "  --no-predicted-rt        Use legacy Aerith RT model instead of DIA-NN RT\n"
         << "  --fragment-ppm FLOAT     Fragment matching tolerance (default 20)\n"
         << "  --decoy-prefix TEXT      Philosopher decoy prefix (default Decoy_)\n"
         << "  --ignore-pct             Exclude SIP abundance columns from the SVM\n"
@@ -127,6 +129,10 @@ bool CommandLine::parse(
             config.spectrum_paths.push_back(value("--spectra"));
         } else if (arg == "--spectrum-model") {
             config.spectrum_model_path = value("--spectrum-model");
+        } else if (arg == "--rt-model") {
+            config.rt_model_path = value("--rt-model");
+        } else if (arg == "--no-predicted-rt") {
+            config.predict_rt = false;
         } else if (arg == "--fragment-ppm") {
             config.fragment_ppm = number(value("--fragment-ppm"), "--fragment-ppm");
         } else if (arg == "--decoy-prefix") {
@@ -165,14 +171,13 @@ int main(int argc, char** argv) {
             std::filesystem::read_symlink("/proc/self/exe", executable_error);
         if (executable_error) executable_path = std::filesystem::absolute(argv[0]);
         const auto executable = executable_path.parent_path();
-        constexpr const char* model_name = "diann-2.6.1-fragmentation.pt";
-        const auto sibling_model = executable / model_name;
-        const auto source_model = std::filesystem::current_path() / "tools" / model_name;
-        if (std::filesystem::exists(sibling_model)) {
-            config.spectrum_model_path = sibling_model.string();
-        } else if (std::filesystem::exists(source_model)) {
-            config.spectrum_model_path = source_model.string();
-        }
+        const auto locate_model = [&](const char* name) {
+            const auto sibling = executable / name;
+            if (std::filesystem::exists(sibling)) return sibling.string();
+            return std::string{};
+        };
+        config.spectrum_model_path = locate_model("diann-2.6.1-fragmentation.pt");
+        config.rt_model_path = locate_model("diann-2.6.1-retention-time.pt");
         int exit_status = EXIT_SUCCESS;
         if (!CommandLine::parse(argc, argv, config, exit_status)) {
             return exit_status;

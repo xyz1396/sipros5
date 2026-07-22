@@ -1,9 +1,12 @@
 #include "pipeline.hpp"
+#include "torch_device.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <limits>
 #include <numeric>
@@ -32,8 +35,6 @@ void SpectralEntropyFeature::add(const Config& config, Dataset&) {
 }
 
 #else
-
-namespace {
 
 constexpr double kProton = 1.007276466621;
 constexpr double kWater = 18.0105646837;
@@ -188,7 +189,7 @@ const std::unordered_map<std::string, std::int64_t>& diann_dictionary() {
     return dictionary;
 }
 
-std::string peptide_body(const std::string& peptide) {
+std::string spectrum_peptide_body(const std::string& peptide) {
     const auto first_bracket = peptide.find('[');
     const auto last_bracket = peptide.rfind(']');
     if (first_bracket != std::string::npos && last_bracket > first_bracket &&
@@ -222,7 +223,7 @@ ParsedPeptide parse_peptide(
     const std::unordered_map<std::string, std::int64_t>& dictionary) {
     ParsedPeptide parsed;
     parsed.charge = charge;
-    const std::string body = peptide_body(peptide);
+    const std::string body = spectrum_peptide_body(peptide);
     parsed.key = body + '\x1f' + std::to_string(charge);
 
     auto required_token = [&](const std::string& token) {
@@ -328,7 +329,8 @@ void preprocess_for_entropy(std::vector<Fragment>& fragments) {
 }
 
 std::unordered_map<std::string, std::vector<Fragment>> predict_fragments(
-    const std::filesystem::path& model_path, const Dataset& data) {
+    const std::filesystem::path& model_path, const Dataset& data,
+    std::string& selected_device) {
     const auto& dictionary = diann_dictionary();
     std::unordered_map<std::string, ParsedPeptide> unique;
     unique.reserve(data.rows.size() / 2);
@@ -344,31 +346,35 @@ std::unordered_map<std::string, std::vector<Fragment>> predict_fragments(
     // diann-2.6.1-fragmentation.pt. Source release:
     // https://github.com/vdemichev/DiaNN/releases/tag/2.0
     // It is loaded dynamically through LibTorch.
-    torch::jit::script::Module model = torch::jit::load(model_path.string());
-    model.eval();
-    torch::NoGradGuard no_grad;
-    std::unordered_map<std::string, std::vector<Fragment>> predictions;
-    predictions.reserve(unique.size());
+    return run_torch_prefer_cuda(
+        "DIA-NN spectrum prediction", selected_device,
+        [&](const torch::Device& device) {
+        auto model = load_torch_model_on_device(model_path, device);
+        c10::InferenceMode inference_mode;
+        std::unordered_map<std::string, std::vector<Fragment>> predictions;
+        predictions.reserve(unique.size());
 
-    for (auto& group_entry : groups) {
-        auto& group = group_entry.second;
-        const std::size_t token_count = group_entry.first;
-        for (std::size_t begin = 0; begin < group.size(); begin += kPredictionBatch) {
-            const std::size_t count = std::min(kPredictionBatch, group.size() - begin);
-            auto input = torch::empty(
+        for (auto& group_entry : groups) {
+            auto& group = group_entry.second;
+            const std::size_t token_count = group_entry.first;
+            for (std::size_t begin = 0; begin < group.size(); begin += kPredictionBatch) {
+                const std::size_t count = std::min(kPredictionBatch, group.size() - begin);
+                auto cpu_input = torch::empty(
                 {static_cast<long>(count), static_cast<long>(token_count + 1)},
                 torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
-            auto accessor = input.accessor<std::int64_t, 2>();
-            for (std::size_t row = 0; row < count; ++row) {
-                const auto& peptide = *group[begin + row];
-                accessor[row][0] = std::min(peptide.charge, 4) - 2;
-                for (std::size_t column = 0; column < token_count; ++column) {
-                    accessor[row][column + 1] = peptide.tokens[column];
+                auto accessor = cpu_input.accessor<std::int64_t, 2>();
+                for (std::size_t row = 0; row < count; ++row) {
+                    const auto& peptide = *group[begin + row];
+                    accessor[row][0] = std::min(peptide.charge, 4) - 2;
+                    for (std::size_t column = 0; column < token_count; ++column) {
+                        accessor[row][column + 1] = peptide.tokens[column];
+                    }
                 }
-            }
-            const auto output = model.forward({input}).toTensor().to(torch::kCPU).contiguous();
-            const auto values = output.accessor<float, 2>();
-            for (std::size_t row = 0; row < count; ++row) {
+                const auto input = move_torch_input(cpu_input, device);
+                const auto output =
+                    model.forward({input}).toTensor().to(torch::kCPU).contiguous();
+                const auto values = output.accessor<float, 2>();
+                for (std::size_t row = 0; row < count; ++row) {
                 const auto& peptide = *group[begin + row];
                 const std::size_t residues = peptide.residue_masses.size();
                 const std::size_t cleavages = residues - 3;
@@ -431,11 +437,12 @@ std::unordered_map<std::string, std::vector<Fragment>> predict_fragments(
                     fragments.push_back({candidate.mz, packed});
                 }
                 preprocess_for_entropy(fragments);
-                predictions.emplace(peptide.key, std::move(fragments));
+                    predictions.emplace(peptide.key, std::move(fragments));
+                }
             }
         }
-    }
-    return predictions;
+        return predictions;
+    });
 }
 
 std::unordered_map<std::uint64_t, Spectrum> load_spectra(
@@ -566,8 +573,6 @@ float entropy_similarity(const std::vector<Fragment>& predicted,
     return static_cast<float>(std::round(score * 10000.0) / 10000.0);
 }
 
-} // namespace
-
 void SpectralEntropyFeature::add(const Config& config, Dataset& data) {
     if (config.spectrum_paths.empty()) return;
     if (config.spectrum_model_path.empty()) {
@@ -585,7 +590,16 @@ void SpectralEntropyFeature::add(const Config& config, Dataset& data) {
             "PIN already contains unweighted_spectral_entropy; omit --spectra or remove the column");
     }
 
-    const auto predictions = predict_fragments(model_path, data);
+    const auto prediction_begin = std::chrono::steady_clock::now();
+    const std::clock_t prediction_cpu_begin = std::clock();
+    const auto predictions = predict_fragments(
+        model_path, data, data.spectrum_prediction_device);
+    const std::clock_t prediction_cpu_end = std::clock();
+    const auto prediction_end = std::chrono::steady_clock::now();
+    data.spectrum_prediction_timing = {
+        std::chrono::duration<double>(prediction_end - prediction_begin).count(),
+        static_cast<double>(prediction_cpu_end - prediction_cpu_begin) /
+            CLOCKS_PER_SEC};
     data.feature_names.push_back("unweighted_spectral_entropy");
     data.generated_feature_names.push_back("unweighted_spectral_entropy");
 
@@ -602,7 +616,7 @@ void SpectralEntropyFeature::add(const Config& config, Dataset& data) {
             try {
                 auto& row = data.rows[static_cast<std::size_t>(index)];
                 if (row.file_id != file) continue;
-                const std::string key = peptide_body(row.peptide) + '\x1f' +
+                const std::string key = spectrum_peptide_body(row.peptide) + '\x1f' +
                                         std::to_string(row.charge);
                 const auto prediction = predictions.find(key);
                 const auto spectrum = spectra.find(row.scan);

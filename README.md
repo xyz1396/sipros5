@@ -126,7 +126,7 @@ spacing.
   - `<sample>_filtered_psms.tsv`: Aerith 1% FDR PSMs with original search and RT features.
   - `<sample>.pep.xml`: Aerith pepXML consumed directly by Philosopher.
   - `peptide.tsv`, `protein.tsv`: peptides, and proteins passing 1% FDR decoy filtering.
-  - `*_filtered_psms.tsv`: PSMs passing 1% FDR decoy filtering with `isotopicPeakNumbers`, `MS1IsotopeFitScore`, `MS1IsotopicAbundances`, `MS2IsotopicAbundances`, and, for regular FASTA search, `unweighted_spectral_entropy`.
+  - `*_filtered_psms.tsv`: PSMs passing 1% FDR decoy filtering with `isotopicPeakNumbers`, `MS1IsotopeFitScore`, `MS1IsotopicAbundances`, `MS2IsotopicAbundances`, and, for regular FASTA search, `unweighted_spectral_entropy`, `delta_RT_loess`, `delta_RT_loess_real`, and `pred_RT_real_units`.
 
 ### Native predicted-spectrum entropy in Aerith
 
@@ -146,9 +146,21 @@ Build Sipros and dynamic-LibTorch Aerith from the `sipros5` environment with:
 ./make.sh buildConda
 ```
 
+The Aerith Conda build requires PyTorch/LibTorch 2.12.1 or newer. For the GPU build, install the matching CUDA 12.9
+PyTorch and CUDA development packages shown at the top of `make.sh`.
+
 `make.sh` obtains `Torch_DIR` from the environment's Python package and checks
 that Aerith dynamically resolves `libtorch` and `libc10`; LibTorch is not
 statically embedded in Aerith.
+
+Aerith automatically uses CUDA for DIA-NN spectrum and RT prediction when a
+CUDA-enabled PyTorch installation and an accessible GPU are available. If CUDA
+is unavailable or initialization/inference fails, Aerith retries prediction on
+the CPU. The regular FASTA workflow does not override `CUDA_VISIBLE_DEVICES`,
+so it honors GPU visibility assigned by the user, container, or scheduler. The
+selected device or fallback reason is written to the workflow log. The timing
+table reports the exact DIA-NN model-inference wall and CPU times with `(GPU)`
+or `(CPU)` in the row label, in addition to the complete feature-stage time.
 
 Pass one Raxport HDF5 file for every input sample, in the same order as the PIN
 pairs:
@@ -182,6 +194,36 @@ When this feature is enabled, Aerith's timing report includes `Predict spectra
 and compute entropy`. This measures the complete feature-generation stage,
 including unique peptide-charge preparation, Torch inference, HDF5 loading,
 fragment matching, and entropy calculation.
+
+### Native DIA-NN delta-RT in Aerith
+
+Aerith also loads the renamed DIA-NN 2.6.1 `models/rt.d0.pt` checkpoint from
+`tools/diann-2.6.1-retention-time.pt`. It predicts each unique modified peptide
+sequence once (RT is charge-independent in this graph), converts the raw model
+output to DIA-NN iRT, and fits a separate monotonic robust-LOESS calibration
+for each input sample. It computes three MSBooster-compatible values:
+
+- `delta_RT_loess`: absolute predicted-iRT error after mapping observed RT to
+  iRT. This is the only DIA-NN RT value used for SVM training and shown in the
+  SVM feature-weight report.
+- `delta_RT_loess_real`: absolute error in the sample's RT units. This is an
+  output-only diagnostic written immediately after `retentiontime`.
+- `pred_RT_real_units`: predicted iRT mapped back to the sample's RT units.
+  This is also output-only and follows `delta_RT_loess_real`.
+
+The calibration uses up to 5,000 unique precursors ranked only by `WDPscores`:
+the best 4,000 globally plus up to 20 additional nonduplicate precursors from
+each of 50 equal-width observed-RT bins. Sparse bins are backfilled with the
+best remaining WDP candidates. Target/decoy labels, `log10_evalue`, and
+`hyperscore` are not consulted.
+Both Sipros symbol modifications and FragPipe/MSBooster numeric mass notation
+are accepted. Use `--rt-model` to override the checkpoint. The timing report's
+`Predict RT and compute delta-RT` row includes peptide deduplication, Torch
+inference, bandwidth selection, LOESS calibration, inverse mapping, and all
+three value calculations. When the DIA-NN RT feature is generated,
+Aerith skips its legacy nested chemical RT model and does not add the redundant
+`sqrtAbsDeltaRT` feature. Use `--no-predicted-rt` to disable DIA-NN RT and use
+the legacy Aerith RT model instead.
 
 ## Sipros5 Setup Guide (set the python and binary by yourself)
 

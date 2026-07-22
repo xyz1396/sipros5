@@ -686,7 +686,7 @@ class WorkflowAllocationTests(unittest.TestCase):
         workflow.aerithPath = "aerith"
         workflow.decoyPrefix = "Decoy_"
         workflow.threadNumber = 16
-        workflow.logger = null_logger(f"filter-allocation-{id(workflow)}")
+        workflow.logger = mock.Mock()
         workflow.ignorePCT = False
         workflow.dryrun = False
         workflow.spectraPaths = ["/spectra/one.h5", "/spectra/two.h5", "/spectra/three.h5"]
@@ -719,7 +719,13 @@ class WorkflowAllocationTests(unittest.TestCase):
         self.assertNotIn("--augmented-pin", arguments)
         self.assertEqual(int(environment["OMP_NUM_THREADS"]), 16)
         self.assertEqual(int(environment["MKL_NUM_THREADS"]), 16)
+        self.assertNotIn("CUDA_VISIBLE_DEVICES", environment)
         self.assertEqual(cores, 16)
+        workflow.logger.info.assert_any_call(
+            "Aerith DIA-NN device policy: CUDA preferred; "
+            "automatic CPU fallback when CUDA is unavailable or fails; "
+            "legacy Aerith RT modeling is skipped"
+        )
 
     def test_philosopher_jobs_receive_balanced_gomaxprocs(self) -> None:
         workflow = object.__new__(assembly_module.assembly)
