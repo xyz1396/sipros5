@@ -7,7 +7,6 @@ import time
 from argparse import Namespace
 from search import search
 from filter import filter
-from assembly import assembly
 from thread_allocation import (
     MIN_SIPROS_THREADS,
     available_cpu_count,
@@ -27,7 +26,6 @@ class SIPROSWorkflow:
             'sipros': f'{upper_path}/tools/sipros',
             'filter': f'{upper_path}/tools/aerith',
             'deepfilter': f'{upper_path}/tools/deepfilter',
-            'assembly': f'{upper_path}/tools/philosopher-v5.1.2',
             'metaLP': f'{upper_path}/tools/metaLP',
             'quantification': f'{upper_path}/tools/ionquant'
         }
@@ -224,6 +222,16 @@ citation:
                                decoyPrefix=sipros_search.decoyPrefix,
                                ignorePCT=self.args.ignorePCT,
                                dryrun=self.args.dryrun,
+                               fastaPath=self.args.fasta,
+                               decoyPath=sipros_search.decoyPath,
+                               assembleProteins=not spectra_mode,
+                               element=self.args.element,
+                               negative_control=self.args.negative_control,
+                               label_threshold=self.args.label_threshold,
+                               fixedCam=not any(
+                                   value.strip().lower() == "none"
+                                   for value in (self.args.fixed_ptm or [])
+                               ),
                                spectraPaths=(
                                    [sipros_search.hdf5_paths.get(
                                        name,
@@ -234,20 +242,6 @@ citation:
                                    else None
                                ))
         sipros_filter.run()
-
-        sipros_assembly = assembly(baseNames=sipros_search.base_names,
-                                   philosopherPath=self.toolsPaths['assembly'],
-                                   aerithPath=self.toolsPaths['filter'],
-                                   fastaPath=self.args.fasta,
-                                   decoyPath=sipros_search.decoyPath,
-                                   outputPath=self.args.output,
-                                   threadNumber=sipros_search.threadNumber,
-                                   negative_control=self.args.negative_control,
-                                   element=self.args.element,
-                                   label_threshold=self.args.label_threshold,
-                                   logger=self.logger,
-                                   decoyPrefix=sipros_search.decoyPrefix)
-        sipros_assembly.run()
 
         end_time = time.time()
         running_time = end_time - start_time

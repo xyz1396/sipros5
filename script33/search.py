@@ -536,7 +536,6 @@ class search:
         if self.element == 'R':
             self.logger.error('search-spectra mode requires a SIP element such as C13')
             raise SystemExit(1)
-        self.reverse_fasta_sequences()
         self.logger.info(
             f'Workflow CPU allocation: {self.threadNumber} cores '
             f'({self.core_count} available)'

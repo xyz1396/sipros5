@@ -28,8 +28,12 @@ struct Psm {
     std::uint64_t scan = 0;
     std::size_t rank = 0;
     int charge = 0;
+    int missed_cleavages = 0;
+    int ptm_count = 0;
     double merge_score = 0.0;
     double diff_score = 0.0;
+    double mass_error = 0.0;
+    double log10_precursor_intensity = 0.0;
     float delta_rt_loess_real = 0.0f;
     float predicted_rt_real_units = 0.0f;
     std::string raw_line;
@@ -121,17 +125,12 @@ public:
 
 private:
     static std::vector<std::string_view> split_tabs(const std::string& line);
-    static std::size_t required_column(
-        const std::unordered_map<std::string, std::size_t>& columns,
-        const std::string& name);
     static std::string formatted_number(double value);
     static std::vector<std::string_view> row_fields(
         const Dataset& data, const Psm& psm);
     static void write_original_field(
         std::ostream& stream, const Dataset& data, const Psm& psm,
         const std::vector<std::string_view>& fields, std::size_t column);
-    static std::string original_field(
-        const Dataset& data, const Psm& psm, const std::string& name);
     static std::vector<std::size_t> selected_rows(
         const Dataset& data, std::size_t file, int label = 0);
     static void write_results(
@@ -143,15 +142,19 @@ private:
         const std::vector<double>& scores, const std::vector<double>& q,
         const std::vector<double>& pep,
         const std::vector<double>& rt_residual, double threshold);
-    static std::string xml_escape(std::string_view value);
-    static std::string trim(std::string value);
-    static std::string sanitized_protein(
-        std::string protein, const std::string& decoy_prefix);
-    static std::vector<std::string> protein_ids(
-        const Psm& psm, const std::string& decoy_prefix);
-    static void write_pepxml(
-        const std::string& path, std::size_t file, const Config& config,
-        const Dataset& data, const std::vector<double>& scores,
+};
+
+struct ProteinAssemblyResult {
+    std::size_t proteins = 0;
+    std::string output_dir;
+    std::vector<AccelerationTiming> stages;
+};
+
+class ProteinAssembler {
+public:
+    static ProteinAssemblyResult write(
+        const Config& config, const Dataset& data,
+        const std::vector<double>& scores, const std::vector<double>& q,
         const std::vector<double>& pep);
 };
 

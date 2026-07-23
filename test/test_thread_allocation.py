@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import inspect
 import os
 from pathlib import Path
 import re
@@ -21,11 +22,11 @@ SCRIPT_DIR = ROOT / "script33"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-import assembly as assembly_module
 import command_runner as command_runner_module
 import filter as filter_module
 import search as search_module
 import thread_allocation as allocation_module
+import pandas as pd
 
 
 def null_logger(name: str) -> logging.Logger:
@@ -682,9 +683,17 @@ class WorkflowAllocationTests(unittest.TestCase):
     def test_filter_runs_one_cross_sample_aerith_team(self) -> None:
         workflow = object.__new__(filter_module.filter)
         workflow.baseNames = ["one", "two", "three"]
-        workflow.outPutPath = "/output"
+        workflow.outputPath = "/output"
         workflow.aerithPath = "aerith"
         workflow.decoyPrefix = "Decoy_"
+        workflow.fastaPath = "target.fasta"
+        workflow.decoyPath = "decoy.fasta"
+        workflow.assembleProteins = True
+        workflow.element = "R"
+        workflow.negative_control = ""
+        workflow.label_threshold = 2.0
+        workflow.fixedCam = True
+        workflow.postprocess_fasta_results = mock.Mock()
         workflow.threadNumber = 16
         workflow.logger = mock.Mock()
         workflow.ignorePCT = False
@@ -704,12 +713,22 @@ class WorkflowAllocationTests(unittest.TestCase):
             workflow.run()
 
         self.assertEqual(len(captured), 1)
+        workflow.postprocess_fasta_results.assert_called_once_with()
         command, environment, cores = captured[0]
         arguments = shlex.split(command)
         self.assertEqual(arguments[0], "aerith")
         self.assertEqual(arguments.count("--target-pin"), 3)
         self.assertEqual(arguments.count("--decoy-pin"), 3)
         self.assertEqual(arguments.count("--output-prefix"), 3)
+        self.assertEqual(arguments.count("--protein-output-dir"), 1)
+        self.assertEqual(
+            arguments[arguments.index("--database") + 1], "target.fasta"
+        )
+        self.assertEqual(
+            arguments[arguments.index("--decoy-database") + 1],
+            "decoy.fasta",
+        )
+        self.assertNotIn("targetDecoy.faa", command)
         self.assertEqual(arguments.count("--spectra"), 3)
         self.assertEqual(
             [arguments[index + 1] for index, value in enumerate(arguments)
@@ -727,28 +746,73 @@ class WorkflowAllocationTests(unittest.TestCase):
             "legacy Aerith RT modeling is skipped"
         )
 
-    def test_philosopher_jobs_receive_balanced_gomaxprocs(self) -> None:
-        workflow = object.__new__(assembly_module.assembly)
-        workflow.threadNumber = 16
-        workflow.logger = null_logger(f"assembly-allocation-{id(workflow)}")
-        captured: list[tuple[str, str, int]] = []
-        workflow.run_command = (
-            lambda command, path, threads: captured.append((command, path, threads))
+    def test_sip_spectra_filter_skips_all_protein_arguments(self) -> None:
+        workflow = object.__new__(filter_module.filter)
+        workflow.baseNames = ["sample"]
+        workflow.outputPath = "/output"
+        workflow.aerithPath = "aerith"
+        workflow.decoyPrefix = "Decoy_"
+        workflow.fastaPath = "target.fasta"
+        workflow.decoyPath = "decoy.fasta"
+        workflow.assembleProteins = False
+        workflow.fixedCam = True
+        workflow.ignorePCT = False
+        workflow.spectraPaths = []
+
+        arguments = shlex.split(workflow.command())
+
+        self.assertIn("--no-protein-assembly", arguments)
+        self.assertIn("--filtered-only", arguments)
+        self.assertNotIn("--database", arguments)
+        self.assertNotIn("--decoy-database", arguments)
+        self.assertNotIn("--protein-output-dir", arguments)
+        self.assertEqual(
+            arguments[arguments.index("--output-prefix") + 1],
+            "/output/sample/sample",
         )
 
-        allocation = workflow.run_parallel_commands(
-            ["one", "two", "three"], ["/one", "/two", "/three"],
-            "Philosopher test",
-        )
 
-        self.assertEqual(allocation.worker_count, 3)
-        self.assertEqual(allocation.peak_threads, 16)
-        self.assertEqual(sorted(threads for _, _, threads in captured), [5, 5, 6])
+class NativeProteinAssemblyOwnershipTests(unittest.TestCase):
+    def test_merged_filter_has_no_bridge_or_combined_fasta(self) -> None:
+        source = inspect.getsource(filter_module.filter)
+        self.assertNotIn("proteinprophet", source.lower())
+        self.assertNotIn("pep.xml", source.lower())
+        self.assertNotIn("targetdecoy", source.lower())
 
+    def test_protein_with_psm_includes_sample_abundance(self) -> None:
+        with tempfile.TemporaryDirectory() as output:
+            sample_dir = Path(output, "sample")
+            sample_dir.mkdir()
+            pd.DataFrame([{
+                "Protein": "sp|P1|ONE",
+                "Razor Intensity": 3210.5,
+            }]).to_csv(sample_dir / "protein.tsv", sep="\t", index=False)
+            pd.DataFrame([{
+                "Protein": "sp|P1|ONE",
+                "Protein Probability": 1.0,
+            }]).to_csv(Path(output, "protein.tsv"), sep="\t", index=False)
+            filtered = pd.DataFrame([{
+                "Label": 1,
+                "Peptide": "K[PEPTIDE]R",
+                "Proteins": "{sp|P1|ONE}",
+                "MS1IsotopicAbundances": 1.0,
+                "MS2IsotopicAbundances": 1.0,
+                "log10_precursorIntensities": 4.0,
+            }])
+            workflow = object.__new__(filter_module.filter)
+            workflow.outputPath = output
+            workflow.baseNames = ["sample"]
+            workflow.decoyPrefix = "Decoy_"
+            workflow.logger = mock.Mock()
 
-class NativePepXmlOwnershipTests(unittest.TestCase):
-    def test_python_assembly_does_not_rewrite_aerith_pepxml(self) -> None:
-        self.assertFalse(hasattr(assembly_module.assembly, "dataframe_to_pepxml"))
+            workflow.match_psms_to_proteins({"sample": filtered})
+
+            result = pd.read_csv(
+                Path(output, "protein_with_PSM.tsv"), sep="\t"
+            )
+            self.assertEqual(
+                result.loc[0, "sample_ProteinAbundance"], 3210.5
+            )
 
 
 if __name__ == "__main__":

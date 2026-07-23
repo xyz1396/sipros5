@@ -93,6 +93,10 @@ Dataset PinReader::read_file(const Config& config, const std::string& input_path
     const auto rank_col = required_column(columns, "ranks");
     const auto charge_col = required_column(columns, "parentCharges");
     const auto diff_col = columns.find("diffScores");
+    const auto missed_col = columns.find("missCleavageSiteNumbers");
+    const auto ptm_col = columns.find("PTMnumbers");
+    const auto mass_error_col = columns.find("massErrors");
+    const auto intensity_col = columns.find("log10_precursorIntensities");
 
     const std::unordered_set<std::string> excluded{
         "SpecId", "Label", "ScanNr", "retentiontime", "ExpMass",
@@ -164,6 +168,24 @@ Dataset PinReader::read_file(const Config& config, const std::string& input_path
         }
         if (diff_col != columns.end()) {
             row.diff_score = parse_number(fields[diff_col->second], "diffScores", line_number);
+        }
+        if (missed_col != columns.end()) {
+            row.missed_cleavages = static_cast<int>(parse_number(
+                fields[missed_col->second], "missCleavageSiteNumbers",
+                line_number));
+        }
+        if (ptm_col != columns.end()) {
+            row.ptm_count = static_cast<int>(
+                parse_number(fields[ptm_col->second], "PTMnumbers", line_number));
+        }
+        if (mass_error_col != columns.end()) {
+            row.mass_error = parse_number(
+                fields[mass_error_col->second], "massErrors", line_number);
+        }
+        if (intensity_col != columns.end()) {
+            row.log10_precursor_intensity = parse_number(
+                fields[intensity_col->second], "log10_precursorIntensities",
+                line_number);
         }
         row.features.reserve(numeric_columns.size());
         for (const auto column : numeric_columns) {

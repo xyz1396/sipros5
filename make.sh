@@ -47,7 +47,6 @@ DIANN_RT_MODEL_NAME="diann-2.6.1-retention-time.pt"
 AERITH_MIN_TORCH_VERSION="2.12.1"
 RUNTIME_TOOL_BINARIES=(
     Raxport-linux-x64
-    philosopher-v5.1.2
     sipros
     siprosMPI
     aerith

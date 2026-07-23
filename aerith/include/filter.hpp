@@ -23,6 +23,13 @@ struct StageTiming {
     double cpu_seconds = 0.0;
 };
 
+struct AccelerationTiming {
+    std::string name;
+    StageTiming timing;
+    bool uses_omp = false;
+    bool uses_simd = false;
+};
+
 struct Config {
     std::vector<std::string> inputs;
     std::vector<std::string> target_pins;
@@ -30,6 +37,8 @@ struct Config {
     std::vector<std::string> output_prefixes;
     std::vector<std::string> spectrum_paths;
     std::string database_path;
+    std::string decoy_database_path;
+    std::string protein_output_dir;
     std::string spectrum_model_path;
     std::string rt_model_path;
     bool predict_rt = true;
@@ -43,6 +52,9 @@ struct Config {
     unsigned int max_iterations = 10;
     double fragment_ppm = 20.0;
     bool ignore_pct = false;
+    bool assemble_proteins = true;
+    bool filtered_only = false;
+    bool fixed_cam = true;
 };
 
 struct Summary {
@@ -55,6 +67,13 @@ struct Summary {
     std::size_t rt_training_targets = 0;
     std::size_t target_ids = 0;
     std::size_t distinct_target_peptides = 0;
+    std::size_t distinct_target_peptide_forms = 0;
+    std::size_t distinct_target_ptm_peptides = 0;
+    std::size_t target_ptm_psms = 0;
+    std::size_t protein_ids = 0;
+    std::string protein_output_dir;
+    bool filtered_only = false;
+    double reporting_fdr = 0.01;
     double rt_r2 = 0.0;
     bool used_internal_rt_model = false;
     std::string spectrum_prediction_device;
@@ -69,6 +88,8 @@ struct Summary {
     StageTiming svm_model_timing;
     StageTiming statistics_timing;
     StageTiming write_timing;
+    StageTiming protein_assembly_timing;
+    std::vector<AccelerationTiming> protein_assembly_stages;
     StageTiming total_timing;
     double omp_speedup_ratio = 1.0;
     double omp_parallel_efficiency = 1.0;

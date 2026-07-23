@@ -15,6 +15,16 @@
 
 namespace aerith {
 
+std::string peptide_form(const std::string& peptide) {
+    const auto open = peptide.find('[');
+    const auto close = peptide.rfind(']');
+    if (open != std::string::npos && close != std::string::npos &&
+        close > open) {
+        return peptide.substr(open + 1, close - open - 1);
+    }
+    return peptide;
+}
+
 Summary run(const Config& config) {
     using Clock = std::chrono::steady_clock;
     const auto elapsed_seconds = [](Clock::time_point begin, Clock::time_point end) {
@@ -55,6 +65,8 @@ Summary run(const Config& config) {
     Summary summary;
     summary.input_paths = data.input_paths;
     summary.output_prefixes = config.output_prefixes;
+    summary.filtered_only = config.filtered_only;
+    summary.reporting_fdr = config.q_threshold;
     summary.threads = static_cast<unsigned int>(omp_get_max_threads());
     summary.feature_names = data.feature_names;
     summary.used_internal_rt_model = use_internal_rt_model;
@@ -129,6 +141,8 @@ Summary run(const Config& config) {
     std::vector<double> q(data.rows.size(), 1.0), pep(data.rows.size(), 1.0);
     summary.sample_models.resize(data.input_paths.size());
     std::unordered_set<std::string> peptides;
+    std::unordered_set<std::string> peptide_forms;
+    std::unordered_set<std::string> ptm_peptides;
     for (std::size_t file = 0; file < data.input_paths.size(); ++file) {
         auto& sample = summary.sample_models[file];
         sample.name = config.output_prefixes.size() == data.input_paths.size()
@@ -160,12 +174,20 @@ Summary run(const Config& config) {
                 const auto peptide = stripped_peptide(data.rows[i].peptide);
                 sample_peptides.insert(peptide);
                 peptides.insert(peptide);
+                const auto form = peptide_form(data.rows[i].peptide);
+                peptide_forms.insert(form);
+                if (data.rows[i].ptm_count > 0) {
+                    ptm_peptides.insert(form);
+                    ++summary.target_ptm_psms;
+                }
             }
         }
         sample.distinct_target_peptides = sample_peptides.size();
         summary.target_ids += sample.target_ids;
     }
     summary.distinct_target_peptides = peptides.size();
+    summary.distinct_target_peptide_forms = peptide_forms.size();
+    summary.distinct_target_ptm_peptides = ptm_peptides.size();
     const std::clock_t statistics_cpu_end = std::clock();
     const auto statistics_end = Clock::now();
 
@@ -174,6 +196,19 @@ Summary run(const Config& config) {
     ResultWriter::write(config, data, scores, q, pep, rt, outer_folds);
     const std::clock_t write_cpu_end = std::clock();
     const auto write_end = Clock::now();
+
+    const auto protein_begin = Clock::now();
+    const std::clock_t protein_cpu_begin = std::clock();
+    if (config.assemble_proteins && !config.database_path.empty() &&
+        !config.decoy_database_path.empty()) {
+        const auto assembly =
+            ProteinAssembler::write(config, data, scores, q, pep);
+        summary.protein_ids = assembly.proteins;
+        summary.protein_output_dir = assembly.output_dir;
+        summary.protein_assembly_stages = assembly.stages;
+    }
+    const std::clock_t protein_cpu_end = std::clock();
+    const auto protein_end = Clock::now();
     const std::clock_t cpu_end = std::clock();
 
     summary.read_timing = {
@@ -200,8 +235,11 @@ Summary run(const Config& config) {
     summary.write_timing = {
         elapsed_seconds(write_begin, write_end),
         cpu_seconds(write_cpu_begin, write_cpu_end)};
+    summary.protein_assembly_timing = {
+        elapsed_seconds(protein_begin, protein_end),
+        cpu_seconds(protein_cpu_begin, protein_cpu_end)};
     summary.total_timing = {
-        elapsed_seconds(total_begin, write_end),
+        elapsed_seconds(total_begin, protein_end),
         cpu_seconds(cpu_begin, cpu_end)};
     if (summary.total_timing.wall_seconds > 0.0) {
         summary.omp_speedup_ratio =

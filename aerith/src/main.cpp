@@ -3,7 +3,9 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -34,17 +36,23 @@ void CommandLine::usage(std::ostream& out) {
         << "  --q-threshold FLOAT      Reporting threshold (default 0.01)\n"
         << "  --train-fdr FLOAT        RT/SVM selection threshold (default 0.01)\n"
         << "  --rt-ridge FLOAT         RT OLS regularization (default 1e-4)\n"
-        << "  --database FILE          FASTA path recorded in Philosopher pepXML\n"
+        << "  --database FILE          Target FASTA used for protein assembly\n"
+        << "  --decoy-database FILE    Decoy FASTA used for protein assembly\n"
+        << "  --protein-output-dir DIR Write combined protein.tsv/protein.fas here\n"
+        << "  --no-protein-assembly    Skip native picked-FDR/razor protein assembly\n"
+        << "  --filtered-only          Write only PREFIX_filtered_psms.tsv\n"
+        << "  --no-fixed-cam           Do not report fixed C carbamidomethylation\n"
         << "  --spectra FILE           Raxport HDF5 MS2 file; repeat once per sample\n"
         << "  --spectrum-model FILE    DIA-NN TorchScript model (default: beside aerith)\n"
         << "  --rt-model FILE          DIA-NN RT TorchScript model (default: beside aerith)\n"
         << "  --no-predicted-rt        Use legacy Aerith RT model instead of DIA-NN RT\n"
         << "  --fragment-ppm FLOAT     Fragment matching tolerance (default 20)\n"
-        << "  --decoy-prefix TEXT      Philosopher decoy prefix (default Decoy_)\n"
+        << "  --decoy-prefix TEXT      Target-decoy FASTA prefix (default Decoy_)\n"
         << "  --ignore-pct             Exclude SIP abundance columns from the SVM\n"
         << "  -h, --help               Show this help\n\n"
         << "Outputs per sample are PREFIX_target_psms.tsv, PREFIX_decoy_psms.tsv,\n"
-        << "PREFIX_filtered_psms.tsv, and PREFIX.pep.xml.\n";
+        << "and PREFIX_filtered_psms.tsv. With target and decoy databases, Aerith writes\n"
+        << "native protein.tsv/protein.fas reports without intermediate pepXML.\n";
 }
 
 double CommandLine::number(const std::string& value, const char* option) {
@@ -98,6 +106,25 @@ void CommandLine::validate(const aerith::Config& config, int& exit_status) {
             "FDR thresholds must be in (0,1], SVM costs and fragment ppm positive, "
             "and RT ridge non-negative");
     }
+    if (!config.protein_output_dir.empty() &&
+        (config.database_path.empty() || config.decoy_database_path.empty())) {
+        throw std::runtime_error(
+            "--protein-output-dir requires --database and --decoy-database");
+    }
+    if (config.assemble_proteins &&
+        (config.database_path.empty() != config.decoy_database_path.empty())) {
+        throw std::runtime_error(
+            "Protein assembly requires both --database and --decoy-database");
+    }
+    if (config.assemble_proteins) {
+        for (const auto& database : {
+                 config.database_path, config.decoy_database_path}) {
+            if (!database.empty() && !std::filesystem::is_regular_file(database)) {
+                throw std::runtime_error(
+                    "Protein database does not exist: " + database);
+            }
+        }
+    }
     exit_status = EXIT_SUCCESS;
 }
 
@@ -125,6 +152,16 @@ bool CommandLine::parse(
             config.output_prefixes.push_back(value("--output-prefix"));
         } else if (arg == "--database") {
             config.database_path = value("--database");
+        } else if (arg == "--decoy-database") {
+            config.decoy_database_path = value("--decoy-database");
+        } else if (arg == "--protein-output-dir") {
+            config.protein_output_dir = value("--protein-output-dir");
+        } else if (arg == "--no-protein-assembly") {
+            config.assemble_proteins = false;
+        } else if (arg == "--filtered-only") {
+            config.filtered_only = true;
+        } else if (arg == "--no-fixed-cam") {
+            config.fixed_cam = false;
         } else if (arg == "--spectra") {
             config.spectrum_paths.push_back(value("--spectra"));
         } else if (arg == "--spectrum-model") {
@@ -183,7 +220,21 @@ int main(int argc, char** argv) {
             return exit_status;
         }
         const auto summary = aerith::run(config);
-        aerith::print_summary(std::cout, summary);
+        std::ostringstream report;
+        aerith::print_summary(report, summary);
+        const auto report_text = report.str();
+        std::cout << report_text;
+        if (!summary.protein_assembly_stages.empty() &&
+            !summary.protein_output_dir.empty()) {
+            const auto log_path =
+                std::filesystem::path(summary.protein_output_dir) / "aerith.log";
+            std::ofstream log(log_path);
+            if (!log) {
+                throw std::runtime_error(
+                    "Cannot create Aerith log: " + log_path.string());
+            }
+            log << report_text;
+        }
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
         std::cerr << "aerith: " << error.what() << '\n';

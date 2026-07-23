@@ -124,9 +124,27 @@ spacing.
   - `<sample>_target.pin`, `<sample>_decoy.pin`: target and decoy search intermediates.
   - `<sample>_target_psms.tsv`, `<sample>_decoy_psms.tsv`: Aerith reranked score tables.
   - `<sample>_filtered_psms.tsv`: Aerith 1% FDR PSMs with original search and RT features.
-  - `<sample>.pep.xml`: Aerith pepXML consumed directly by Philosopher.
-  - `peptide.tsv`, `protein.tsv`: peptides, and proteins passing 1% FDR decoy filtering.
+  - `psm.tsv`: FragPipe/Philosopher-style accepted PSM report with precursor
+    intensity, assigned modifications, search class, protein coordinates, and
+    FASTA annotations.
+  - `protein.tsv`, `protein.fas`: Aerith's per-sample picked-FDR/razor protein report and identified FASTA entries.
   - `*_filtered_psms.tsv`: PSMs passing 1% FDR decoy filtering with `isotopicPeakNumbers`, `MS1IsotopeFitScore`, `MS1IsotopicAbundances`, `MS2IsotopicAbundances`, and, for regular FASTA search, `unweighted_spectral_entropy`, `delta_RT_loess`, `delta_RT_loess_real`, and `pred_RT_real_units`.
+- At the workflow root, `protein.tsv` and `protein.fas` contain the combined cross-sample protein assembly. Aerith performs this directly from its in-memory scored PSMs, without pepXML, ProteinProphet, Philosopher workspaces, or `.meta` intermediates.
+- FASTA workflows pass the original target FASTA and generated decoy FASTA to
+  Aerith separately; the workflow does not create `targetDecoy.faa`. SIP
+  spectra-search mode runs Aerith filtering only and produces the per-sample
+  `*_filtered_psms.tsv` files without protein assembly outputs.
+
+The workflow-root `aerith.log` includes a protein-assembly optimization table
+merged with filtering timing. Every stage reports wall time, CPU time, and
+observed speedup. The results section reports distinct naked peptide sequences,
+distinct modified peptide forms, PTM peptide forms, and PTM-bearing PSMs at the
+configured FDR.
+
+Aerith converts `log10_precursorIntensities` back to linear PSM intensity and
+uses Philosopher's top-three peptide-ion rule for total, unique, and razor
+protein intensity. `protein_with_PSM.tsv` includes a
+`<sample>_ProteinAbundance` column sourced from each sample's razor intensity.
 
 ### Native predicted-spectrum entropy in Aerith
 

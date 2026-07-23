@@ -94,8 +94,8 @@ def thread_env_updates(thread_count: int) -> dict[str, str]:
         "OMP_MAX_ACTIVE_LEVELS": "1",
         "OMP_DYNAMIC": "FALSE",
         # A task gets one shared quota, not a separate quota for every nested
-        # runtime.  Sipros uses OpenMP, Philosopher uses Go, and Raxport uses
-        # .NET; limiting incidental BLAS pools to one prevents q-by-q nesting.
+        # runtime. Sipros/Aerith use OpenMP and Raxport uses .NET; limiting
+        # incidental BLAS pools to one prevents nested oversubscription.
         "OPENBLAS_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
         "NUMEXPR_NUM_THREADS": "1",
