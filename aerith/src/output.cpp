@@ -246,6 +246,9 @@ void print_summary(std::ostream& output, const Summary& summary) {
            << summary.distinct_target_ptm_peptides << '\n'
            << "  PSMs carrying PTMs            "
            << summary.target_ptm_psms << '\n';
+    if (summary.mbr_ions > 0) {
+        output << "  MBR transferred ions          " << summary.mbr_ions << '\n';
+    }
     if (summary.protein_ids > 0) {
         output << "  Protein IDs at 1% FDR         " << summary.protein_ids << '\n';
     }
@@ -319,6 +322,10 @@ void print_summary(std::ostream& output, const Summary& summary) {
     }
     print_timing("Fit and score SVM folds", summary.svm_model_timing);
     print_timing("Compute q-values and PEPs", summary.statistics_timing);
+    print_timing("Quantification total", summary.quantification_timing);
+    for (const auto& stage : summary.quantification_stages) {
+        print_timing("  " + stage.name, stage.timing);
+    }
     print_timing("Write result files", summary.write_timing);
     for (const auto& stage : summary.protein_assembly_stages) {
         print_timing("Protein assembly: " + stage.name, stage.timing);
@@ -367,12 +374,16 @@ void print_summary(std::ostream& output, const Summary& summary) {
         output << "  " << prefix << "_filtered_psms.tsv\n";
     }
     if (!summary.protein_output_dir.empty()) {
-        output << "  " << summary.protein_output_dir << "/psm.tsv\n"
-               << "  " << summary.protein_output_dir << "/protein.tsv\n"
-               << "  " << summary.protein_output_dir << "/protein.fas\n";
-        if (!summary.protein_assembly_stages.empty()) {
-            output << "  " << summary.protein_output_dir << "/aerith.log\n";
-        }
+        output << "  " << summary.protein_output_dir << "/combined_psm.tsv\n"
+               << "  " << summary.protein_output_dir << "/combined_ion.tsv\n"
+               << "  " << summary.protein_output_dir
+               << "/combined_modified_peptide.tsv\n"
+               << "  " << summary.protein_output_dir
+               << "/combined_peptide.tsv\n"
+               << "  " << summary.protein_output_dir
+               << "/combined_protein.tsv\n"
+               << "  " << summary.protein_output_dir
+               << "/combined_protein.fas\n";
     }
     output.flags(old_flags);
     output.precision(old_precision);

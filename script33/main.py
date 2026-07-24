@@ -24,10 +24,7 @@ class SIPROSWorkflow:
         self.defaultToolsPaths: dict[str, str] = {
             'raxport': f'{upper_path}/tools/Raxport-linux-x64',
             'sipros': f'{upper_path}/tools/sipros',
-            'filter': f'{upper_path}/tools/aerith',
-            'deepfilter': f'{upper_path}/tools/deepfilter',
-            'metaLP': f'{upper_path}/tools/metaLP',
-            'quantification': f'{upper_path}/tools/ionquant'
+            'aerith': f'{upper_path}/tools/aerith',
         }
         self.toolsPaths: dict[str, str] = self.defaultToolsPaths.copy()
         self.args: Namespace = self.parse_arguments()
@@ -216,7 +213,7 @@ citation:
 
         sipros_filter = filter(baseNames=sipros_search.base_names,
                                outputPath=self.args.output,
-                               aerithPath=self.toolsPaths['filter'],
+                               aerithPath=self.toolsPaths['aerith'],
                                threadNumber=sipros_search.threadNumber,
                                logger=self.logger,
                                decoyPrefix=sipros_search.decoyPrefix,

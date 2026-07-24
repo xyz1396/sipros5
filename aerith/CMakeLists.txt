@@ -11,8 +11,9 @@ add_library(aerith_filter
   src/filter.cpp
   src/output.cpp
   src/pin.cpp
-  src/protein.cpp
+  src/protein_assembly.cpp
   src/predicted_rt.cpp
+  src/quantification.cpp
   src/rt.cpp
   src/spectrum_entropy.cpp
   src/statistics.cpp

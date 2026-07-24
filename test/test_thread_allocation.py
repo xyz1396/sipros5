@@ -773,6 +773,15 @@ class WorkflowAllocationTests(unittest.TestCase):
 
 
 class NativeProteinAssemblyOwnershipTests(unittest.TestCase):
+    def test_python_workflow_has_one_aerith_post_search_stage(self) -> None:
+        self.assertFalse(Path(SCRIPT_DIR, "quant.py").exists())
+        main_source = Path(SCRIPT_DIR, "main.py").read_text()
+        build_source = Path(ROOT, "make.sh").read_text()
+        self.assertIn("self.toolsPaths['aerith']", main_source)
+        self.assertNotIn("'quantification'", main_source)
+        self.assertNotIn("ionquant", main_source.lower())
+        self.assertNotIn("ionquant", build_source.lower())
+
     def test_merged_filter_has_no_bridge_or_combined_fasta(self) -> None:
         source = inspect.getsource(filter_module.filter)
         self.assertNotIn("proteinprophet", source.lower())
@@ -790,7 +799,9 @@ class NativeProteinAssemblyOwnershipTests(unittest.TestCase):
             pd.DataFrame([{
                 "Protein": "sp|P1|ONE",
                 "Protein Probability": 1.0,
-            }]).to_csv(Path(output, "protein.tsv"), sep="\t", index=False)
+            }]).to_csv(
+                Path(output, "combined_protein.tsv"), sep="\t", index=False
+            )
             filtered = pd.DataFrame([{
                 "Label": 1,
                 "Peptide": "K[PEPTIDE]R",
@@ -808,7 +819,7 @@ class NativeProteinAssemblyOwnershipTests(unittest.TestCase):
             workflow.match_psms_to_proteins({"sample": filtered})
 
             result = pd.read_csv(
-                Path(output, "protein_with_PSM.tsv"), sep="\t"
+                Path(output, "combined_protein_with_PSM.tsv"), sep="\t"
             )
             self.assertEqual(
                 result.loc[0, "sample_ProteinAbundance"], 3210.5

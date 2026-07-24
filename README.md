@@ -37,11 +37,11 @@ siproswf -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o regular_output
 
 #### Extract protein sequences identified in Regular search
 
-- This step is particularly useful when your protein FASTA is large (for example, several GB in metaproteomics studies). The `regular_output/protein.tsv` file can be replaced with results from other proteomics search engines (e.g., FragPipe, MaxQuant, or Proteome Discoverer) as long as the first column contains the protein identifier.
+- This step is particularly useful when your protein FASTA is large (for example, several GB in metaproteomics studies). The `regular_output/combined_protein.tsv` file can be replaced with results from other proteomics search engines (e.g., FragPipe, MaxQuant, or Proteome Discoverer) as long as the first column contains the protein identifier.
 - If you are working with a small FASTA, you can skip this extraction step and use the original FASTA for the label search.
 
 ```bash
-extractPro Ecoli.fasta regular_output/protein.tsv db.faa
+extractPro Ecoli.fasta regular_output/combined_protein.tsv db.faa
 ```
 
 #### Label Search
@@ -118,7 +118,7 @@ spacing.
 ### 5. Output Files
 
 - `SIP_filtered_psms.tsv`: PSMs from all samples that pass the unlabeled negative-control filter (1% FDR), with SIP element labeling percentages (`MS1IsotopicAbundances`, `MS2IsotopicAbundances`). `isotopicPeakNumbers` is the raw number of extracted MS1 isotope peaks. `MS1IsotopeFitScore` is the theoretical-envelope coverage from `0` to `1`, set to `0` unless at least two compatible peaks are present; scores of at least `0.02` pass the MS1 abundance-fit validity threshold. MS1IsotopicAbundances are more sensitive; MS2IsotopicAbundances are more accurate.
-- `protein_with_SIP_filtered_PSM.tsv`: maps unlabeled negative-control filtered PSMs to the proteins identified in each sample.
+- `combined_protein_with_SIP_filtered_PSM.tsv`: maps unlabeled negative-control filtered PSMs to the proteins identified in each sample.
 - For each raw-file subdirectory:
   - `<sample>.h5`: Raxport scan data.
   - `<sample>_target.pin`, `<sample>_decoy.pin`: target and decoy search intermediates.
@@ -127,24 +127,83 @@ spacing.
   - `psm.tsv`: FragPipe/Philosopher-style accepted PSM report with precursor
     intensity, assigned modifications, search class, protein coordinates, and
     FASTA annotations.
+  - `ion.tsv`, `modified_peptide.tsv`, `peptide.tsv`: accepted PSMs aggregated
+    by peptide ion, modified peptide, and naked peptide, with probabilities,
+    spectral counts, precursor intensities, modifications, and protein mappings.
   - `protein.tsv`, `protein.fas`: Aerith's per-sample picked-FDR/razor protein report and identified FASTA entries.
   - `*_filtered_psms.tsv`: PSMs passing 1% FDR decoy filtering with `isotopicPeakNumbers`, `MS1IsotopeFitScore`, `MS1IsotopicAbundances`, `MS2IsotopicAbundances`, and, for regular FASTA search, `unweighted_spectral_entropy`, `delta_RT_loess`, `delta_RT_loess_real`, and `pred_RT_real_units`.
-- At the workflow root, `protein.tsv` and `protein.fas` contain the combined cross-sample protein assembly. Aerith performs this directly from its in-memory scored PSMs, without pepXML, ProteinProphet, Philosopher workspaces, or `.meta` intermediates.
+- At the workflow root, `combined_psm.tsv`, `combined_ion.tsv`,
+  `combined_modified_peptide.tsv`, `combined_peptide.tsv`, and
+  `combined_protein.tsv` contain cross-sample reports with FragPipe-compatible
+  sample spectral-count and intensity columns. `combined_protein.tsv` also
+  reports sequence coverage from the union of observed peptides. Aerith
+  performs this directly from its in-memory scored PSMs, without pepXML,
+  ProteinProphet, Philosopher workspaces, or `.meta` intermediates.
 - FASTA workflows pass the original target FASTA and generated decoy FASTA to
   Aerith separately; the workflow does not create `targetDecoy.faa`. SIP
   spectra-search mode runs Aerith filtering only and produces the per-sample
   `*_filtered_psms.tsv` files without protein assembly outputs.
 
-The workflow-root `aerith.log` includes a protein-assembly optimization table
-merged with filtering timing. Every stage reports wall time, CPU time, and
-observed speedup. The results section reports distinct naked peptide sequences,
-distinct modified peptide forms, PTM peptide forms, and PTM-bearing PSMs at the
-configured FDR.
+Aerith writes its timing and result summary to the workflow's existing
+`sipros_workflow.log`; it does not create a second `aerith.log` in the output
+directory. Every stage reports wall time, CPU time, and observed speedup. The
+results section reports distinct naked peptide sequences, distinct modified
+peptide forms, PTM peptide forms, and PTM-bearing PSMs at the configured FDR.
 
 Aerith converts `log10_precursorIntensities` back to linear PSM intensity and
 uses Philosopher's top-three peptide-ion rule for total, unique, and razor
-protein intensity. `protein_with_PSM.tsv` includes a
+protein intensity. `combined_protein_with_PSM.tsv` includes a
 `<sample>_ProteinAbundance` column sourced from each sample's razor intensity.
+
+### Native IonQuant-style chromatographic quantification
+
+For regular FASTA workflows, Aerith reads the MS1 scans directly from each
+Raxport HDF5 file. It calculates the exact modified precursor mass, traces the
+monoisotopic, M+1, and M+2 XICs, resamples them to a uniform retention-time
+grid, applies Savitzky-Golay smoothing for peak detection, and subtracts
+boundary background from the unsmoothed interpolated trace. The monoisotopic
+trace defines the reported feature geometry; automatic intensity sums the
+background-corrected apex-1/apex/apex+1 values from the traced isotope
+envelope. Aerith reports the feature apex, apex scan,
+start/end retention times, FWHM, traced scans, and intensity in `psm.tsv`,
+`ion.tsv`, and `combined_ion.tsv`. This runs in memory between Aerith filtering
+and native protein assembly; it does not create pepXML or another temporary
+quantification table.
+
+Aerith also performs IonQuant-style match between runs. It ranks up to ten
+donor runs using shared-ion retention-time and intensity Spearman
+correlations, aligns each donor locally with the median retention-time shift
+and median absolute deviation, traces target and shifted-decoy isotope
+envelopes, scores intensity/isotope-fit/mass-error/retention-time features, and
+controls transferred ions by posterior ion FDR. Transferred values are marked
+`MBR` in the sample and combined ion, modified-peptide, and peptide tables;
+missing values are marked `unmatched`.
+
+The defaults match the FragPipe IonQuant LFQ workflow: 10 ppm MS1 tolerance,
+a 0.4 minute retention-time window, at least two isotopes, at least three MS1
+scans, and cross-run intensity normalization. They can be adjusted with
+`--quant-mz-ppm`, `--quant-rt-window`, `--quant-min-isotopes`, and
+`--quant-min-scans`. `--quant-intensity-mode` accepts IonQuant-compatible
+`0` (background-corrected apex), `1` (background-corrected area), or `2`
+(IonQuant automatic conventional-LC apex selection, the default). Use
+`--no-quant-normalization` to retain raw feature intensities in combined
+reports. MBR is controlled with `--mbr-rt-window`, `--mbr-top-runs`,
+`--mbr-min-correlation`, and `--mbr-ion-fdr`, or disabled with `--no-mbr`.
+
+The FragPipe-compatible calibrated observed-mass columns remain present in
+`psm.tsv` for schema compatibility but are empty because Aerith does not
+perform precursor-mass calibration.
+
+`combined_modified_peptide.tsv`, `combined_peptide.tsv`, and
+`combined_protein.tsv` contain sample-specific `MaxLFQ Intensity` columns.
+Aerith computes median pairwise log ion ratios, solves each connected sample
+graph, and anchors its absolute scale to the contributing ion intensities.
+
+The Python workflow has one post-search module, `script33/filter.py`, which
+launches one cross-sample Aerith process for filtering, chromatographic
+quantification, normalization, MaxLFQ, and protein assembly. The optional SIP
+negative-control pass is also filtered by Aerith. There is no separate
+`quant.py` or IonQuant command in the workflow.
 
 ### Native predicted-spectrum entropy in Aerith
 
@@ -271,7 +330,7 @@ python sipros/script33/main.py -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o re
 #### Extract protein sequences identified in Regular search
 
 ```bash
-sipros/script33/extractPro.sh Ecoli.fasta regular_output/protein.tsv db.faa
+sipros/script33/extractPro.sh Ecoli.fasta regular_output/combined_protein.tsv db.faa
 ```
 
 #### Label Search

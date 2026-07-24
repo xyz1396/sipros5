@@ -19,7 +19,12 @@ import pandas as pd
 
 
 class filter:
-    """Run Aerith filtering and, for FASTA searches, protein assembly."""
+    """Run the single Aerith post-search stage for the Python workflow.
+
+    Aerith owns PSM filtering and, for regular FASTA searches, native
+    chromatographic quantification and protein assembly. Python only prepares
+    the command and optional denormalized convenience reports.
+    """
 
     def __init__(self, baseNames: list[str], outputPath: str, aerithPath: str,
                  threadNumber: int, logger: Logger, decoyPrefix: str = "Decoy_",
@@ -187,7 +192,9 @@ class filter:
     def match_psms_to_proteins(
             self, filtered_psms: dict[str, pd.DataFrame]) -> None:
         self.logger.info("Matching individual sample PSMs to proteins")
-        protein_df = pd.read_csv(f"{self.outputPath}/protein.tsv", sep="\t")
+        protein_df = pd.read_csv(
+            f"{self.outputPath}/combined_protein.tsv", sep="\t"
+        )
         for baseName in self.baseNames:
             psm_df = filtered_psms[baseName].copy()
             psm_df = psm_df[psm_df["Label"] == 1]
@@ -234,7 +241,7 @@ class filter:
             protein_df[f"{baseName}_ProteinAbundance"] = protein_df[
                 f"{baseName}_ProteinAbundance"
             ].fillna(0.0)
-        output_path = f"{self.outputPath}/protein_with_PSM.tsv"
+        output_path = f"{self.outputPath}/combined_protein_with_PSM.tsv"
         protein_df.to_csv(output_path, sep="\t", index=False)
         self.logger.info(
             f"Updated protein information with filtered PSMs: {output_path}"
@@ -244,7 +251,9 @@ class filter:
         if sip_psms.empty:
             return
         self.logger.info("Matching SIP filtered PSMs to proteins")
-        protein_df = pd.read_csv(f"{self.outputPath}/protein.tsv", sep="\t")
+        protein_df = pd.read_csv(
+            f"{self.outputPath}/combined_protein.tsv", sep="\t"
+        )
         sip_psms = sip_psms[sip_psms["Label"] == 1].copy()
         sip_psms["PeptideSequence"] = sip_psms["Peptide"].str.extract(
             r"\[([^\]]+)\]"
@@ -271,7 +280,9 @@ class filter:
                     f"SIP_{sample}_log10_precursorIntensities",
             })
             protein_df = protein_df.merge(aggregate, on="Protein", how="left")
-        output_path = f"{self.outputPath}/protein_with_SIP_filtered_PSM.tsv"
+        output_path = (
+            f"{self.outputPath}/combined_protein_with_SIP_filtered_PSM.tsv"
+        )
         protein_df.to_csv(output_path, sep="\t", index=False)
         self.logger.info(
             f"Updated protein information with SIP filtered PSMs: {output_path}"
@@ -290,7 +301,9 @@ class filter:
                 "No filtered PSMs found after Aerith; skipping protein annotation"
             )
             return
-        protein_report = os.path.join(self.outputPath, "protein.tsv")
+        protein_report = os.path.join(
+            self.outputPath, "combined_protein.tsv"
+        )
         if not os.path.exists(protein_report):
             raise RuntimeError(
                 f"Aerith did not create the native protein report: "
@@ -308,11 +321,15 @@ class filter:
             self.logger.info("Aerith: no jobs")
             return
         command = self.command()
-        operation = (
-            "filtering and protein assembly"
-            if self.assembleProteins
-            else "filtering only"
-        )
+        if self.assembleProteins and self.spectraPaths:
+            operation = (
+                "filtering, chromatographic quantification, and "
+                "protein assembly"
+            )
+        elif self.assembleProteins:
+            operation = "filtering and protein assembly"
+        else:
+            operation = "filtering only"
         self.logger.info(
             f"Running Aerith cross-sample {operation} with "
             f"{self.threadNumber} CPU cores"

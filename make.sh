@@ -50,9 +50,6 @@ RUNTIME_TOOL_BINARIES=(
     sipros
     siprosMPI
     aerith
-    deepfilter
-    metaLP
-    ionquant
 )
 
 # Archive extraction and file copies can drop execute bits from the bundled
@@ -405,7 +402,7 @@ case $1 in
     fi
     cd "$tmpdir"
     zip -r "$OLDPWD/siprosRelease.zip" "sipros" \
-        -x "sipros/script33/debugProxy.py" "sipros/script33/quant.py" \
+        -x "sipros/script33/debugProxy.py" \
         -x "*/__pycache__/*"
     cd "$OLDPWD"
     rm -rf "$tmpdir"

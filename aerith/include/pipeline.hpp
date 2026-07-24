@@ -24,6 +24,8 @@ struct Psm {
     double initial_score = 0.0;
     double retention = 0.0;
     double exp_mass = 0.0;
+    double calculated_mass = 0.0;
+    double calculated_mz = 0.0;
     std::size_t file_id = 0;
     std::uint64_t scan = 0;
     std::size_t rank = 0;
@@ -34,10 +36,28 @@ struct Psm {
     double diff_score = 0.0;
     double mass_error = 0.0;
     double log10_precursor_intensity = 0.0;
+    double quantified_intensity = 0.0;
+    double apex_retention = 0.0;
+    double retention_start = 0.0;
+    double retention_end = 0.0;
+    double retention_fwhm = 0.0;
+    double quant_mass_error_ppm = 0.0;
+    double quant_isotope_kl = 0.0;
+    std::uint64_t parent_scan = 0;
+    std::uint64_t apex_scan = 0;
+    std::size_t traced_scans = 0;
+    bool quantification_attempted = false;
+    bool has_chromatographic_feature = false;
     float delta_rt_loess_real = 0.0f;
     float predicted_rt_real_units = 0.0f;
     std::string raw_line;
     std::vector<float> features;
+};
+
+struct TransferredIon {
+    Psm psm;
+    double score = 0.0;
+    double qvalue = 1.0;
 };
 
 struct Dataset {
@@ -53,6 +73,7 @@ struct Dataset {
     std::string rt_prediction_device;
     StageTiming spectrum_prediction_timing;
     StageTiming rt_prediction_timing;
+    std::vector<TransferredIon> transferred_ions;
 };
 
 struct RtResult {
@@ -144,6 +165,16 @@ private:
         const std::vector<double>& rt_residual, double threshold);
 };
 
+struct QuantificationResult {
+    std::vector<AccelerationTiming> stages;
+};
+
+class ChromatographicQuantifier {
+public:
+    static QuantificationResult add(
+        const Config& config, Dataset& data, const std::vector<double>& q);
+};
+
 struct ProteinAssemblyResult {
     std::size_t proteins = 0;
     std::string output_dir;
@@ -152,6 +183,10 @@ struct ProteinAssemblyResult {
 
 class ProteinAssembler {
 public:
+    static void sequential_filter(
+        const Config& config, const Dataset& data,
+        const std::vector<double>& scores, const std::vector<double>& pep,
+        std::vector<double>& q);
     static ProteinAssemblyResult write(
         const Config& config, const Dataset& data,
         const std::vector<double>& scores, const std::vector<double>& q,

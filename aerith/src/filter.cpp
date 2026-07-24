@@ -140,9 +140,6 @@ Summary run(const Config& config) {
     const std::clock_t statistics_cpu_begin = std::clock();
     std::vector<double> q(data.rows.size(), 1.0), pep(data.rows.size(), 1.0);
     summary.sample_models.resize(data.input_paths.size());
-    std::unordered_set<std::string> peptides;
-    std::unordered_set<std::string> peptide_forms;
-    std::unordered_set<std::string> ptm_peptides;
     for (std::size_t file = 0; file < data.input_paths.size(); ++file) {
         auto& sample = summary.sample_models[file];
         sample.name = config.output_prefixes.size() == data.input_paths.size()
@@ -164,32 +161,58 @@ Summary run(const Config& config) {
             sample_scores, sample_labels, &sample.pi0);
         const auto sample_pep = SvmRescorer::local_error_probabilities(
             sample_scores, sample_labels);
-        std::unordered_set<std::string> sample_peptides;
         for (std::size_t local = 0; local < rows.size(); ++local) {
             const auto i = rows[local];
             q[i] = sample_q[local];
             pep[i] = sample_pep[local];
-            if (data.rows[i].label == 1 && q[i] <= config.q_threshold) {
-                ++sample.target_ids;
-                const auto peptide = stripped_peptide(data.rows[i].peptide);
-                sample_peptides.insert(peptide);
-                peptides.insert(peptide);
-                const auto form = peptide_form(data.rows[i].peptide);
-                peptide_forms.insert(form);
-                if (data.rows[i].ptm_count > 0) {
-                    ptm_peptides.insert(form);
-                    ++summary.target_ptm_psms;
-                }
-            }
         }
-        sample.distinct_target_peptides = sample_peptides.size();
-        summary.target_ids += sample.target_ids;
+    }
+    if (config.assemble_proteins && !config.database_path.empty() &&
+        !config.decoy_database_path.empty()) {
+        ProteinAssembler::sequential_filter(config, data, scores, pep, q);
+    }
+
+    std::unordered_set<std::string> peptides;
+    std::unordered_set<std::string> peptide_forms;
+    std::unordered_set<std::string> ptm_peptides;
+    std::vector<std::unordered_set<std::string>> sample_peptides(
+        data.input_paths.size());
+    for (std::size_t row = 0; row < data.rows.size(); ++row) {
+        const auto& psm = data.rows[row];
+        if (psm.label != 1 || q[row] > config.q_threshold ||
+            psm.file_id >= summary.sample_models.size()) {
+            continue;
+        }
+        auto& sample = summary.sample_models[psm.file_id];
+        ++sample.target_ids;
+        const auto peptide = stripped_peptide(psm.peptide);
+        sample_peptides[psm.file_id].insert(peptide);
+        peptides.insert(peptide);
+        const auto form = peptide_form(psm.peptide);
+        peptide_forms.insert(form);
+        if (psm.ptm_count > 0) {
+            ptm_peptides.insert(form);
+            ++summary.target_ptm_psms;
+        }
+    }
+    for (std::size_t file = 0; file < summary.sample_models.size(); ++file) {
+        summary.sample_models[file].distinct_target_peptides =
+            sample_peptides[file].size();
+        summary.target_ids += summary.sample_models[file].target_ids;
     }
     summary.distinct_target_peptides = peptides.size();
     summary.distinct_target_peptide_forms = peptide_forms.size();
     summary.distinct_target_ptm_peptides = ptm_peptides.size();
     const std::clock_t statistics_cpu_end = std::clock();
     const auto statistics_end = Clock::now();
+
+    const auto quantification_begin = Clock::now();
+    const std::clock_t quantification_cpu_begin = std::clock();
+    auto quantification = ChromatographicQuantifier::add(config, data, q);
+    summary.mbr_ions = data.transferred_ions.size();
+    summary.quantification_stages = std::move(quantification.stages);
+    const std::clock_t quantification_cpu_end = std::clock();
+    const auto quantification_end = Clock::now();
 
     const auto write_begin = Clock::now();
     const std::clock_t write_cpu_begin = std::clock();
@@ -232,6 +255,10 @@ Summary run(const Config& config) {
     summary.statistics_timing = {
         elapsed_seconds(statistics_begin, statistics_end),
         cpu_seconds(statistics_cpu_begin, statistics_cpu_end)};
+    summary.quantification_timing = {
+        elapsed_seconds(quantification_begin, quantification_end),
+        cpu_seconds(
+            quantification_cpu_begin, quantification_cpu_end)};
     summary.write_timing = {
         elapsed_seconds(write_begin, write_end),
         cpu_seconds(write_cpu_begin, write_cpu_end)};

@@ -55,6 +55,17 @@ struct Config {
     bool assemble_proteins = true;
     bool filtered_only = false;
     bool fixed_cam = true;
+    double quant_mz_ppm = 10.0;
+    double quant_rt_window = 0.4;
+    unsigned int quant_min_isotopes = 2;
+    unsigned int quant_min_scans = 3;
+    unsigned int quant_intensity_mode = 2;
+    bool quant_normalize = true;
+    bool mbr = true;
+    double mbr_rt_window = 1.0;
+    unsigned int mbr_top_runs = 10;
+    double mbr_min_correlation = 0.0;
+    double mbr_ion_fdr = 0.01;
 };
 
 struct Summary {
@@ -71,6 +82,7 @@ struct Summary {
     std::size_t distinct_target_ptm_peptides = 0;
     std::size_t target_ptm_psms = 0;
     std::size_t protein_ids = 0;
+    std::size_t mbr_ions = 0;
     std::string protein_output_dir;
     bool filtered_only = false;
     double reporting_fdr = 0.01;
@@ -87,6 +99,8 @@ struct Summary {
     StageTiming rt_model_timing;
     StageTiming svm_model_timing;
     StageTiming statistics_timing;
+    StageTiming quantification_timing;
+    std::vector<AccelerationTiming> quantification_stages;
     StageTiming write_timing;
     StageTiming protein_assembly_timing;
     std::vector<AccelerationTiming> protein_assembly_stages;

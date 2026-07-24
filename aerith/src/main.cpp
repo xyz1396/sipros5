@@ -38,7 +38,7 @@ void CommandLine::usage(std::ostream& out) {
         << "  --rt-ridge FLOAT         RT OLS regularization (default 1e-4)\n"
         << "  --database FILE          Target FASTA used for protein assembly\n"
         << "  --decoy-database FILE    Decoy FASTA used for protein assembly\n"
-        << "  --protein-output-dir DIR Write combined protein.tsv/protein.fas here\n"
+        << "  --protein-output-dir DIR Write combined_*.tsv reports here\n"
         << "  --no-protein-assembly    Skip native picked-FDR/razor protein assembly\n"
         << "  --filtered-only          Write only PREFIX_filtered_psms.tsv\n"
         << "  --no-fixed-cam           Do not report fixed C carbamidomethylation\n"
@@ -47,12 +47,23 @@ void CommandLine::usage(std::ostream& out) {
         << "  --rt-model FILE          DIA-NN RT TorchScript model (default: beside aerith)\n"
         << "  --no-predicted-rt        Use legacy Aerith RT model instead of DIA-NN RT\n"
         << "  --fragment-ppm FLOAT     Fragment matching tolerance (default 20)\n"
+        << "  --quant-mz-ppm FLOAT     MS1 XIC tolerance (default 10)\n"
+        << "  --quant-rt-window FLOAT  MS1 XIC RT window in minutes (default 0.4)\n"
+        << "  --quant-min-isotopes INT Minimum isotope traces (default 2)\n"
+        << "  --quant-min-scans INT    Minimum MS1 scans in a feature (default 3)\n"
+        << "  --quant-intensity-mode INT Ion intensity: 0 apex, 1 area, 2 auto (default 2)\n"
+        << "  --no-quant-normalization Keep combined intensities on their raw scale\n"
+        << "  --no-mbr                 Disable match-between-runs transfer\n"
+        << "  --mbr-rt-window FLOAT    MBR local RT alignment window in minutes (default 1)\n"
+        << "  --mbr-top-runs INT       Maximum donor runs per acceptor (default 10)\n"
+        << "  --mbr-min-correlation FLOAT Minimum overlap-weighted donor correlation (default 0)\n"
+        << "  --mbr-ion-fdr FLOAT      Transferred-ion FDR threshold (default 0.01)\n"
         << "  --decoy-prefix TEXT      Target-decoy FASTA prefix (default Decoy_)\n"
         << "  --ignore-pct             Exclude SIP abundance columns from the SVM\n"
         << "  -h, --help               Show this help\n\n"
         << "Outputs per sample are PREFIX_target_psms.tsv, PREFIX_decoy_psms.tsv,\n"
         << "and PREFIX_filtered_psms.tsv. With target and decoy databases, Aerith writes\n"
-        << "native protein.tsv/protein.fas reports without intermediate pepXML.\n";
+        << "native sample and combined reports without intermediate pepXML.\n";
 }
 
 double CommandLine::number(const std::string& value, const char* option) {
@@ -101,10 +112,17 @@ void CommandLine::validate(const aerith::Config& config, int& exit_status) {
     if (!(config.q_threshold > 0.0 && config.q_threshold <= 1.0) ||
         !(config.train_fdr > 0.0 && config.train_fdr <= 1.0) ||
         config.rt_ridge < 0.0 || config.svm_c_pos <= 0.0 ||
-        config.svm_c_neg <= 0.0 || config.fragment_ppm <= 0.0) {
+        config.svm_c_neg <= 0.0 || config.fragment_ppm <= 0.0 ||
+        config.quant_mz_ppm <= 0.0 || config.quant_rt_window <= 0.0 ||
+        config.quant_min_isotopes == 0 || config.quant_min_isotopes > 3 ||
+        config.quant_min_scans == 0 || config.quant_intensity_mode > 2 ||
+        config.mbr_rt_window <= 0.0 ||
+        config.mbr_top_runs == 0 || config.mbr_min_correlation < -1.0 ||
+        config.mbr_min_correlation > 1.0 || config.mbr_ion_fdr <= 0.0 ||
+        config.mbr_ion_fdr > 1.0) {
         throw std::runtime_error(
             "FDR thresholds must be in (0,1], SVM costs and fragment ppm positive, "
-            "and RT ridge non-negative");
+            "quantification tolerances/minima valid, and RT ridge non-negative");
     }
     if (!config.protein_output_dir.empty() &&
         (config.database_path.empty() || config.decoy_database_path.empty())) {
@@ -172,6 +190,40 @@ bool CommandLine::parse(
             config.predict_rt = false;
         } else if (arg == "--fragment-ppm") {
             config.fragment_ppm = number(value("--fragment-ppm"), "--fragment-ppm");
+        } else if (arg == "--quant-mz-ppm") {
+            config.quant_mz_ppm =
+                number(value("--quant-mz-ppm"), "--quant-mz-ppm");
+        } else if (arg == "--quant-rt-window") {
+            config.quant_rt_window =
+                number(value("--quant-rt-window"), "--quant-rt-window");
+        } else if (arg == "--quant-min-isotopes") {
+            config.quant_min_isotopes =
+                unsigned_number(value("--quant-min-isotopes"),
+                                "--quant-min-isotopes");
+        } else if (arg == "--quant-min-scans") {
+            config.quant_min_scans =
+                unsigned_number(value("--quant-min-scans"),
+                                "--quant-min-scans");
+        } else if (arg == "--quant-intensity-mode") {
+            config.quant_intensity_mode =
+                unsigned_number(value("--quant-intensity-mode"),
+                                "--quant-intensity-mode");
+        } else if (arg == "--no-quant-normalization") {
+            config.quant_normalize = false;
+        } else if (arg == "--no-mbr") {
+            config.mbr = false;
+        } else if (arg == "--mbr-rt-window") {
+            config.mbr_rt_window =
+                number(value("--mbr-rt-window"), "--mbr-rt-window");
+        } else if (arg == "--mbr-top-runs") {
+            config.mbr_top_runs =
+                unsigned_number(value("--mbr-top-runs"), "--mbr-top-runs");
+        } else if (arg == "--mbr-min-correlation") {
+            config.mbr_min_correlation = number(
+                value("--mbr-min-correlation"), "--mbr-min-correlation");
+        } else if (arg == "--mbr-ion-fdr") {
+            config.mbr_ion_fdr =
+                number(value("--mbr-ion-fdr"), "--mbr-ion-fdr");
         } else if (arg == "--decoy-prefix") {
             config.decoy_prefix = value("--decoy-prefix");
         } else if (arg == "--ignore-pct") {
@@ -224,17 +276,6 @@ int main(int argc, char** argv) {
         aerith::print_summary(report, summary);
         const auto report_text = report.str();
         std::cout << report_text;
-        if (!summary.protein_assembly_stages.empty() &&
-            !summary.protein_output_dir.empty()) {
-            const auto log_path =
-                std::filesystem::path(summary.protein_output_dir) / "aerith.log";
-            std::ofstream log(log_path);
-            if (!log) {
-                throw std::runtime_error(
-                    "Cannot create Aerith log: " + log_path.string());
-            }
-            log << report_text;
-        }
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
         std::cerr << "aerith: " << error.what() << '\n';
