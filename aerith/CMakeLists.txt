@@ -32,48 +32,101 @@ else()
 endif()
 option(AERITH_ENABLE_TORCH "Enable native DIA-NN spectrum and RT prediction"
        ${AERITH_TORCH_DEFAULT})
+option(AERITH_TORCH_CPU_ONLY
+       "Link only the dynamic CPU LibTorch libraries" OFF)
 if(AERITH_ENABLE_TORCH)
-  if(DEFINED AERITH_TORCH_PACKAGE_VERSION)
+  if(AERITH_TORCH_CPU_ONLY)
+    set(AERITH_TORCH_ROOT "" CACHE PATH
+        "Root of the system CPU LibTorch installation")
+    if(NOT AERITH_TORCH_ROOT)
+      message(FATAL_ERROR
+        "AERITH_TORCH_CPU_ONLY requires AERITH_TORCH_ROOT")
+    endif()
+    find_path(AERITH_TORCH_INCLUDE_DIR
+      NAMES torch/script.h
+      PATHS
+        "${AERITH_TORCH_ROOT}/include"
+        "${AERITH_TORCH_ROOT}/include/torch/csrc/api/include"
+      NO_DEFAULT_PATH)
+    find_path(AERITH_TORCH_API_INCLUDE_DIR
+      NAMES torch/torch.h
+      PATHS "${AERITH_TORCH_ROOT}/include/torch/csrc/api/include"
+      NO_DEFAULT_PATH)
+    find_library(AERITH_LIBTORCH_CPU_LIBRARY
+      NAMES torch_cpu PATHS "${AERITH_TORCH_ROOT}/lib" NO_DEFAULT_PATH)
+    find_library(AERITH_LIBC10_LIBRARY
+      NAMES c10 PATHS "${AERITH_TORCH_ROOT}/lib" NO_DEFAULT_PATH)
+    if(NOT AERITH_TORCH_INCLUDE_DIR OR
+       NOT AERITH_TORCH_API_INCLUDE_DIR OR
+       NOT AERITH_LIBTORCH_CPU_LIBRARY OR
+       NOT AERITH_LIBC10_LIBRARY)
+      message(FATAL_ERROR
+        "Incomplete CPU LibTorch installation under ${AERITH_TORCH_ROOT}")
+    endif()
+    set(Torch_FOUND TRUE)
+    set(AERITH_TORCH_LIBRARIES
+      "-Wl,--no-as-needed"
+      "${AERITH_LIBTORCH_CPU_LIBRARY}"
+      "${AERITH_LIBC10_LIBRARY}"
+      "-Wl,--as-needed")
+    set(AERITH_TORCH_INCLUDE_DIRS
+      "${AERITH_TORCH_INCLUDE_DIR}"
+      "${AERITH_TORCH_API_INCLUDE_DIR}")
     message(STATUS
-      "Aerith: configuring with PyTorch ${AERITH_TORCH_PACKAGE_VERSION}")
-  endif()
-  # Conda's compiler root-path policy can hide NVTX3 from a system CUDA
-  # toolkit. Locate the header from either the active Conda environment or the
-  # toolkit containing nvcc before loading TorchConfig.cmake.
-  if(NOT nvtx3_dir)
-    find_path(AERITH_NVTX3_INCLUDE_DIR
-      NAMES nvtx3/nvToolsExt.h
-      HINTS "$ENV{CONDA_PREFIX}/include")
-    if(NOT AERITH_NVTX3_INCLUDE_DIR)
-      find_program(AERITH_NVCC_EXECUTABLE NAMES nvcc)
-      if(AERITH_NVCC_EXECUTABLE)
-        get_filename_component(AERITH_CUDA_BIN_DIR
-          "${AERITH_NVCC_EXECUTABLE}" DIRECTORY)
-        get_filename_component(AERITH_CUDA_ROOT
-          "${AERITH_CUDA_BIN_DIR}" DIRECTORY)
-        find_path(AERITH_NVTX3_INCLUDE_DIR
-          NAMES nvtx3/nvToolsExt.h
-          HINTS
-            "${AERITH_CUDA_ROOT}/include"
-            "${AERITH_CUDA_ROOT}/targets/x86_64-linux/include"
-          NO_DEFAULT_PATH)
+      "Aerith: using CPU-only release LibTorch from ${AERITH_TORCH_ROOT}")
+  else()
+    if(DEFINED AERITH_TORCH_PACKAGE_VERSION)
+      message(STATUS
+        "Aerith: configuring with PyTorch ${AERITH_TORCH_PACKAGE_VERSION}")
+    endif()
+    # Conda's compiler root-path policy can hide NVTX3 from a system CUDA
+    # toolkit. Locate the header from either the active Conda environment or
+    # the toolkit containing nvcc before loading TorchConfig.cmake.
+    if(NOT nvtx3_dir)
+      find_path(AERITH_NVTX3_INCLUDE_DIR
+        NAMES nvtx3/nvToolsExt.h
+        HINTS "$ENV{CONDA_PREFIX}/include")
+      if(NOT AERITH_NVTX3_INCLUDE_DIR)
+        find_program(AERITH_NVCC_EXECUTABLE NAMES nvcc)
+        if(AERITH_NVCC_EXECUTABLE)
+          get_filename_component(AERITH_CUDA_BIN_DIR
+            "${AERITH_NVCC_EXECUTABLE}" DIRECTORY)
+          get_filename_component(AERITH_CUDA_ROOT
+            "${AERITH_CUDA_BIN_DIR}" DIRECTORY)
+          find_path(AERITH_NVTX3_INCLUDE_DIR
+            NAMES nvtx3/nvToolsExt.h
+            HINTS
+              "${AERITH_CUDA_ROOT}/include"
+              "${AERITH_CUDA_ROOT}/targets/x86_64-linux/include"
+            NO_DEFAULT_PATH)
+        endif()
+      endif()
+      if(AERITH_NVTX3_INCLUDE_DIR)
+        set(nvtx3_dir "${AERITH_NVTX3_INCLUDE_DIR}" CACHE PATH
+            "Directory containing the NVTX3 include directory" FORCE)
+        message(STATUS "Aerith: found NVTX3 in ${nvtx3_dir}")
       endif()
     endif()
-    if(AERITH_NVTX3_INCLUDE_DIR)
-      set(nvtx3_dir "${AERITH_NVTX3_INCLUDE_DIR}" CACHE PATH
-          "Directory containing the NVTX3 include directory" FORCE)
-      message(STATUS "Aerith: found NVTX3 in ${nvtx3_dir}")
-    endif()
+    find_package(Torch 2.12.1 REQUIRED)
   endif()
-  find_package(Torch 2.12.1 REQUIRED)
 endif()
 if(Torch_FOUND)
   if(NOT HDF5_FOUND)
     find_package(HDF5 REQUIRED COMPONENTS C CXX)
   endif()
   target_compile_definitions(aerith_filter PRIVATE AERITH_WITH_TORCH=1)
+  if(AERITH_TORCH_CPU_ONLY)
+    target_compile_definitions(aerith_filter PRIVATE
+      AERITH_TORCH_CPU_ONLY=1 _GLIBCXX_USE_CXX11_ABI=1)
+    target_include_directories(aerith_filter SYSTEM PRIVATE
+      ${AERITH_TORCH_INCLUDE_DIRS})
+  endif()
   target_include_directories(aerith_filter PRIVATE ${HDF5_INCLUDE_DIRS})
-  target_link_libraries(aerith_filter PRIVATE ${TORCH_LIBRARIES})
+  if(AERITH_TORCH_CPU_ONLY)
+    target_link_libraries(aerith_filter PRIVATE ${AERITH_TORCH_LIBRARIES})
+  else()
+    target_link_libraries(aerith_filter PRIVATE ${TORCH_LIBRARIES})
+  endif()
   if(DEFINED SIPROS_HDF5_LIBRARIES)
     target_link_libraries(aerith_filter PRIVATE ${SIPROS_HDF5_LIBRARIES})
   elseif(TARGET HDF5::HDF5)
@@ -98,6 +151,13 @@ endif()
 
 add_executable(aerith src/main.cpp)
 target_link_libraries(aerith PRIVATE aerith_filter)
+if(AERITH_TORCH_CPU_ONLY AND NOT MSVC)
+  # The packaged CPU release resolves its complete non-glibc runtime from the
+  # adjacent lib directory.
+  set_target_properties(aerith PROPERTIES
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH "\$ORIGIN/lib")
+endif()
 if(Torch_FOUND)
   get_filename_component(AERITH_DIANN_MODEL
     "${CMAKE_CURRENT_SOURCE_DIR}/../tools/diann-2.6.1-fragmentation.pt" ABSOLUTE)

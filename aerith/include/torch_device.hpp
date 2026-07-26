@@ -10,12 +10,17 @@
 #include <utility>
 #include <vector>
 
+#ifndef AERITH_TORCH_CPU_ONLY
 #include <torch/cuda.h>
+#endif
 #include <torch/script.h>
 
 namespace aerith {
 
 inline void compact_diann_gru_weights(torch::jit::script::Module& model) {
+#ifdef AERITH_TORCH_CPU_ONLY
+    (void)model;
+#else
     if (!model.hasattr("rnn")) {
         return;
     }
@@ -48,6 +53,7 @@ inline void compact_diann_gru_weights(torch::jit::script::Module& model) {
         rnn.attr("hidden_size").toInt(), rnn.attr("proj_size").toInt(),
         rnn.attr("num_layers").toInt(), rnn.attr("batch_first").toBool(),
         rnn.attr("bidirectional").toBool());
+#endif
 }
 
 inline torch::jit::script::Module load_torch_model_on_device(
@@ -70,6 +76,12 @@ template <typename Function>
 auto run_torch_prefer_cuda(const char* operation, std::string& selected_device,
                            Function&& function)
     -> decltype(function(torch::Device(torch::kCPU))) {
+#ifdef AERITH_TORCH_CPU_ONLY
+    std::cerr << operation << ": using CPU\n";
+    auto result = function(torch::Device(torch::kCPU));
+    selected_device = "CPU";
+    return result;
+#else
     bool cuda_available = false;
     try {
         cuda_available = torch::cuda::is_available();
@@ -93,6 +105,7 @@ auto run_torch_prefer_cuda(const char* operation, std::string& selected_device,
     auto result = function(torch::Device(torch::kCPU));
     selected_device = "CPU";
     return result;
+#endif
 }
 
 inline torch::Tensor move_torch_input(

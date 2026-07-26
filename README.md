@@ -217,7 +217,22 @@ Raxport scan's MS2 m/z window, matches experimental peaks at 20 ppm by default,
 and computes the entropy similarity when at least two predicted ions have
 experimental matches.
 
-Build Sipros and dynamic-LibTorch Aerith from the `sipros5` environment with:
+Build the release binaries with:
+
+```bash
+./make.sh build
+```
+
+For `build` and `package` only, the script creates or reuses the
+`sipros5-release` micromamba environment. It pins the glibc 2.17 sysroot,
+non-MPI HDF5 2.x, and PyTorch 2.12.1 CPU/MKL build. Sipros and Aerith
+dynamically link their external Conda libraries. `package` bundles the complete
+non-glibc runtime closure, including HDF5, OpenMP, compiler runtimes, Torch, and
+MKL, under `tools/lib`.
+The resulting binaries require host glibc 2.17 or newer. Neither command
+configures, builds, or packages `siprosMPI`.
+
+The optional Conda GPU build remains available from the `sipros5` environment:
 
 ```bash
 ./make.sh buildConda

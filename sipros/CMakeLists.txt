@@ -1,4 +1,6 @@
-find_package(MPI REQUIRED COMPONENTS CXX)
+if(SIPROS_BUILD_MPI)
+  find_package(MPI REQUIRED COMPONENTS CXX)
+endif()
 
 set(SIPROS_COMMON_SOURCE ${PROJECT_SOURCE_DIR}/sipros/src/SiprosSearchRunner.cpp)
 set(SIPROS_WORKFLOW_SOURCES
@@ -53,13 +55,14 @@ target_include_directories(sipros PUBLIC ${PROJECT_SOURCE_DIR}/sipros/include)
 target_link_libraries(sipros PUBLIC sipros_openmp_tools)
 sipros_compile_definitions(sipros)
 sipros_optimization_options(sipros)
-sipros_static_link_options(sipros)
 
-add_executable(siprosMPI ${PROJECT_SOURCE_DIR}/sipros/src/mpi_main.cpp)
-target_include_directories(siprosMPI PUBLIC ${PROJECT_SOURCE_DIR}/sipros/include)
-target_link_libraries(siprosMPI PUBLIC sipros_common sipros_core MPI::MPI_CXX OpenMP::OpenMP_CXX)
-target_compile_options(siprosMPI PUBLIC -ffast-math -march=native -fPIC)
-sipros_compile_definitions(siprosMPI)
+if(SIPROS_BUILD_MPI)
+  add_executable(siprosMPI ${PROJECT_SOURCE_DIR}/sipros/src/mpi_main.cpp)
+  target_include_directories(siprosMPI PUBLIC ${PROJECT_SOURCE_DIR}/sipros/include)
+  target_link_libraries(siprosMPI PUBLIC sipros_common sipros_core MPI::MPI_CXX OpenMP::OpenMP_CXX)
+  target_compile_options(siprosMPI PUBLIC -ffast-math -march=native -fPIC)
+  sipros_compile_definitions(siprosMPI)
+endif()
 
 if(BUILD_TESTING)
   add_executable(builtin_config_test
@@ -69,7 +72,6 @@ if(BUILD_TESTING)
   target_link_libraries(builtin_config_test PUBLIC sipros_core)
   sipros_compile_definitions(builtin_config_test)
   sipros_optimization_options(builtin_config_test)
-  sipros_static_link_options(builtin_config_test)
   add_test(
     NAME builtin_config
     COMMAND builtin_config_test
@@ -82,7 +84,6 @@ if(BUILD_TESTING)
   target_link_libraries(ms1_isotope_envelope_test PUBLIC sipros_common sipros_core)
   sipros_compile_definitions(ms1_isotope_envelope_test)
   sipros_optimization_options(ms1_isotope_envelope_test)
-  sipros_static_link_options(ms1_isotope_envelope_test)
   add_test(
     NAME ms1_isotope_envelope
     COMMAND ms1_isotope_envelope_test
@@ -95,7 +96,6 @@ if(BUILD_TESTING)
   target_link_libraries(pin_writer_schema_test PUBLIC sipros_core)
   sipros_compile_definitions(pin_writer_schema_test)
   sipros_optimization_options(pin_writer_schema_test)
-  sipros_static_link_options(pin_writer_schema_test)
   add_test(
     NAME pin_writer_schema
     COMMAND pin_writer_schema_test
@@ -108,7 +108,6 @@ if(BUILD_TESTING)
   target_link_libraries(fragment_index_test PUBLIC sipros_core)
   sipros_compile_definitions(fragment_index_test)
   sipros_optimization_options(fragment_index_test)
-  sipros_static_link_options(fragment_index_test)
   add_test(
     NAME fragment_index
     COMMAND fragment_index_test
@@ -121,7 +120,6 @@ if(BUILD_TESTING)
   target_link_libraries(native_precursor_test PUBLIC sipros_core)
   sipros_compile_definitions(native_precursor_test)
   sipros_optimization_options(native_precursor_test)
-  sipros_static_link_options(native_precursor_test)
   add_test(
     NAME native_precursor
     COMMAND native_precursor_test
@@ -134,7 +132,6 @@ if(BUILD_TESTING)
   target_link_libraries(protein_n_terminal_peptides_test PUBLIC sipros_core)
   sipros_compile_definitions(protein_n_terminal_peptides_test)
   sipros_optimization_options(protein_n_terminal_peptides_test)
-  sipros_static_link_options(protein_n_terminal_peptides_test)
   add_test(
     NAME protein_n_terminal_peptides
     COMMAND protein_n_terminal_peptides_test
@@ -147,7 +144,6 @@ if(BUILD_TESTING)
   target_link_libraries(search_policy_test PUBLIC sipros_common sipros_core)
   sipros_compile_definitions(search_policy_test)
   sipros_optimization_options(search_policy_test)
-  sipros_static_link_options(search_policy_test)
   add_test(
     NAME search_policy
     COMMAND search_policy_test
