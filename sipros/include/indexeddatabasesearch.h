@@ -37,6 +37,8 @@ class IndexedSearchScratch
 {
 public:
 	std::vector<IndexedCandidate> candidates;
+	std::vector<uint64_t> candidatePositions;
+	uint32_t candidateEpoch = 0;
 };
 
 // Query one already-MVH-preprocessed scan. The preliminary neutral-fragment

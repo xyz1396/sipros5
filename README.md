@@ -143,6 +143,9 @@ spacing.
   Aerith separately; the workflow does not create `targetDecoy.faa`. SIP
   spectra-search mode runs Aerith filtering only and produces the per-sample
   `*_filtered_psms.tsv` files without protein assembly outputs.
+- Before reranking, Aerith removes decoy PSMs whose stripped peptide sequence
+  is also present in any target PSM from the input samples and reports the
+  removed collision count in the workflow log.
 
 Aerith writes its timing and result summary to the workflow's existing
 `sipros_workflow.log`; it does not create a second `aerith.log` in the output

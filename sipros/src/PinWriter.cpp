@@ -58,6 +58,10 @@ std::string formatPsmChunk(const sipPSM &psm,
            << psm.XcorrScores[k] << "\t"
            << psm.MVHscores[k] << "\t"
            << psm.diffScores[k] << "\t"
+           << psm.matchedBIons[k] << "\t"
+           << psm.matchedYIons[k] << "\t"
+           << psm.maxConsecutiveBIons[k] << "\t"
+           << psm.maxConsecutiveYIons[k] << "\t"
            << (psm.precursorIntensities[k] > 0
                    ? std::log10(psm.precursorIntensities[k])
                    : 0)
@@ -102,6 +106,7 @@ void PinWriter::writePecorlatorPin(const std::string &fileName, const std::vecto
         "peptideLengths\tmissCleavageSiteNumbers\tPTMnumbers\tisotopicPeakNumbers\t"
         "MS1IsotopeFitScore\tMS1IsotopicAbundances\tMS2IsotopicAbundances\t"
         "isotopicAbundanceDiffs\tWDPscores\tXcorrScores\tMVHscores\tdiffScores\t"
+        "matchedBIons\tmatchedYIons\tmaxConsecutiveBIons\tmaxConsecutiveYIons\t"
         "log10_precursorIntensities\tPeptide\tProteins\n";
 
     std::vector<PinFormatChunk> chunks;

@@ -245,6 +245,29 @@ Dataset PinReader::read(const Config& config) {
             combined.rows.push_back(std::move(row));
         }
     }
+    // A decoy whose naked peptide is also observed as a target is not valid
+    // null evidence.  Remove these collisions before joint scan ranking, SVM
+    // training, and target-decoy FDR estimation.  The target set is global
+    // across the inputs because all samples use the same search database.
+    std::unordered_set<std::string> target_peptides;
+    for (const auto& row : combined.rows) {
+        if (row.label != 1) continue;
+        const auto peptide = stripped_peptide(row.peptide);
+        if (!peptide.empty()) target_peptides.insert(peptide);
+    }
+    const auto rows_before_collision_filter = combined.rows.size();
+    combined.rows.erase(
+        std::remove_if(
+            combined.rows.begin(), combined.rows.end(),
+            [&](const Psm& row) {
+                if (row.label != -1) return false;
+                const auto peptide = stripped_peptide(row.peptide);
+                return !peptide.empty() &&
+                    target_peptides.count(peptide) != 0;
+            }),
+        combined.rows.end());
+    combined.removed_decoy_peptide_collisions =
+        rows_before_collision_filter - combined.rows.size();
     if (paired) {
         const auto rank_feature = std::find(
             combined.feature_names.begin(), combined.feature_names.end(), "ranks");

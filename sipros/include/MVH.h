@@ -52,6 +52,18 @@ public:
 		return m_table.at(index);
 	}
 
+	double combination(int n, int k) const {
+		if (n < 0 || k < 0 || n < k)
+			return -1;
+		if (static_cast<size_t>(n) >= m_table.size()) {
+			cerr << "error lnFactorialTable " << endl;
+			exit(1);
+		}
+		return m_table[static_cast<size_t>(n)] -
+			m_table[static_cast<size_t>(n - k)] -
+			m_table[static_cast<size_t>(k)];
+	}
+
 	void resize(int index) {
 		int maxIndex = ((int)m_table.size()) - 1;
 		if (index > maxIndex) {

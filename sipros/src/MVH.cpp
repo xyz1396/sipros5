@@ -180,6 +180,16 @@ bool MVH::CalculateSequenceIons(std::string_view sSequence, int maxIonCharge, bo
 	_pdAAforward->clear();
 	_pdAAreverse->clear();
 	seq->clear();
+	const vector<double> &fragmentMasses =
+		ProNovoConfig::pdAAMassFragment.vdMasses;
+	const double missingMass = AminoAcidMasses::dNULL;
+	const auto isResidueSymbol = [](char symbol) {
+		const unsigned char value = static_cast<unsigned char>(symbol);
+		return (value >= static_cast<unsigned char>('A') &&
+				value <= static_cast<unsigned char>('Z')) ||
+			(value >= static_cast<unsigned char>('a') &&
+				value <= static_cast<unsigned char>('z'));
+	};
 	int i = 0, j = 0, k = 0, iPeptideLength, iPos;
 	k = ((int) sSequence.length()) - 1;
 	char currentPTM = 0;
@@ -187,9 +197,9 @@ bool MVH::CalculateSequenceIons(std::string_view sSequence, int maxIonCharge, bo
 	iPos = 0;
 	double iterResidueMonoMass;
 	for (i = 0; i <= k; ++i) {
-		if (isalpha(sSequence.at(i))) {
+		if (isResidueSymbol(sSequence[i])) {
 			iPeptideLength = iPeptideLength + 1;
-			seq->push_back(sSequence.at(i));
+			seq->push_back(sSequence[i]);
 		}
 	}
 	int iLenMinus1 = iPeptideLength - 1;
@@ -199,35 +209,37 @@ bool MVH::CalculateSequenceIons(std::string_view sSequence, int maxIonCharge, bo
 		return false;
 	}
 	j = 0;
-	if (sSequence.at(j) != '[') {
+	if (sSequence[j] != '[') {
 		cerr << "ERROR: First character in a peptide sequence must be [." << sSequence << endl;
 		return false;
 	}
 	double dBion = 0;
 	double dYion = ProNovoConfig::precalcMasses.dCtermOH2;
 	j++;
-	if (!isalpha(sSequence.at(j))) {
-		currentPTM = sSequence.at(j);
-		iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
-		if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
+	if (!isResidueSymbol(sSequence[j])) {
+		currentPTM = sSequence[j];
+		iterResidueMonoMass =
+			fragmentMasses[static_cast<unsigned char>(currentPTM)];
+		if (iterResidueMonoMass == missingMass) {
 			cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 			return false;
 		}
 		dBion += iterResidueMonoMass;
 		j++;
 	}
-	if (sSequence.at(k) == ']') {
+	if (sSequence[k] == ']') {
 		k--;
 	} else {
-		currentPTM = sSequence.at(k);
-		iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
-		if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
+		currentPTM = sSequence[k];
+		iterResidueMonoMass =
+			fragmentMasses[static_cast<unsigned char>(currentPTM)];
+		if (iterResidueMonoMass == missingMass) {
 			cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 			return false;
 		}
 		dYion += iterResidueMonoMass;
 		k--;
-		if (sSequence.at(k) != ']') {
+		if (sSequence[k] != ']') {
 			cerr << "ERROR: (second) Last character in a peptide sequence must be ]." << endl;
 			return false;
 		}
@@ -236,24 +248,27 @@ bool MVH::CalculateSequenceIons(std::string_view sSequence, int maxIonCharge, bo
 	//
 	for (i = 0; i <= iLenMinus1; i++) {
 		//First forward
-		if (!isalpha(sSequence.at(j))) {
+		if (!isResidueSymbol(sSequence[j])) {
 			cerr << "ERROR: One residue can only have one PTM (Up to only one symbol after an amino acid)" << endl;
 			exit(1);
 			return false;
 		}
-		currentPTM = sSequence.at(j);
-		iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
-		if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
+		currentPTM = sSequence[j];
+		iterResidueMonoMass =
+			fragmentMasses[static_cast<unsigned char>(currentPTM)];
+		if (iterResidueMonoMass == missingMass) {
 			cerr << "ERROR: One residue can only have one PTM (Up to only one symbol after an amino acid)" << endl;
 			exit(1);
 			return false;
 		}
 		dBion += iterResidueMonoMass;
 		j++;
-		if (j < (int) sSequence.length() && !isalpha(sSequence.at(j)) && sSequence.at(j) != ']') {
-			currentPTM = sSequence.at(j);
-			iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
-			if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
+		if (j < (int) sSequence.length() &&
+			!isResidueSymbol(sSequence[j]) && sSequence[j] != ']') {
+			currentPTM = sSequence[j];
+			iterResidueMonoMass =
+				fragmentMasses[static_cast<unsigned char>(currentPTM)];
+			if (iterResidueMonoMass == missingMass) {
 				cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 				return false;
 			}
@@ -262,10 +277,11 @@ bool MVH::CalculateSequenceIons(std::string_view sSequence, int maxIonCharge, bo
 		}
 		_pdAAforward->push_back(dBion);
 		// now reverse
-		if (!isalpha(sSequence.at(k))) {
-			currentPTM = sSequence.at(k);
-			iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
-			if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
+		if (!isResidueSymbol(sSequence[k])) {
+			currentPTM = sSequence[k];
+			iterResidueMonoMass =
+				fragmentMasses[static_cast<unsigned char>(currentPTM)];
+			if (iterResidueMonoMass == missingMass) {
 				cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 				exit(1);
 				return false;
@@ -273,14 +289,15 @@ bool MVH::CalculateSequenceIons(std::string_view sSequence, int maxIonCharge, bo
 			dYion += iterResidueMonoMass;
 			k--;
 		}
-		if (!isalpha(sSequence.at(k))) {
+		if (!isResidueSymbol(sSequence[k])) {
 			cerr << "ERROR: One residue can only have one PTM (Up to only one symbol after an amino acid)" << endl;
 			exit(1);
 			return false;
 		}
-		currentPTM = sSequence.at(k);
-		iterResidueMonoMass = ProNovoConfig::pdAAMassFragment.find(currentPTM);
-		if (iterResidueMonoMass == ProNovoConfig::pdAAMassFragment.end()) {
+		currentPTM = sSequence[k];
+		iterResidueMonoMass =
+			fragmentMasses[static_cast<unsigned char>(currentPTM)];
+		if (iterResidueMonoMass == missingMass) {
 			cerr << "ERROR: cannot find PTM in the built-in chemistry: " << currentPTM << endl;
 			exit(1);
 			return false;
@@ -296,9 +313,9 @@ bool MVH::CalculateSequenceIons(std::string_view sSequence, int maxIonCharge, bo
 		if (useSmartPlusThreeModel) {
 			int totalStrongBasicCount = 0, totalWeakBasicCount = 0;
 			for (i = 0; i < iPeptideLength; i++) {
-				if (seq->at(i) == 'R' || seq->at(i) == 'K' || seq->at(i) == 'H') {
+				if ((*seq)[i] == 'R' || (*seq)[i] == 'K' || (*seq)[i] == 'H') {
 					++totalStrongBasicCount;
-				} else if (seq->at(i) == 'Q' || seq->at(i) == 'N') {
+				} else if ((*seq)[i] == 'Q' || (*seq)[i] == 'N') {
 					++totalWeakBasicCount;
 				}
 			}
@@ -324,16 +341,16 @@ bool MVH::CalculateSequenceIons(std::string_view sSequence, int maxIonCharge, bo
 				int yZ = maxIonCharge - bZ;
 				if (c > 0) {
 					if (fragmentTypes[FragmentType_B]) {
-						sequenceIonMasses->push_back((_pdAAforward->at(c - 1) + (Proton * bZ)) / bZ);
+						sequenceIonMasses->push_back(((*_pdAAforward)[c - 1] + (Proton * bZ)) / bZ);
 					}
 				}
 				if (c < iPeptideLength) {
 					if (fragmentTypes[FragmentType_Y]) {
-						sequenceIonMasses->push_back((_pdAAreverse->at(iLenMinus1 - c) + (Proton * yZ)) / yZ);
+						sequenceIonMasses->push_back(((*_pdAAreverse)[iLenMinus1 - c] + (Proton * yZ)) / yZ);
 					}
 				}
 				if (c < iPeptideLength) {
-					const char residue = seq->at(c);
+					const char residue = (*seq)[c];
 					if (residue == 'R' || residue == 'K' || residue == 'H') {
 						++bStrongBasicCount;
 					} else if (residue == 'Q' || residue == 'N') {
@@ -346,11 +363,11 @@ bool MVH::CalculateSequenceIons(std::string_view sSequence, int maxIonCharge, bo
 				for (int c = 0; c <= iLenMinus1; ++c) {
 					if (c > 0) {
 						if (fragmentTypes[FragmentType_B]) {
-							sequenceIonMasses->push_back((_pdAAforward->at(c - 1) + (Proton * z)) / z);
+							sequenceIonMasses->push_back(((*_pdAAforward)[c - 1] + (Proton * z)) / z);
 						}
 					}
 					if (fragmentTypes[FragmentType_Y]) {
-						sequenceIonMasses->push_back((_pdAAreverse->at(c) + (Proton * z)) / z);
+						sequenceIonMasses->push_back(((*_pdAAreverse)[c] + (Proton * z)) / z);
 					}
 				}
 			}
@@ -358,14 +375,14 @@ bool MVH::CalculateSequenceIons(std::string_view sSequence, int maxIonCharge, bo
 	} else {
 		for (int c = 0; c < iLenMinus1; ++c) {
 			if (fragmentTypes[FragmentType_B]) {
-				sequenceIonMasses->push_back((_pdAAforward->at(c) + Proton));
+				sequenceIonMasses->push_back((*_pdAAforward)[c] + Proton);
 			}
 			if (fragmentTypes[FragmentType_Y]) {
-				sequenceIonMasses->push_back((_pdAAreverse->at(c) + Proton));
+				sequenceIonMasses->push_back((*_pdAAreverse)[c] + Proton);
 			}
 		}
 		if (fragmentTypes[FragmentType_Y]) {
-			sequenceIonMasses->push_back((_pdAAreverse->at(iLenMinus1) + Proton));
+			sequenceIonMasses->push_back((*_pdAAreverse)[iLenMinus1] + Proton);
 		}
 	}
 	return true;
@@ -553,15 +570,7 @@ bool MVH::initialLnTable(int maxPeakBins) {
 }
 
 double MVH::lnCombin(int n, int k) {
-	if (n < 0 || k < 0 || n < k)
-		return -1;
-
-	try {
-		return (*lnTable)[n] - (*lnTable)[n - k] - (*lnTable)[k];
-	} catch (std::exception& e) {
-		cerr << "lnCombin(): caught exception with n=" << n << " and k=" << k << endl;
-		throw e;
-	}
+	return lnTable->combination(n, k);
 }
 
 bool MVH::ScoreSequenceVsSpectrum(std::string_view currentPeptide, int precursorCharge, MS2Scan * Spectrum, vector<double>* seqIons, vector<double> * _pdAAforward,
@@ -569,39 +578,51 @@ bool MVH::ScoreSequenceVsSpectrum(std::string_view currentPeptide, int precursor
 	if (!CalculateSequenceIons(currentPeptide, precursorCharge, bUseSmartPlusThreeModel, seqIons, _pdAAforward, _pdAAreverse, seq)) {
 		return false;
 	}
-	int totalPeaks = (int) seqIons->size();
-	char peakItr;
+	int totalPeaks = static_cast<int>(seqIons->size());
 	PeakList * pPeakList = Spectrum->pPeakList;
-	// This function runs once per candidate. Reuse one count vector per worker
-	// instead of allocating and freeing it millions of times.
-	static thread_local vector<int> mvhKey;
-	mvhKey.assign(ProNovoConfig::NumIntensityClasses + 1, 0);
+	const int intensityClassCount = ProNovoConfig::NumIntensityClasses;
+	constexpr size_t StackIntensityClasses = 16;
+	std::array<int, StackIntensityClasses> stackMvhKey{};
+	int *mvhKey = stackMvhKey.data();
+	if (static_cast<size_t>(intensityClassCount + 1) >
+		stackMvhKey.size()) {
+		// Built-in profiles use three classes. Retain a safe fallback for any
+		// future profile with an unusually large number of classes.
+		static thread_local vector<int> overflowMvhKey;
+		overflowMvhKey.assign(intensityClassCount + 1, 0);
+		mvhKey = overflowMvhKey.data();
+	}
+	const double mzLowerBound = Spectrum->mzLowerBound;
+	const double mzUpperBound = Spectrum->mzUpperBound;
+	const double fragmentTolerance =
+		ProNovoConfig::getMassAccuracyFragmentIon();
 
-	for (int j = 0; j < (int) seqIons->size(); ++j) {
-		if (seqIons->at(j) < Spectrum->mzLowerBound || seqIons->at(j) > Spectrum->mzUpperBound) {
+	for (double ionMz : *seqIons) {
+		if (ionMz < mzLowerBound || ionMz > mzUpperBound) {
 			--totalPeaks;
 			continue;
 		}
-		peakItr = pPeakList->findNear(seqIons->at(j), ProNovoConfig::getMassAccuracyFragmentIon());
+		const char peakItr = pPeakList->findNear(ionMz, fragmentTolerance);
 		if (peakItr != pPeakList->end() && peakItr > 0) {
-			++(mvhKey.at(peakItr - 1));
+			++mvhKey[peakItr - 1];
 		} else {
-			++(mvhKey.at(ProNovoConfig::NumIntensityClasses));
+			++mvhKey[intensityClassCount];
 		}
 	}
 
 	double mvh = 0.0;
-	int fragmentsUnmatched = mvhKey.back();
+	int fragmentsUnmatched = mvhKey[intensityClassCount];
 
 	if (fragmentsUnmatched != totalPeaks) {
-		int fragmentsPredicted = accumulate(mvhKey.begin(), mvhKey.end(), 0);
+		const int fragmentsPredicted = totalPeaks;
 		int fragmentsMatched = fragmentsPredicted - fragmentsUnmatched;
 
 		if (fragmentsMatched >= ProNovoConfig::MinMatchedFragments) {
-			int numVoids = Spectrum->intenClassCounts->back();
-			int totalPeakBins = numVoids + pPeakList->size();
-			for (int i = 0; i < (int) Spectrum->intenClassCounts->size(); ++i) {
-				mvh += lnCombin(Spectrum->intenClassCounts->at(i), mvhKey.at(i));
+			const vector<int> &intensityCounts = *Spectrum->intenClassCounts;
+			const int numVoids = intensityCounts.back();
+			const int totalPeakBins = numVoids + pPeakList->size();
+			for (size_t i = 0; i < intensityCounts.size(); ++i) {
+				mvh += lnCombin(intensityCounts[i], mvhKey[i]);
 			}
 			mvh -= lnCombin(totalPeakBins, fragmentsPredicted);
 			dMvh = -mvh;

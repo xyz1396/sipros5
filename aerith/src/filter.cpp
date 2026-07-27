@@ -82,6 +82,8 @@ Summary run(const Config& config) {
     }
     summary.files = data.input_paths.size();
     summary.psms = data.rows.size();
+    summary.removed_decoy_peptide_collisions =
+        data.removed_decoy_peptide_collisions;
     for (const auto& row : data.rows) {
         row.label == 1 ? ++summary.targets : ++summary.decoys;
     }

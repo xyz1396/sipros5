@@ -74,6 +74,7 @@ struct Dataset {
     StageTiming spectrum_prediction_timing;
     StageTiming rt_prediction_timing;
     std::vector<TransferredIon> transferred_ions;
+    std::size_t removed_decoy_peptide_collisions = 0;
 };
 
 struct RtResult {

@@ -507,11 +507,11 @@ int ProNovoConfig::minIntensityClassCount = static_cast<int>(
 	(ClassSizeMultiplier - 1.0));
 double ProNovoConfig::ticCutoffPercentage = 0.98;
 int ProNovoConfig::MaxPeakCount = 300;
-int ProNovoConfig::MinMatchedFragments = 5;
+int ProNovoConfig::MinMatchedFragments = 3;
 double ProNovoConfig::minObservedMz = std::numeric_limits<double>::max();
 double ProNovoConfig::maxObservedMz = 0.0;
 
-int ProNovoConfig::INTTOPKEEP = 10;
+int ProNovoConfig::INTTOPKEEP = 20;
 int ProNovoConfig::iRank = 0;
 
 std::string ProNovoConfig::SIPelement;

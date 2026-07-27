@@ -58,6 +58,56 @@ int main() {
     assert(mixmax[0] <= mixmax[1]);
     assert(mixmax[1] <= mixmax[3]);
 
+    const auto collision_root = std::filesystem::temp_directory_path() /
+        "aerith_target_decoy_peptide_collision_unit";
+    std::filesystem::remove_all(collision_root);
+    std::filesystem::create_directories(collision_root);
+    const auto write_pin = [](
+        const std::filesystem::path& path,
+        const std::vector<std::array<std::string, 6>>& rows) {
+        std::ofstream pin(path);
+        pin << "SpecId\tLabel\tScanNr\tretentiontime\tExpMass\tWDPscores"
+               "\tranks\tparentCharges\tPeptide\tProteins\n";
+        for (const auto& row : rows) {
+            pin << row[0] << '\t' << row[1] << '\t' << row[2]
+                << "\t1.0\t1000.0\t" << row[3] << "\t1\t2\t"
+                << row[4] << '\t' << row[5] << '\n';
+        }
+    };
+    const auto target0 = collision_root / "target0.pin";
+    const auto decoy0 = collision_root / "decoy0.pin";
+    const auto target1 = collision_root / "target1.pin";
+    const auto decoy1 = collision_root / "decoy1.pin";
+    write_pin(target0, {{
+        "sample0.1.1", "1", "1", "10.0", "K[PEPTM~IDE]R", "{sp|P1|ONE}"}});
+    write_pin(decoy0, {
+        {"sample0.1.1", "-1", "1", "10.0", "R[PEPTMIDE]K", "{Decoy_P1}"},
+        {"sample0.2.1", "-1", "2", "9.0", "R[UNIQUE]K", "{Decoy_P2}"}});
+    write_pin(target1, {{
+        "sample1.1.1", "1", "1", "10.0", "K[ANOTHER]R", "{sp|P2|TWO}"}});
+    write_pin(decoy1, {
+        {"sample1.2.1", "-1", "2", "9.0", "R[PEPTMIDE]K", "{Decoy_P1}"},
+        {"sample1.3.1", "-1", "3", "8.0", "R[ANOTHER]K", "{Decoy_P2}"}});
+    aerith::Config collision_config;
+    collision_config.target_pins = {target0.string(), target1.string()};
+    collision_config.decoy_pins = {decoy0.string(), decoy1.string()};
+    const auto collision_data = aerith::PinReader::read(collision_config);
+    assert(collision_data.rows.size() == 3);
+    assert(collision_data.removed_decoy_peptide_collisions == 3);
+    assert(std::count_if(
+        collision_data.rows.begin(), collision_data.rows.end(),
+        [](const auto& row) { return row.label == 1; }) == 2);
+    assert(std::count_if(
+        collision_data.rows.begin(), collision_data.rows.end(),
+        [](const auto& row) { return row.label == -1; }) == 1);
+    assert(std::any_of(
+        collision_data.rows.begin(), collision_data.rows.end(),
+        [](const auto& row) {
+            return row.label == -1 &&
+                aerith::stripped_peptide(row.peptide) == "UNIQUE";
+        }));
+    std::filesystem::remove_all(collision_root);
+
     const auto root = std::filesystem::temp_directory_path() /
         "aerith_native_protein_unit";
     std::filesystem::remove_all(root);
@@ -222,6 +272,7 @@ int main() {
     summary.distinct_target_peptide_forms = 3;
     summary.distinct_target_ptm_peptides = 1;
     summary.target_ptm_psms = 1;
+    summary.removed_decoy_peptide_collisions = 154;
     summary.quantification_stages.push_back({
         "Trace identified XICs + detect peaks/intensity",
         {2.0, 8.0}, true, false});
@@ -231,6 +282,8 @@ int main() {
     const auto log_text = log.str();
     assert(log_text.find("Distinct naked peptides") != std::string::npos);
     assert(log_text.find("Distinct PTM peptide forms") != std::string::npos);
+    assert(log_text.find("Removed colliding decoy PSMs  154") !=
+           std::string::npos);
     assert(log_text.find("Timing by stage (seconds)") != std::string::npos);
     assert(log_text.find("Quantification total") !=
            std::string::npos);

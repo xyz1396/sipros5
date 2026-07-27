@@ -1501,6 +1501,155 @@ static string stripPeptideForFeatures(const string &peptide)
 	return stripped;
 }
 
+struct FragmentSeriesFeatures
+{
+	int matchedB = 0;
+	int matchedY = 0;
+	int maxConsecutiveB = 0;
+	int maxConsecutiveY = 0;
+};
+
+static bool matchesMvhPeak(const MS2Scan *scan, double mz)
+{
+	if (scan == nullptr || scan->pPeakList == nullptr ||
+		mz < scan->mzLowerBound || mz > scan->mzUpperBound)
+	{
+		return false;
+	}
+	const char peakClass = scan->pPeakList->findNear(
+		mz, ProNovoConfig::getMassAccuracyFragmentIon());
+	return peakClass != scan->pPeakList->end() && peakClass > 0;
+}
+
+static int longestMatchedSeries(const vector<bool> &matches)
+{
+	int longest = 0;
+	int current = 0;
+	for (bool matched : matches)
+	{
+		current = matched ? current + 1 : 0;
+		longest = max(longest, current);
+	}
+	return longest;
+}
+
+static FragmentSeriesFeatures calculateFragmentSeriesFeatures(
+	const PeptideUnit *peptide, MS2Scan *scan)
+{
+	FragmentSeriesFeatures features;
+	if (peptide == nullptr || scan == nullptr)
+	{
+		return features;
+	}
+
+	vector<double> sequenceIons;
+	vector<double> aaForward;
+	vector<double> aaReverse;
+	vector<char> residues;
+	if (!MVH::CalculateSequenceIons(
+			peptide->sPeptideForScoring,
+			peptide->iMeasuredParentCharge,
+			MVH::bUseSmartPlusThreeModel,
+			&sequenceIons,
+			&aaForward,
+			&aaReverse,
+			&residues) ||
+		residues.size() < 2)
+	{
+		return features;
+	}
+
+	const int peptideLength = static_cast<int>(residues.size());
+	vector<bool> bMatches(static_cast<size_t>(peptideLength - 1), false);
+	vector<bool> yMatches(static_cast<size_t>(peptideLength - 1), false);
+
+	if (peptide->iMeasuredParentCharge > 2 && MVH::bUseSmartPlusThreeModel)
+	{
+		int totalStrongBasic = 0;
+		int totalWeakBasic = 0;
+		for (char residue : residues)
+		{
+			if (residue == 'R' || residue == 'K' || residue == 'H')
+				++totalStrongBasic;
+			else if (residue == 'Q' || residue == 'N')
+				++totalWeakBasic;
+		}
+		const int totalBasicity =
+			totalStrongBasic * 4 + totalWeakBasic * 2 + peptideLength - 2;
+		const double chargeDenominator =
+			static_cast<double>(peptide->iMeasuredParentCharge - 1);
+		int bStrongBasic = 0;
+		int bWeakBasic = 0;
+		for (int cleavage = 1; cleavage < peptideLength; ++cleavage)
+		{
+			const char previousResidue =
+				residues[static_cast<size_t>(cleavage - 1)];
+			if (previousResidue == 'R' || previousResidue == 'K' ||
+				previousResidue == 'H')
+			{
+				++bStrongBasic;
+			}
+			else if (previousResidue == 'Q' || previousResidue == 'N')
+			{
+				++bWeakBasic;
+			}
+
+			const int bScore =
+				bStrongBasic * 4 + bWeakBasic * 2 + cleavage;
+			const double basicityRatio =
+				static_cast<double>(bScore) /
+				static_cast<double>(totalBasicity);
+			int first = 1;
+			int last = peptide->iMeasuredParentCharge - 1;
+			while (first < last)
+			{
+				const int middle = first + (last - first) / 2;
+				if (static_cast<double>(middle) / chargeDenominator <=
+					basicityRatio)
+				{
+					first = middle + 1;
+				}
+				else
+				{
+					last = middle;
+				}
+			}
+			const int bCharge = first;
+			const int yCharge =
+				peptide->iMeasuredParentCharge - bCharge;
+			const size_t bIndex =
+				static_cast<size_t>(cleavage - 1);
+			const size_t yIndex =
+				static_cast<size_t>(peptideLength - 1 - cleavage);
+			const double bMz =
+				(aaForward[bIndex] + Proton * bCharge) / bCharge;
+			const double yMz =
+				(aaReverse[yIndex] + Proton * yCharge) / yCharge;
+			bMatches[bIndex] = matchesMvhPeak(scan, bMz);
+			yMatches[yIndex] = matchesMvhPeak(scan, yMz);
+		}
+	}
+	else
+	{
+		for (size_t ionIndex = 0;
+			ionIndex < bMatches.size(); ++ionIndex)
+		{
+			bMatches[ionIndex] = matchesMvhPeak(
+				scan, aaForward[ionIndex] + Proton);
+			yMatches[ionIndex] = matchesMvhPeak(
+				scan, aaReverse[ionIndex] + Proton);
+		}
+	}
+
+	features.matchedB = static_cast<int>(
+		count(bMatches.begin(), bMatches.end(), true));
+	features.matchedY = static_cast<int>(
+		count(yMatches.begin(), yMatches.end(), true));
+	features.maxConsecutiveB = longestMatchedSeries(bMatches);
+	features.maxConsecutiveY = longestMatchedSeries(yMatches);
+	return features;
+}
+
 void MS2ScanVector::appendScoredPsmRows(vector<ScoredPsmRow> &rows, bool isDecoy, int topKeep, double ms2IsotopicAbundancePct) const
 {
 	vector<MS2Scan *> orderedScans = vpAllMS2Scans;
@@ -1539,6 +1688,14 @@ void MS2ScanVector::appendScoredPsmRows(vector<ScoredPsmRow> &rows, bool isDecoy
 			row.xcorrScore = static_cast<float>(peptide->vdScores[1]);
 			row.mvhScore = static_cast<float>(peptide->vdScores[2]);
 			row.rank = static_cast<int>(peptide->vdRank[0]);
+			const FragmentSeriesFeatures fragmentFeatures =
+				calculateFragmentSeriesFeatures(peptide, scan);
+			row.matchedBIons = fragmentFeatures.matchedB;
+			row.matchedYIons = fragmentFeatures.matchedY;
+			row.maxConsecutiveBIons =
+				fragmentFeatures.maxConsecutiveB;
+			row.maxConsecutiveYIons =
+				fragmentFeatures.maxConsecutiveY;
 			row.identifiedPeptide = formatContextPeptide(peptide->cIdentifyPrefix, peptide->sIdentifiedPeptide, peptide->cIdentifySuffix);
 			row.originalPeptide = formatContextPeptide(peptide->cOriginalPrefix, peptide->sOriginalPeptide, peptide->cOriginalSuffix);
 			row.nakedPeptide = stripPeptideForFeatures(peptide->sIdentifiedPeptide);

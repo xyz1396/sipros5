@@ -495,6 +495,10 @@ static sipPSM buildSipPsm(const std::string &sampleName,
 	psm.MVHscores.reserve(count);
 	psm.XcorrScores.reserve(count);
 	psm.WDPscores.reserve(count);
+	psm.matchedBIons.reserve(count);
+	psm.matchedYIons.reserve(count);
+	psm.maxConsecutiveBIons.reserve(count);
+	psm.maxConsecutiveYIons.reserve(count);
 	psm.isDecoys.reserve(count);
 	for (const ScoredPsmRow &row : rows)
 	{
@@ -517,6 +521,10 @@ static sipPSM buildSipPsm(const std::string &sampleName,
 		psm.MVHscores.push_back(row.mvhScore);
 		psm.XcorrScores.push_back(row.xcorrScore);
 		psm.WDPscores.push_back(row.wdpScore);
+		psm.matchedBIons.push_back(row.matchedBIons);
+		psm.matchedYIons.push_back(row.matchedYIons);
+		psm.maxConsecutiveBIons.push_back(row.maxConsecutiveBIons);
+		psm.maxConsecutiveYIons.push_back(row.maxConsecutiveYIons);
 		psm.isDecoys.push_back(row.isDecoy);
 	}
 	return psm;

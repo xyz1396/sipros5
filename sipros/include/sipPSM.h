@@ -47,6 +47,10 @@ public:
     std::vector<int> missCleavageSiteNumbers;
     std::vector<int> PTMnumbers;
     std::vector<float> diffScores;
+    std::vector<int> matchedBIons;
+    std::vector<int> matchedYIons;
+    std::vector<int> maxConsecutiveBIons;
+    std::vector<int> maxConsecutiveYIons;
     std::vector<double> mzShiftFromisolationWindowCenters;
     std::vector<int> isotopicMassWindowShifts;
     std::vector<double> massErrors;

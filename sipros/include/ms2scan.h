@@ -153,9 +153,66 @@ public:
 	PeakList(map<double, char> *_peakData);
 	~PeakList();
 
-	char end();
-	char findNear(double mz, double tolerance);
-	int size();
+	char end() const
+	{
+		return iNULL;
+	}
+
+	char findNear(double mz, double tolerance) const
+	{
+		if (iPeakSize == 0)
+		{
+			return iNULL;
+		}
+
+		const int mzUpper = static_cast<int>(mz + tolerance);
+		const int mzLower = static_cast<int>(mz - tolerance);
+		if (mzUpper < iLowestMass || mzLower > iHighestMass)
+		{
+			return iNULL;
+		}
+
+		int binBegin = 0;
+		int binEnd = iMassHubPairSizeMinusOne;
+		if (mzLower >= iLowestMass)
+		{
+			binBegin = mzLower - iLowestMass;
+		}
+		if (mzUpper <= iHighestMass)
+		{
+			binEnd = mzUpper - iLowestMass;
+		}
+
+		double minimumDifference = 1000000.0;
+		char intensityClass = iNULL;
+		const short *massHub = pMassHub.data();
+		const double *peaks = pPeaks.data();
+		const char *classes = pClasses.data();
+		for (int bin = binBegin; bin <= binEnd; ++bin)
+		{
+			const int peakBegin = massHub[bin * 2];
+			if (peakBegin == -1)
+			{
+				continue;
+			}
+			const int peakEnd = massHub[bin * 2 + 1];
+			for (int peak = peakBegin; peak < peakEnd; ++peak)
+			{
+				const double difference = std::fabs(mz - peaks[peak]);
+				if (difference < minimumDifference)
+				{
+					minimumDifference = difference;
+					intensityClass = classes[peak];
+				}
+			}
+		}
+		return minimumDifference < tolerance ? intensityClass : iNULL;
+	}
+
+	int size() const
+	{
+		return iPeakSize;
+	}
 };
 
 class MS2Scan

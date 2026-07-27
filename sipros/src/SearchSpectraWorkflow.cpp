@@ -80,7 +80,7 @@ struct Args
 	bool toleranceMs2Ppm = true;
 	int isotopeShiftWindow = 3;
 	int scoreEnvelopeTopN = 2;
-	int topPsmsPerScan = 10;
+	int topPsmsPerScan = 20;
 };
 
 // One tolerance, two units. Resolve to a Da window for a specific m/z.
@@ -264,7 +264,7 @@ void printUsage(const char *prog)
 		<< "    [--tolerance <N>] [--tolerance-unit ppm|da]            shortcut: set BOTH MS1 and MS2\n"
 		<< "    [--isotope-shift-window <N>]                           precursor isotope shifts +/-N (default: 3)\n"
 		<< "    [--score-envelope-top-n <N>]                           Xcorr/MVH envelope peaks (default: 2)\n"
-		<< "    [--top-psms-per-scan <N>]                              WDP winners per scan/label (default: 10)\n";
+		<< "    [--top-psms-per-scan <N>]                              WDP winners per scan/label (default: 20)\n";
 }
 
 Args parseArgs(int argc, char **argv)

@@ -103,8 +103,8 @@ citation:
                                   "budget between two processes; other Sipros and "
                                   "Sipros search jobs receive at least 8 threads when "
                                   "the budget permits"))
-        parser.add_argument('--topN', '--top-psms-per-scan', dest='topN', required=False, type=int, default=8,
-                            help="Top PSM rows retained per scan for target and decoy searches before merge (default: 8)")
+        parser.add_argument('--topN', '--top-psms-per-scan', dest='topN', required=False, type=int, default=20,
+                            help="Top PSM rows retained per scan for target and decoy searches before merge (default: 20)")
         parser.add_argument('-o', '--output', required=True, help="Output directory path")
         parser.add_argument('--ignorePCT', action='store_true', 
                             help='Ignore SIP abundance features when filtering')

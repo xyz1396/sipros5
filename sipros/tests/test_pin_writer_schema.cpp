@@ -83,6 +83,27 @@ void checkPin(const std::filesystem::path &path,
               std::stod(row[scoreIndex]) -
               expectedFitScore) < 1e-6,
           "PIN changed the MS1 isotope fit score");
+
+    const auto matchedBIt = std::find(
+        header.begin(), header.end(), "matchedBIons");
+    if (matchedBIt != header.end())
+    {
+        const auto matchedYIt = matchedBIt + 1;
+        const auto consecutiveBIt = matchedBIt + 2;
+        const auto consecutiveYIt = matchedBIt + 3;
+        check(consecutiveYIt < header.end() &&
+                  *matchedYIt == "matchedYIons" &&
+                  *consecutiveBIt == "maxConsecutiveBIons" &&
+                  *consecutiveYIt == "maxConsecutiveYIons",
+              "classic PIN B/Y ion columns are missing or misordered");
+        const size_t featureIndex = static_cast<size_t>(
+            matchedBIt - header.begin());
+        check(row[featureIndex] == "3" &&
+                  row[featureIndex + 1] == "4" &&
+                  row[featureIndex + 2] == "2" &&
+                  row[featureIndex + 3] == "3",
+              "classic PIN B/Y ion feature values changed");
+    }
 }
 
 sipPSM makeClassicPsm()
@@ -109,6 +130,10 @@ sipPSM makeClassicPsm()
     psm.XcorrScores = {2.0f};
     psm.MVHscores = {20.0f};
     psm.diffScores = {0.0f};
+    psm.matchedBIons = {3};
+    psm.matchedYIons = {4};
+    psm.maxConsecutiveBIons = {2};
+    psm.maxConsecutiveYIons = {3};
     psm.precursorIntensities = {1000.0};
     psm.identifiedPeptides = {"K[PEPTIDE]R"};
     psm.originalPeptides = {"K[PEPTIDE]R"};

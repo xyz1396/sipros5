@@ -75,6 +75,7 @@ struct Summary {
     std::size_t psms = 0;
     std::size_t targets = 0;
     std::size_t decoys = 0;
+    std::size_t removed_decoy_peptide_collisions = 0;
     std::size_t rt_training_targets = 0;
     std::size_t target_ids = 0;
     std::size_t distinct_target_peptides = 0;

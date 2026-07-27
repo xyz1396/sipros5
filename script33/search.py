@@ -23,7 +23,7 @@ class search:
                  threadNumber: int, logger: Logger, element="R",
                  nPrecursor=6, dryrun=False, psmTsv: str | None = None,
                  unlabeledInput: str | None = None, spectraDir: str | None = None,
-                 topPsmsPerScan: int = 8, ptms: list[str] | None = None,
+                 topPsmsPerScan: int = 20, ptms: list[str] | None = None,
                  fixedPtms: list[str] | None = None,
                  maxPtmCount: int | None = None) -> None:
         self.core_count = available_cpu_count()

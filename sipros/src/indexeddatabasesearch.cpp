@@ -26,14 +26,6 @@ bool candidateIdentityLess(const IndexedCandidate &left,
 		std::tie(right.peptideId, right.charge, right.measuredMass);
 }
 
-bool candidateIdentityEqual(const IndexedCandidate &left,
-								const IndexedCandidate &right)
-{
-	return left.peptideId == right.peptideId &&
-		left.charge == right.charge &&
-		left.measuredMass == right.measuredMass;
-}
-
 bool mergeIndexedPeptideIfPresent(
 	const FragmentIndex &index,
 	uint32_t peptideId,
@@ -114,6 +106,21 @@ void queryIndexedScan(
 		const int precursorCharge = chargeEntry.first;
 		std::vector<IndexedCandidate> &candidates = scratch.candidates;
 		candidates.clear();
+		if (scratch.candidatePositions.size() != index.peptideCount())
+		{
+			scratch.candidatePositions.assign(index.peptideCount(), 0);
+			scratch.candidateEpoch = 0;
+		}
+		++scratch.candidateEpoch;
+		if (scratch.candidateEpoch == 0)
+		{
+			std::fill(
+				scratch.candidatePositions.begin(),
+				scratch.candidatePositions.end(), 0);
+			scratch.candidateEpoch = 1;
+		}
+		const uint64_t epoch =
+			static_cast<uint64_t>(scratch.candidateEpoch) << 32;
 
 		for (const Hypothesis &hypothesis : chargeEntry.second)
 		{
@@ -136,29 +143,43 @@ void queryIndexedScan(
 					{
 						continue;
 					}
-					candidates.push_back(
-						{peptideId, hypothesis.mass, precursorCharge,
-						 hypothesis.ordinal});
+					const IndexedCandidate candidate{
+						peptideId, hypothesis.mass, precursorCharge,
+						hypothesis.ordinal};
+					uint64_t &positionState =
+						scratch.candidatePositions[peptideId];
+					if ((positionState & 0xffffffff00000000ULL) != epoch)
+					{
+						const uint64_t position =
+							static_cast<uint64_t>(candidates.size());
+						positionState = epoch | (position + 1);
+						candidates.push_back(candidate);
+					}
+					else
+					{
+						const size_t position = static_cast<size_t>(
+							(positionState & 0xffffffffULL) - 1);
+						IndexedCandidate &representative =
+							candidates[position];
+						if (std::tie(candidate.hypothesisOrdinal,
+								candidate.measuredMass) <
+							std::tie(representative.hypothesisOrdinal,
+								representative.measuredMass))
+						{
+							representative = candidate;
+						}
+					}
 				}
 			}
 		}
 
 		std::sort(candidates.begin(), candidates.end(), candidateIdentityLess);
-		candidates.erase(
-			std::unique(candidates.begin(), candidates.end(), candidateIdentityEqual),
-			candidates.end());
 		counters.exactMassCandidates += candidates.size();
 		if (candidates.empty())
 		{
 			continue;
 		}
-		uint64_t uniquePeptides = 1;
-		for (size_t i = 1; i < candidates.size(); ++i)
-		{
-			if (candidates[i].peptideId != candidates[i - 1].peptideId)
-				++uniquePeptides;
-		}
-		counters.uniquePeptideChargeCandidates += uniquePeptides;
+		counters.uniquePeptideChargeCandidates += candidates.size();
 
 		const int maximumFragmentCharge = precursorCharge <= 2
 			? 1
@@ -185,8 +206,12 @@ void queryIndexedScan(
 			{
 				hitCounts[candidates[i].peptideId - peptideBegin] = 0;
 			}
+			size_t candidatesBelowThreshold = hitThreshold == 0
+				? 0
+				: candidateEnd - candidateBegin;
 			for (int fragmentCharge = 1;
-				 fragmentCharge <= maximumFragmentCharge;
+				 fragmentCharge <= maximumFragmentCharge &&
+				 candidatesBelowThreshold != 0;
 				 ++fragmentCharge)
 			{
 				const double tolerance =
@@ -213,8 +238,12 @@ void queryIndexedScan(
 							state < hitThreshold)
 						{
 							++state;
+							if (state == hitThreshold)
+								--candidatesBelowThreshold;
 						}
 					}
+					if (candidatesBelowThreshold == 0)
+						break;
 				}
 			}
 			for (size_t i = candidateBegin; i < candidateEnd; ++i)

@@ -48,6 +48,10 @@ struct ScoredPsmRow
 	float xcorrScore = 0.0f;
 	float wdpScore = 0.0f;
 	int rank = 0;
+	int matchedBIons = 0;
+	int matchedYIons = 0;
+	int maxConsecutiveBIons = 0;
+	int maxConsecutiveYIons = 0;
 	string identifiedPeptide;
 	string originalPeptide;
 	string nakedPeptide;

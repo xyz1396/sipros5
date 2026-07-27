@@ -232,6 +232,8 @@ void print_summary(std::ostream& output, const Summary& summary) {
            << "  Input PSMs                    " << summary.psms << '\n'
            << "  Targets                       " << summary.targets << '\n'
            << "  Decoys                        " << summary.decoys << '\n'
+           << "  Removed colliding decoy PSMs  "
+           << summary.removed_decoy_peptide_collisions << '\n'
            << "  OpenMP threads                " << summary.threads << '\n'
            << "  Score model                   " << summary.score_model << "\n\n"
            << "Results\n"
