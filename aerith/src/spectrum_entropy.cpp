@@ -44,7 +44,8 @@ constexpr double kMinRawRelativeIntensity = 0.001;
 constexpr double kPredictedBasePeakCutoff = 0.01;
 constexpr std::size_t kMaximumDiannFragments = 100;
 constexpr std::size_t kEntropyFragments = 20;
-constexpr std::size_t kPredictionBatch = 1024;
+constexpr std::size_t kCpuPredictionBatch = 4096;
+constexpr std::size_t kCudaPredictionBatch = 1024;
 
 const std::unordered_map<char, double> kAminoAcidMass{
     {'A', 71.037113805}, {'R', 156.10111105}, {'N', 114.04292747},
@@ -328,6 +329,80 @@ void preprocess_for_entropy(std::vector<Fragment>& fragments) {
     });
 }
 
+std::vector<Fragment> predicted_fragments(
+    const ParsedPeptide& peptide, const float* values,
+    std::size_t output_columns) {
+    const std::size_t residues = peptide.residue_masses.size();
+    const std::size_t cleavages = residues - 3;
+    if (output_columns != 4 * cleavages) {
+        throw std::runtime_error(
+            "Unexpected DIA-NN fragmentation output shape");
+    }
+    float raw_maximum = 0.0f;
+    for (std::size_t i = 0; i < output_columns; ++i) {
+        raw_maximum = std::max(raw_maximum, values[i]);
+    }
+    std::vector<double> prefix(residues);
+    double running = peptide.nterm_shift;
+    for (std::size_t i = 0; i < residues; ++i) {
+        running += peptide.residue_masses[i];
+        prefix[i] = running;
+    }
+    std::vector<double> suffix(residues + 1, 0.0);
+    for (std::size_t i = 1; i <= residues; ++i) {
+        suffix[i] =
+            suffix[i - 1] + peptide.residue_masses[residues - i];
+    }
+
+    struct Candidate {
+        float mz;
+        float raw;
+    };
+    std::vector<Candidate> candidates;
+    candidates.reserve(output_columns);
+    for (std::size_t channel = 0; channel < 4; ++channel) {
+        const bool y_ion = channel < 2;
+        const int fragment_charge = channel % 2 == 0 ? 1 : 2;
+        for (std::size_t position = 0; position < cleavages; ++position) {
+            const float raw = values[channel * cleavages + position];
+            if (!(raw_maximum > 0.0f) ||
+                raw / raw_maximum < kMinRawRelativeIntensity) {
+                continue;
+            }
+            const std::size_t number =
+                y_ion ? residues - 1 - position : position + 3;
+            const double neutral =
+                y_ion ? suffix[number] + kWater : prefix[number - 1];
+            const double mz =
+                (neutral + fragment_charge * kProton) / fragment_charge;
+            if (mz >= kMinFragmentMz && mz <= kMaxFragmentMz) {
+                candidates.push_back({static_cast<float>(mz), raw});
+            }
+        }
+    }
+    std::sort(
+        candidates.begin(), candidates.end(),
+        [](const Candidate& a, const Candidate& b) {
+            return a.raw > b.raw;
+        });
+    if (candidates.size() > kMaximumDiannFragments) {
+        candidates.resize(kMaximumDiannFragments);
+    }
+    float retained_maximum = 0.0f;
+    for (const auto& candidate : candidates) {
+        retained_maximum = std::max(retained_maximum, candidate.raw);
+    }
+    std::vector<Fragment> fragments;
+    fragments.reserve(candidates.size());
+    for (const auto& candidate : candidates) {
+        const auto packed = static_cast<float>(std::lround(
+            candidate.raw / retained_maximum * 60000.0f));
+        fragments.push_back({candidate.mz, packed});
+    }
+    preprocess_for_entropy(fragments);
+    return fragments;
+}
+
 std::unordered_map<std::string, std::vector<Fragment>> predict_fragments(
     const std::filesystem::path& model_path, const Dataset& data,
     std::string& selected_device) {
@@ -335,8 +410,11 @@ std::unordered_map<std::string, std::vector<Fragment>> predict_fragments(
     std::unordered_map<std::string, ParsedPeptide> unique;
     unique.reserve(data.rows.size() / 2);
     for (const auto& row : data.rows) {
+        const std::string key = spectrum_peptide_body(row.peptide) + '\x1f' +
+                                std::to_string(row.charge);
+        if (unique.find(key) != unique.end()) continue;
         auto parsed = parse_peptide(row.peptide, row.charge, dictionary);
-        unique.try_emplace(parsed.key, std::move(parsed));
+        unique.emplace(std::move(key), std::move(parsed));
     }
 
     std::unordered_map<std::size_t, std::vector<ParsedPeptide*>> groups;
@@ -353,12 +431,16 @@ std::unordered_map<std::string, std::vector<Fragment>> predict_fragments(
         c10::InferenceMode inference_mode;
         std::unordered_map<std::string, std::vector<Fragment>> predictions;
         predictions.reserve(unique.size());
+        const std::size_t prediction_batch =
+            device.is_cpu() ? kCpuPredictionBatch : kCudaPredictionBatch;
 
         for (auto& group_entry : groups) {
             auto& group = group_entry.second;
             const std::size_t token_count = group_entry.first;
-            for (std::size_t begin = 0; begin < group.size(); begin += kPredictionBatch) {
-                const std::size_t count = std::min(kPredictionBatch, group.size() - begin);
+            for (std::size_t begin = 0; begin < group.size();
+                 begin += prediction_batch) {
+                const std::size_t count =
+                    std::min(prediction_batch, group.size() - begin);
                 auto cpu_input = torch::empty(
                 {static_cast<long>(count), static_cast<long>(token_count + 1)},
                 torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
@@ -373,71 +455,30 @@ std::unordered_map<std::string, std::vector<Fragment>> predict_fragments(
                 const auto input = move_torch_input(cpu_input, device);
                 const auto output =
                     model.forward({input}).toTensor().to(torch::kCPU).contiguous();
-                const auto values = output.accessor<float, 2>();
-                for (std::size_t row = 0; row < count; ++row) {
-                const auto& peptide = *group[begin + row];
-                const std::size_t residues = peptide.residue_masses.size();
-                const std::size_t cleavages = residues - 3;
-                if (static_cast<std::size_t>(output.size(1)) != 4 * cleavages) {
-                    throw std::runtime_error("Unexpected DIA-NN fragmentation output shape");
-                }
-                float raw_maximum = 0.0f;
-                for (std::size_t i = 0; i < 4 * cleavages; ++i) {
-                    raw_maximum = std::max(raw_maximum, values[row][i]);
-                }
-                std::vector<double> prefix(residues);
-                double running = peptide.nterm_shift;
-                for (std::size_t i = 0; i < residues; ++i) {
-                    running += peptide.residue_masses[i];
-                    prefix[i] = running;
-                }
-                std::vector<double> suffix(residues + 1, 0.0);
-                for (std::size_t i = 1; i <= residues; ++i) {
-                    suffix[i] = suffix[i - 1] + peptide.residue_masses[residues - i];
-                }
-
-                struct Candidate { float mz; float raw; };
-                std::vector<Candidate> candidates;
-                candidates.reserve(4 * cleavages);
-                for (std::size_t channel = 0; channel < 4; ++channel) {
-                    const bool y_ion = channel < 2;
-                    const int fragment_charge = channel % 2 == 0 ? 1 : 2;
-                    for (std::size_t position = 0; position < cleavages; ++position) {
-                        const float raw = values[row][channel * cleavages + position];
-                        if (!(raw_maximum > 0.0f) ||
-                            raw / raw_maximum < kMinRawRelativeIntensity) continue;
-                        const std::size_t number = y_ion
-                            ? residues - 1 - position : position + 3;
-                        const double neutral = y_ion
-                            ? suffix[number] + kWater : prefix[number - 1];
-                        const double mz =
-                            (neutral + fragment_charge * kProton) / fragment_charge;
-                        if (mz >= kMinFragmentMz && mz <= kMaxFragmentMz) {
-                            candidates.push_back(
-                                {static_cast<float>(mz), raw});
-                        }
+                const std::size_t output_columns =
+                    static_cast<std::size_t>(output.size(1));
+                const float* values = output.data_ptr<float>();
+                std::vector<std::vector<Fragment>> batch_predictions(count);
+                std::exception_ptr failure;
+                #pragma omp parallel for schedule(static) if(count >= 256)
+                for (std::ptrdiff_t row = 0;
+                     row < static_cast<std::ptrdiff_t>(count); ++row) {
+                    try {
+                        const auto local = static_cast<std::size_t>(row);
+                        batch_predictions[local] = predicted_fragments(
+                            *group[begin + local],
+                            values + local * output_columns,
+                            output_columns);
+                    } catch (...) {
+                        #pragma omp critical(aerith_spectrum_prediction_failure)
+                        if (!failure) failure = std::current_exception();
                     }
                 }
-                std::sort(candidates.begin(), candidates.end(), [](const Candidate& a,
-                                                                   const Candidate& b) {
-                    return a.raw > b.raw;
-                });
-                if (candidates.size() > kMaximumDiannFragments) {
-                    candidates.resize(kMaximumDiannFragments);
-                }
-                float retained_maximum = 0.0f;
-                for (const auto& candidate : candidates) {
-                    retained_maximum = std::max(retained_maximum, candidate.raw);
-                }
-                std::vector<Fragment> fragments;
-                fragments.reserve(candidates.size());
-                for (const auto& candidate : candidates) {
-                    const auto packed = static_cast<float>(std::lround(
-                        candidate.raw / retained_maximum * 60000.0f));
-                    fragments.push_back({candidate.mz, packed});
-                }
-                preprocess_for_entropy(fragments);
-                    predictions.emplace(peptide.key, std::move(fragments));
+                if (failure) std::rethrow_exception(failure);
+                for (std::size_t row = 0; row < count; ++row) {
+                    predictions.emplace(
+                        group[begin + row]->key,
+                        std::move(batch_predictions[row]));
                 }
             }
         }
@@ -490,6 +531,10 @@ std::unordered_map<std::uint64_t, Spectrum> load_spectra(
         for (const auto value : mz_double) spectrum.mz.push_back(static_cast<float>(value));
         for (const auto value : intensity_double) {
             spectrum.intensity.push_back(static_cast<float>(value));
+        }
+        if (std::is_sorted(spectrum.mz.begin(), spectrum.mz.end())) {
+            spectra.emplace(scan, std::move(spectrum));
+            continue;
         }
         std::vector<std::size_t> order(spectrum.mz.size());
         std::iota(order.begin(), order.end(), 0);
@@ -603,19 +648,25 @@ void SpectralEntropyFeature::add(const Config& config, Dataset& data) {
     data.feature_names.push_back("unweighted_spectral_entropy");
     data.generated_feature_names.push_back("unweighted_spectral_entropy");
 
+    std::vector<std::vector<std::size_t>> rows_by_file(
+        config.spectrum_paths.size());
+    for (std::size_t i = 0; i < data.rows.size(); ++i) {
+        rows_by_file[data.rows[i].file_id].push_back(i);
+    }
     for (std::size_t file = 0; file < config.spectrum_paths.size(); ++file) {
         std::unordered_set<std::uint64_t> requested;
-        for (const auto& row : data.rows) {
-            if (row.file_id == file) requested.insert(row.scan);
+        requested.reserve(rows_by_file[file].size());
+        for (const auto index : rows_by_file[file]) {
+            requested.insert(data.rows[index].scan);
         }
         const auto spectra = load_spectra(config.spectrum_paths[file], requested);
         std::exception_ptr failure;
         #pragma omp parallel for schedule(dynamic, 512)
         for (std::ptrdiff_t index = 0;
-             index < static_cast<std::ptrdiff_t>(data.rows.size()); ++index) {
+             index < static_cast<std::ptrdiff_t>(rows_by_file[file].size()); ++index) {
             try {
-                auto& row = data.rows[static_cast<std::size_t>(index)];
-                if (row.file_id != file) continue;
+                auto& row = data.rows[
+                    rows_by_file[file][static_cast<std::size_t>(index)]];
                 const std::string key = spectrum_peptide_body(row.peptide) + '\x1f' +
                                         std::to_string(row.charge);
                 const auto prediction = predictions.find(key);

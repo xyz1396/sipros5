@@ -10,10 +10,10 @@
 #include <ctime>
 #include <filesystem>
 #include <limits>
-#include <map>
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -205,6 +205,10 @@ std::string token_key(const std::vector<std::int64_t>& tokens) {
     return key;
 }
 
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 15
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
 std::vector<float> predict_irt(const std::filesystem::path& model_path,
                                const Dataset& data,
                                std::string& selected_device) {
@@ -213,14 +217,24 @@ std::vector<float> predict_irt(const std::filesystem::path& model_path,
         std::vector<std::size_t> rows;
     };
     std::unordered_map<std::string, std::size_t> unique_index;
+    std::unordered_map<std::string_view, std::size_t> peptide_index;
     std::vector<UniquePeptide> unique;
     unique.reserve(data.rows.size() / 2);
+    peptide_index.reserve(data.rows.size() / 2);
     for (std::size_t row = 0; row < data.rows.size(); ++row) {
+        const std::string_view peptide = data.rows[row].peptide;
+        const auto cached = peptide_index.find(peptide);
+        if (cached != peptide_index.end()) {
+            unique[cached->second].rows.push_back(row);
+            continue;
+        }
         auto encoded = encode_peptide(data.rows[row]);
         const std::string key = token_key(encoded.tokens);
         const auto inserted = unique_index.emplace(key, unique.size());
         if (inserted.second) unique.push_back({std::move(encoded.tokens), {}});
-        unique[inserted.first->second].rows.push_back(row);
+        const std::size_t index = inserted.first->second;
+        peptide_index.emplace(peptide, index);
+        unique[index].rows.push_back(row);
     }
     std::unordered_map<std::size_t, std::vector<std::size_t>> groups;
     for (std::size_t i = 0; i < unique.size(); ++i) {
@@ -275,6 +289,9 @@ std::vector<float> predict_irt(const std::filesystem::path& model_path,
         return predictions;
     });
 }
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 15
+#pragma GCC diagnostic pop
+#endif
 
 double median(std::vector<double> values) {
     if (values.empty()) return 0.0;
@@ -511,29 +528,49 @@ MonotoneCurve select_curve(const std::vector<TrainingPoint>& points) {
         return curve;
     }
 
+    constexpr std::size_t candidate_count =
+        kRegressionSplits * kBandwidths.size();
+    std::array<double, candidate_count> candidate_mse;
+    candidate_mse.fill(std::numeric_limits<double>::infinity());
+    #pragma omp parallel for schedule(dynamic)
+    for (std::ptrdiff_t task = 0;
+         task < static_cast<std::ptrdiff_t>(candidate_count); ++task) {
+        const std::size_t candidate = static_cast<std::size_t>(task);
+        const std::size_t split = candidate / kBandwidths.size();
+        const double bandwidth = kBandwidths[candidate % kBandwidths.size()];
+        std::vector<double> train_x, train_y;
+        train_x.reserve(points.size() - points.size() / kRegressionSplits);
+        train_y.reserve(points.size() - points.size() / kRegressionSplits);
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            if (i % kRegressionSplits == split) continue;
+            train_x.push_back(points[i].observed);
+            train_y.push_back(points[i].predicted);
+        }
+        try {
+            const auto curve = fit_curve(train_x, train_y, bandwidth);
+            double mse = 0.0;
+            std::size_t count = 0;
+            for (std::size_t i = split; i < points.size(); i += kRegressionSplits) {
+                const double difference =
+                    curve(points[i].observed) - points[i].predicted;
+                mse += difference * difference;
+                ++count;
+            }
+            candidate_mse[candidate] = mse / count;
+        } catch (const std::exception&) {
+        }
+    }
     std::array<double, kRegressionSplits> best{};
     for (std::size_t split = 0; split < kRegressionSplits; ++split) {
         double best_mse = std::numeric_limits<double>::infinity();
         double best_bandwidth = 1.0;
-        for (const double bandwidth : kBandwidths) {
-            std::vector<double> train_x, train_y;
-            for (std::size_t i = 0; i < points.size(); ++i) {
-                if (i % kRegressionSplits == split) continue;
-                train_x.push_back(points[i].observed);
-                train_y.push_back(points[i].predicted);
-            }
-            try {
-                const auto curve = fit_curve(train_x, train_y, bandwidth);
-                double mse = 0.0;
-                std::size_t count = 0;
-                for (std::size_t i = split; i < points.size(); i += kRegressionSplits) {
-                    const double difference = curve(points[i].observed) - points[i].predicted;
-                    mse += difference * difference;
-                    ++count;
-                }
-                mse /= count;
-                if (mse < best_mse) { best_mse = mse; best_bandwidth = bandwidth; }
-            } catch (const std::exception&) {
+        for (std::size_t bandwidth = 0; bandwidth < kBandwidths.size();
+             ++bandwidth) {
+            const double mse =
+                candidate_mse[split * kBandwidths.size() + bandwidth];
+            if (mse < best_mse) {
+                best_mse = mse;
+                best_bandwidth = kBandwidths[bandwidth];
             }
         }
         best[split] = best_bandwidth;
@@ -555,7 +592,7 @@ MonotoneCurve select_curve(const std::vector<TrainingPoint>& points) {
 
 std::vector<TrainingPoint> calibration_points(const Dataset& data,
                                                const std::vector<float>& predicted,
-                                               std::size_t file) {
+                                               const std::vector<std::size_t>& file_rows) {
     const auto wdp_column = std::find(
         data.feature_names.begin(), data.feature_names.end(), "WDPscores");
     if (wdp_column == data.feature_names.end()) {
@@ -567,8 +604,9 @@ std::vector<TrainingPoint> calibration_points(const Dataset& data,
     std::vector<std::size_t> order;
     double minimum_rt = std::numeric_limits<double>::infinity();
     double maximum_rt = -std::numeric_limits<double>::infinity();
-    for (std::size_t i = 0; i < data.rows.size(); ++i) {
-        if (data.rows[i].file_id != file || !std::isfinite(data.rows[i].retention)) continue;
+    order.reserve(file_rows.size());
+    for (const auto i : file_rows) {
+        if (!std::isfinite(data.rows[i].retention)) continue;
         order.push_back(i);
         minimum_rt = std::min(minimum_rt, data.rows[i].retention);
         maximum_rt = std::max(maximum_rt, data.rows[i].retention);
@@ -649,14 +687,20 @@ std::vector<TrainingPoint> calibration_points(const Dataset& data,
     return result;
 }
 
-double inverse_lookup(const std::map<double, double>& inverse, double target) {
-    const auto upper = inverse.lower_bound(target);
-    if (upper == inverse.begin()) return upper->second;
-    if (upper == inverse.end()) return std::prev(upper)->second;
-    if (upper->first == target) return upper->second;
-    const auto lower = std::prev(upper);
-    const double ratio = (target - lower->first) / (upper->first - lower->first);
-    return lower->second + ratio * (upper->second - lower->second);
+double inverse_lookup(const std::vector<double>& predicted,
+                      const std::vector<double>& experimental,
+                      double target) {
+    const auto upper = std::lower_bound(predicted.begin(), predicted.end(), target);
+    if (upper == predicted.begin()) return experimental.front();
+    if (upper == predicted.end()) return experimental.back();
+    const std::size_t right =
+        static_cast<std::size_t>(upper - predicted.begin());
+    if (*upper == target) return experimental[right];
+    const std::size_t left = right - 1;
+    const double ratio = (target - predicted[left]) /
+                         (predicted[right] - predicted[left]);
+    return experimental[left] +
+           ratio * (experimental[right] - experimental[left]);
 }
 
 float rounded_feature(double value) {
@@ -693,30 +737,44 @@ void PredictedRetentionTimeFeature::add(const Config& config, Dataset& data) {
         static_cast<double>(prediction_cpu_end - prediction_cpu_begin) /
             CLOCKS_PER_SEC};
     std::vector<std::array<float, 3>> features(data.rows.size());
+    std::vector<std::vector<std::size_t>> rows_by_file(data.input_paths.size());
+    for (std::size_t i = 0; i < data.rows.size(); ++i) {
+        rows_by_file[data.rows[i].file_id].push_back(i);
+    }
     for (std::size_t file = 0; file < data.input_paths.size(); ++file) {
-        auto points = calibration_points(data, predicted, file);
+        auto points = calibration_points(data, predicted, rows_by_file[file]);
         const auto curve = select_curve(points);
         double minimum_rt = std::numeric_limits<double>::infinity();
         double maximum_rt = -std::numeric_limits<double>::infinity();
-        for (const auto& row : data.rows) {
-            if (row.file_id != file) continue;
-            minimum_rt = std::min(minimum_rt, row.retention);
-            maximum_rt = std::max(maximum_rt, row.retention);
+        for (const auto index : rows_by_file[file]) {
+            minimum_rt = std::min(minimum_rt, data.rows[index].retention);
+            maximum_rt = std::max(maximum_rt, data.rows[index].retention);
         }
         constexpr std::size_t increments = 10000;
         const double increment = (maximum_rt - minimum_rt) / increments;
-        std::map<double, double> inverse;
+        std::vector<double> inverse_predicted;
+        std::vector<double> inverse_experimental;
+        inverse_predicted.reserve(increments);
+        inverse_experimental.reserve(increments);
         for (std::size_t i = 0; i < increments; ++i) {
             const double experimental = minimum_rt + i * increment;
-            inverse[curve(experimental)] = experimental;
+            const double predicted_value = curve(experimental);
+            if (!inverse_predicted.empty() &&
+                predicted_value == inverse_predicted.back()) {
+                inverse_experimental.back() = experimental;
+            } else {
+                inverse_predicted.push_back(predicted_value);
+                inverse_experimental.push_back(experimental);
+            }
         }
         #pragma omp parallel for schedule(static)
         for (std::ptrdiff_t index = 0;
-             index < static_cast<std::ptrdiff_t>(data.rows.size()); ++index) {
-            const auto i = static_cast<std::size_t>(index);
-            if (data.rows[i].file_id != file) continue;
+             index < static_cast<std::ptrdiff_t>(rows_by_file[file].size()); ++index) {
+            const auto i =
+                rows_by_file[file][static_cast<std::size_t>(index)];
             const double calibrated = curve(data.rows[i].retention);
-            const double predicted_minutes = inverse_lookup(inverse, predicted[i]);
+            const double predicted_minutes = inverse_lookup(
+                inverse_predicted, inverse_experimental, predicted[i]);
             features[i] = {
                 rounded_feature(std::abs(calibrated - predicted[i])),
                 rounded_feature(std::abs(data.rows[i].retention - predicted_minutes)),
