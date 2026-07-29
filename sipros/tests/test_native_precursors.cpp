@@ -52,6 +52,7 @@ void writeFixture(const fs::path &path, int reactionCharge)
 	file.createGroup("/scans");
 	file.createGroup("/peaks");
 	file.createGroup("/reactions");
+	file.createGroup("/precursor_candidates");
 
 	write1D(file, "/scans/scan_number", H5::PredType::NATIVE_INT,
 		std::vector<int>{100, 101});
@@ -87,6 +88,18 @@ void writeFixture(const fs::path &path, int reactionCharge)
 		std::vector<double>{2.0});
 	write1D(file, "/reactions/isolation_width_offset", H5::PredType::NATIVE_DOUBLE,
 		std::vector<double>{0.0});
+	write1D(file, "/reactions/candidate_start", H5::PredType::NATIVE_LLONG,
+		std::vector<long long>{0});
+	write1D(file, "/reactions/candidate_count", H5::PredType::NATIVE_INT,
+		std::vector<int>{0});
+	write1D(file, "/precursor_candidates/charge", H5::PredType::NATIVE_INT,
+		std::vector<int>{});
+	write1D(file, "/precursor_candidates/mz", H5::PredType::NATIVE_DOUBLE,
+		std::vector<double>{});
+	write1D(file, "/precursor_candidates/charge_source", H5::PredType::NATIVE_INT,
+		std::vector<int>{});
+	write1D(file, "/precursor_candidates/isotope_match_count", H5::PredType::NATIVE_INT,
+		std::vector<int>{});
 }
 
 std::vector<MS2Scan *> readNative(const fs::path &path)
@@ -96,6 +109,17 @@ std::vector<MS2Scan *> readNative(const fs::path &path)
 	sipros::RaxportReadOptions options;
 	options.precursorSource = sipros::PrecursorSource::Ms1Neighborhood;
 	options.ms1NeighborhoodRadius = 2;
+	check(sipros::readRaxportHdf5Scans(
+		path.string(), scans, nullptr, error, nullptr, options), error);
+	return scans;
+}
+
+std::vector<MS2Scan *> readCandidates(const fs::path &path)
+{
+	std::vector<MS2Scan *> scans;
+	std::string error;
+	sipros::RaxportReadOptions options;
+	options.precursorSource = sipros::PrecursorSource::RaxportCandidates;
 	check(sipros::readRaxportHdf5Scans(
 		path.string(), scans, nullptr, error, nullptr, options), error);
 	return scans;
@@ -170,6 +194,10 @@ int main()
 		check(featureMs1.scans.size() == 1 &&
 			featureMs1.scans.front().scanNumber == 100,
 			"MS1-only feature reader still depended on legacy precursor candidates");
+		auto candidateOnly = readCandidates(firstPath);
+		check(candidateOnly.empty(),
+			"Raxport candidate mode fell back to the reaction precursor");
+		destroy(candidateOnly);
 
 		destroy(first);
 		destroy(second);

@@ -26,7 +26,6 @@ import command_runner as command_runner_module
 import filter as filter_module
 import search as search_module
 import thread_allocation as allocation_module
-import pandas as pd
 
 
 def null_logger(name: str) -> logging.Logger:
@@ -224,30 +223,11 @@ class ThreadAllocationTests(unittest.TestCase):
         self.assertEqual(environment["OMP_MAX_ACTIVE_LEVELS"], "1")
         self.assertEqual(environment["OMP_DYNAMIC"], "FALSE")
 
-    @unittest.skipUnless(Path("/proc/self/status").exists(), "Linux /proc required")
-    def test_pandas_loads_native_pool_after_one_thread_limit(self) -> None:
-        environment = os.environ.copy()
-        for variable in allocation_module.thread_env_updates(1):
-            environment.pop(variable, None)
-        code = (
-            "import sys; "
-            f"sys.path.insert(0, {str(SCRIPT_DIR)!r}); "
-            "import filter; "
-            "import numpy as np; "
-            "values = np.ones((256, 256)); values @ values; "
-            "print(next(line.split()[1] for line in open('/proc/self/status') "
-            "if line.startswith('Threads:')))"
-        )
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            cwd=ROOT,
-            env=environment,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-        )
-        self.assertLessEqual(int(result.stdout.strip()), 2, result.stderr)
+    def test_filter_module_has_no_pandas_negative_control_bridge(self) -> None:
+        source = Path(SCRIPT_DIR, "filter.py").read_text()
+        self.assertNotIn("import pandas", source)
+        self.assertNotIn("SIP.pin", source)
+        self.assertNotIn("filter_sip_labeled_psms", source)
 
 
 class WorkflowAllocationTests(unittest.TestCase):
@@ -533,7 +513,7 @@ class WorkflowAllocationTests(unittest.TestCase):
                 max_index = arguments.index("--max-ptm-count")
                 self.assertEqual(arguments[max_index + 1], "2")
 
-    def test_sip_fasta_keeps_per_sample_legacy_commands(self) -> None:
+    def test_sip_fasta_uses_only_raxport_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as output:
             workflow = self.make_search(output, threads=24)
             workflow.base_names = ["one", "two"]
@@ -562,7 +542,10 @@ class WorkflowAllocationTests(unittest.TestCase):
                 self.assertIn("-b", arguments)
                 self.assertIn("-s", arguments)
                 self.assertNotIn("--fragment-index-cache", arguments)
-                self.assertNotIn("--precursor-source", arguments)
+                source_index = arguments.index("--precursor-source")
+                self.assertEqual(
+                    arguments[source_index + 1], "raxport-candidates"
+                )
 
     def test_generated_spectra_library_receives_fixed_ptms(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -722,6 +705,12 @@ class WorkflowAllocationTests(unittest.TestCase):
         self.assertEqual(arguments.count("--output-prefix"), 3)
         self.assertEqual(arguments.count("--protein-output-dir"), 1)
         self.assertEqual(
+            arguments[arguments.index("--product-top-isotopes") + 1], "5"
+        )
+        self.assertEqual(
+            arguments[arguments.index("--quant-top-isotopes") + 1], "6"
+        )
+        self.assertEqual(
             arguments[arguments.index("--database") + 1], "target.fasta"
         )
         self.assertEqual(
@@ -745,6 +734,34 @@ class WorkflowAllocationTests(unittest.TestCase):
             "automatic CPU fallback when CUDA is unavailable or fails; "
             "legacy Aerith RT modeling is skipped"
         )
+
+    def test_negative_control_is_passed_to_native_aerith(self) -> None:
+        workflow = object.__new__(filter_module.filter)
+        workflow.baseNames = ["target", "control"]
+        workflow.outputPath = "/output"
+        workflow.aerithPath = "aerith"
+        workflow.decoyPrefix = "Decoy_"
+        workflow.fastaPath = "target.fasta"
+        workflow.decoyPath = "decoy.fasta"
+        workflow.assembleProteins = True
+        workflow.fixedCam = True
+        workflow.ignorePCT = False
+        workflow.spectraPaths = ["/spectra/target.h5", "/spectra/control.h5"]
+        workflow.negative_control = "control"
+        workflow.label_threshold = 2.5
+
+        arguments = shlex.split(workflow.command())
+
+        self.assertEqual(arguments.count("--negative-control"), 1)
+        self.assertEqual(
+            arguments[arguments.index("--negative-control") + 1], "control"
+        )
+        self.assertEqual(
+            arguments[arguments.index("--label-threshold") + 1], "2.5"
+        )
+        source = inspect.getsource(filter_module.filter)
+        self.assertNotIn("filter_sip_labeled_psms", source)
+        self.assertNotIn("SIP.pin", source)
 
     def test_sip_spectra_filter_skips_all_protein_arguments(self) -> None:
         workflow = object.__new__(filter_module.filter)
@@ -788,42 +805,64 @@ class NativeProteinAssemblyOwnershipTests(unittest.TestCase):
         self.assertNotIn("pep.xml", source.lower())
         self.assertNotIn("targetdecoy", source.lower())
 
-    def test_protein_with_psm_includes_sample_abundance(self) -> None:
-        with tempfile.TemporaryDirectory() as output:
-            sample_dir = Path(output, "sample")
-            sample_dir.mkdir()
-            pd.DataFrame([{
-                "Protein": "sp|P1|ONE",
-                "Razor Intensity": 3210.5,
-            }]).to_csv(sample_dir / "protein.tsv", sep="\t", index=False)
-            pd.DataFrame([{
-                "Protein": "sp|P1|ONE",
-                "Protein Probability": 1.0,
-            }]).to_csv(
-                Path(output, "combined_protein.tsv"), sep="\t", index=False
-            )
-            filtered = pd.DataFrame([{
-                "Label": 1,
-                "Peptide": "K[PEPTIDE]R",
-                "Proteins": "{sp|P1|ONE}",
-                "MS1IsotopicAbundances": 1.0,
-                "MS2IsotopicAbundances": 1.0,
-                "log10_precursorIntensities": 4.0,
-            }])
-            workflow = object.__new__(filter_module.filter)
-            workflow.outputPath = output
-            workflow.baseNames = ["sample"]
-            workflow.decoyPrefix = "Decoy_"
-            workflow.logger = mock.Mock()
+    def test_protein_psm_matching_is_native_only(self) -> None:
+        source = inspect.getsource(filter_module.filter)
+        self.assertNotIn("def match_psms_to_proteins", source)
+        self.assertNotIn("def match_sip_psms_to_proteins", source)
+        self.assertIn("--negative-control", source)
+        self.assertNotIn("--protein-reference", source)
+        self.assertNotIn("--sip-protein-output", source)
 
-            workflow.match_psms_to_proteins({"sample": filtered})
 
-            result = pd.read_csv(
-                Path(output, "combined_protein_with_PSM.tsv"), sep="\t"
-            )
+class InputDiscoveryTests(unittest.TestCase):
+    def make_search(self, input_path: str):
+        workflow = object.__new__(search_module.search)
+        workflow.inputPath = input_path
+        workflow.logger = null_logger(
+            f"search-input-discovery-{id(workflow)}"
+        )
+        workflow.raw_files = []
+        workflow.hdf5_input_files = []
+        workflow.base_names = []
+        workflow.base_names_of_raw = []
+        workflow.base_names_of_hdf5 = []
+        return workflow
+
+    def test_comma_separated_raw_list_is_split_before_suffix_detection(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [
+                root / "target.raw",
+                root / "control1.raw",
+                root / "control2.raw",
+            ]
+            for path in paths:
+                path.touch()
+            input_path = ",".join(map(str, paths))
+            workflow = self.make_search(input_path)
+
             self.assertEqual(
-                result.loc[0, "sample_ProteinAbundance"], 3210.5
+                workflow.input_entries(input_path),
+                list(map(str, paths)),
             )
+            workflow.getInputFiles()
+            self.assertEqual(workflow.raw_files, list(map(str, paths)))
+            self.assertEqual(
+                workflow.base_names,
+                ["target", "control1", "control2"],
+            )
+
+    def test_missing_file_in_comma_separated_list_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            existing = root / "target.raw"
+            missing = root / "missing.raw"
+            existing.touch()
+            workflow = self.make_search(f"{existing},{missing}")
+
+            with self.assertRaises(SystemExit):
+                workflow.getInputFiles()
 
 
 if __name__ == "__main__":

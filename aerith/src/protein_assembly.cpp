@@ -64,14 +64,12 @@ struct ReportStats {
     double unique_intensity = 0.0;
     double razor_intensity = 0.0;
     std::set<std::string> razor_assigned_modifications;
-    std::set<std::string> razor_observed_modifications;
 };
 
 struct ModificationInfo {
     std::string sequence;
     std::string modified_peptide;
     std::vector<std::string> assigned;
-    std::vector<std::string> observed;
 };
 
 struct PeptideAggregate {
@@ -83,7 +81,6 @@ struct PeptideAggregate {
     std::set<std::string> mapped_genes;
     std::set<std::string> mapped_proteins;
     std::set<std::string> assigned_modifications;
-    std::set<std::string> observed_modifications;
     std::set<int> charges;
     std::size_t start = 0;
     std::size_t end = 0;
@@ -92,7 +89,6 @@ struct PeptideAggregate {
     double mz = 0.0;
     double observed_mass = 0.0;
     double probability = 0.0;
-    double expectation = 0.0;
     double apex_retention = 0.0;
     double retention_start = 0.0;
     double retention_end = 0.0;
@@ -502,8 +498,6 @@ void update_peptide_aggregate(
     value.charges.insert(psm.charge);
     value.assigned_modifications.insert(
         modifications.assigned.begin(), modifications.assigned.end());
-    value.observed_modifications.insert(
-        modifications.observed.begin(), modifications.observed.end());
     update_ion_intensity(
         value.ion_intensities, aggregate_ion_key(modified, psm),
         psm_intensity(psm));
@@ -623,9 +617,6 @@ ReportData build_report_data(
                 value.razor_assigned_modifications.insert(
                     modifications.assigned.begin(),
                     modifications.assigned.end());
-                value.razor_observed_modifications.insert(
-                    modifications.observed.begin(),
-                    modifications.observed.end());
             }
         }
     }
@@ -695,9 +686,6 @@ ReportData build_report_data(
                 value.razor_assigned_modifications.insert(
                     modifications.assigned.begin(),
                     modifications.assigned.end());
-                value.razor_observed_modifications.insert(
-                    modifications.observed.begin(),
-                    modifications.observed.end());
             }
         }
     }
@@ -741,13 +729,13 @@ void write_psm_report(
     report
         << "Spectrum\tSpectrum File\tPeptide\tModified Peptide\tExtended Peptide"
         << "\tPrev AA\tNext AA\tPeptide Length\tCharge\tRetention"
-        << "\tObserved Mass\tCalibrated Observed Mass\tObserved M/Z"
-        << "\tCalibrated Observed M/Z\tCalculated Peptide Mass\tCalculated M/Z"
-        << "\tDelta Mass\tSpectralSim\tRTScore\tExpectation\tHyperscore"
-        << "\tNextscore\tProbability"
+        << "\tObserved Mass\tObserved M/Z"
+        << "\tCalculated Peptide Mass\tCalculated M/Z"
+        << "\tDelta Mass\tSVMscore"
+        << "\tProbability"
         << "\tQvalue\tNumber of Enzymatic Termini\tNumber of Missed Cleavages"
         << "\tProtein Start\tProtein End\tIntensity\tAssigned Modifications"
-        << "\tObserved Modifications\tClass\tPurity\tIs Decoy\tIs Contaminant"
+        << "\tClass"
         << "\tIs Unique\tProtein\tProtein ID\tEntry Name\tGene"
         << "\tProtein Description\tMapped Genes\tMapped Proteins"
         << "\tParent Scan Number\tApex Retention Time\tApex Scan Number"
@@ -794,12 +782,16 @@ void write_psm_report(
         const auto [protein_start, protein_end] =
             protein_coordinates(entry, peptide);
         const double mz =
-            (psm.exp_mass + static_cast<double>(psm.charge) * proton) /
+            (psm.observed_mass +
+             static_cast<double>(psm.charge) * proton) /
             static_cast<double>(psm.charge);
         const double calculated_mass = psm.calculated_mass > 0.0
             ? psm.calculated_mass : psm.exp_mass;
         const double calculated_mz = psm.calculated_mz > 0.0
-            ? psm.calculated_mz : mz;
+            ? psm.calculated_mz
+            : (calculated_mass +
+               static_cast<double>(psm.charge) * proton) /
+                static_cast<double>(psm.charge);
         std::vector<std::string> mapped_proteins;
         std::set<std::string> mapped_genes;
         for (const auto& protein : protein_ids(psm, config.decoy_prefix)) {
@@ -829,18 +821,17 @@ void write_psm_report(
                << '.' << next << '\t' << previous << '\t' << next << '\t'
                << modifications.sequence.size() << '\t' << psm.charge << '\t'
                << std::setprecision(4) << psm.retention * 60.0 << '\t'
-               << psm.exp_mass << "\t\t"
-               << mz << "\t\t" << calculated_mass << '\t'
+               << psm.observed_mass << '\t'
+               << mz << '\t' << calculated_mass << '\t'
                << calculated_mz << '\t'
-               << psm.exp_mass - calculated_mass << "\t\t\t0\t"
-               << scores[row] << '\t' << psm.diff_score << '\t'
+               << psm.observed_mass - calculated_mass << '\t'
+               << scores[row] << '\t'
                << 1.0 - pep[row] << '\t' << std::setprecision(14) << q[row]
                << "\t2\t" << psm.missed_cleavages << '\t'
                << protein_start << '\t' << protein_end << '\t'
                << std::setprecision(2) << psm_intensity(psm) << '\t'
-               << join_values(modifications.assigned) << '\t'
-               << join_values(modifications.observed)
-               << "\tTarget\t0.00\tfalse\tfalse\t"
+               << join_values(modifications.assigned)
+               << "\tTarget\t"
                << (evidence->second.proteins.size() == 1 ? "true" : "false")
                << '\t' << razor->second << '\t' << entry.protein_id << '\t'
                << entry.entry_name << '\t' << entry.gene << '\t'
@@ -885,11 +876,11 @@ void write_sample_peptide_reports(
     }
     ions << "Peptide Sequence\tModified Sequence\tPrev AA\tNext AA\tStart\tEnd"
          << "\tPeptide Length\tM/Z\tCharge\tObserved Mass"
-         << "\tCompensation Voltage\tProbability\tExpectation\tSpectral Count"
+         << "\tCompensation Voltage\tProbability\tSpectral Count"
          << "\tApex Retention Time\tApex Scan Number\tRetention Time Start"
          << "\tRetention Time End\tRetention Time FWHM\tTraced Scans"
          << "\tIntensity\tMatch Type\tAssigned Modifications"
-         << "\tObserved Modifications\tProtein\tProtein ID\tEntry Name\tGene"
+         << "\tProtein\tProtein ID\tEntry Name\tGene"
          << "\tProtein Description\tMapped Genes\tMapped Proteins\tLocalization\n";
     ions << std::fixed;
     for (const auto& [key, value] : data.ions) {
@@ -899,10 +890,8 @@ void write_sample_peptide_reports(
              << '\t' << value.end << '\t' << value.sequence.size() << '\t'
              << std::setprecision(4) << value.mz << '\t' << value.charge
              << '\t' << value.observed_mass << "\t0\t";
-        if (value.match_type == "MBR" && value.spectral_count == 0) {
-            ions << "\t\t";
-        } else {
-            ions << value.probability << '\t' << value.expectation;
+        if (!(value.match_type == "MBR" && value.spectral_count == 0)) {
+            ions << value.probability;
         }
         ions << '\t' << value.spectral_count << '\t';
         if (value.has_chromatographic_feature) {
@@ -916,8 +905,7 @@ void write_sample_peptide_reports(
         ions << std::setprecision(2)
              << summed_intensity(value.ion_intensities)
              << '\t' << value.match_type << '\t'
-             << join_values(value.assigned_modifications)
-             << '\t' << join_values(value.observed_modifications) << '\t';
+             << join_values(value.assigned_modifications) << '\t';
         write_protein_fields(ions, value);
         ions << "\t\n";
     }
@@ -930,7 +918,7 @@ void write_sample_peptide_reports(
     }
     peptides << "Peptide\tPrev AA\tNext AA\tStart\tEnd\tPeptide Length"
              << "\tCharges\tProbability\tSpectral Count\tIntensity\tMatch Type"
-             << "\tAssigned Modifications\tObserved Modifications\tProtein"
+             << "\tAssigned Modifications\tProtein"
              << "\tProtein ID\tEntry Name\tGene\tProtein Description"
              << "\tMapped Genes\tMapped Proteins\n";
     peptides << std::fixed;
@@ -949,8 +937,7 @@ void write_sample_peptide_reports(
         peptides << value.spectral_count << '\t' << std::setprecision(2)
                  << summed_intensity(value.ion_intensities) << '\t'
                  << value.match_type << '\t'
-                 << join_values(value.assigned_modifications) << '\t'
-                 << join_values(value.observed_modifications) << '\t';
+                 << join_values(value.assigned_modifications) << '\t';
         write_protein_fields(peptides, value);
         peptides << '\n';
     }
@@ -964,7 +951,7 @@ void write_sample_peptide_reports(
     modified
         << "Peptide Sequence\tModified Sequence\tPrev AA\tNext AA\tStart\tEnd"
         << "\tPeptide Length\tCharges\tProbability\tSpectral Count\tIntensity"
-        << "\tMatch Type\tAssigned Modifications\tObserved Modifications"
+        << "\tMatch Type\tAssigned Modifications"
         << "\tProtein\tProtein ID\tEntry Name\tGene\tProtein Description"
         << "\tMapped Genes\tMapped Proteins\tLocalization\n";
     modified << std::fixed;
@@ -983,8 +970,7 @@ void write_sample_peptide_reports(
         modified << value.spectral_count << '\t' << std::setprecision(2)
                  << summed_intensity(value.ion_intensities) << '\t'
                  << value.match_type << '\t'
-                 << join_values(value.assigned_modifications) << '\t'
-                 << join_values(value.observed_modifications) << '\t';
+                 << join_values(value.assigned_modifications) << '\t';
         write_protein_fields(modified, value);
         modified << "\t\n";
     }
@@ -1051,7 +1037,7 @@ void write_report(
           << "\tTotal Peptides\tUnique Peptides\tRazor Peptides\tTotal Spectral Count"
           << "\tUnique Spectral Count\tRazor Spectral Count\tTotal Intensity"
           << "\tUnique Intensity\tRazor Intensity\tRazor Assigned Modifications"
-          << "\tRazor Observed Modifications\tIndistinguishable Proteins\n";
+          << "\tIndistinguishable Proteins\n";
     table << std::fixed;
     for (const auto& protein : proteins) {
         const auto fasta_it = fasta.find(protein);
@@ -1079,7 +1065,6 @@ void write_report(
               << '\t' << std::setprecision(0) << value.total_intensity
               << '\t' << value.unique_intensity << '\t' << value.razor_intensity
               << '\t' << join_values(value.razor_assigned_modifications)
-              << '\t' << join_values(value.razor_observed_modifications)
               << '\t';
         for (std::size_t i = 0; i < indistinguishable.size(); ++i) {
             if (i) table << ", ";
@@ -1411,7 +1396,9 @@ void write_combined_protein_report(
     const std::filesystem::path& directory, const Config& config,
     const Dataset& data, const std::vector<ReportData>& samples,
     const std::unordered_map<std::string, FastaEntry>& fasta,
-    const std::unordered_map<std::string, ProteinScore>& protein_scores) {
+    const std::unordered_map<std::string, ProteinScore>& protein_scores,
+    const std::unordered_map<std::string, std::string>& assignment,
+    const std::vector<double>& q) {
     std::set<std::string> protein_set;
     std::unordered_map<std::string, std::set<std::string>> observed;
     for (const auto& sample : samples) {
@@ -1533,6 +1520,9 @@ void write_combined_protein_report(
         for (const auto intensity : lfq) {
             table << '\t' << std::setprecision(0) << intensity;
         }
+        // Always delimit the final column, including when no equivalent
+        // proteins exist. This keeps appended report columns tab-aligned.
+        table << '\t';
         const auto signature_it = observed.find(protein);
         if (signature_it != observed.end()) {
             const auto group = equivalent.find(signature(signature_it->second));
@@ -1547,6 +1537,139 @@ void write_combined_protein_report(
             }
         }
         table << '\n';
+    }
+    table.close();
+
+    struct ProteinPsmAggregate {
+        std::vector<std::string> psm_ids;
+        std::vector<std::string> peptides;
+        std::vector<std::string> ms1_abundances;
+        std::vector<std::string> ms2_abundances;
+        std::vector<std::string> sip_intensities;
+    };
+    std::vector<std::unordered_map<std::string, ProteinPsmAggregate>>
+        psm_aggregates(samples.size());
+    const auto peptide_sequence = [](const std::string& peptide) {
+        const auto open = peptide.find('[');
+        const auto close = peptide.find(']', open == std::string::npos
+            ? 0 : open + 1);
+        return open != std::string::npos && close != std::string::npos
+            ? peptide.substr(open + 1, close - open - 1)
+            : peptide;
+    };
+    const auto number_text = [](double value) {
+        std::ostringstream stream;
+        stream << std::setprecision(10) << value;
+        return stream.str();
+    };
+    for (std::size_t row = 0; row < data.rows.size(); ++row) {
+        const auto& psm = data.rows[row];
+        if (psm.label != 1 || row >= q.size() ||
+            q[row] > config.q_threshold ||
+            psm.file_id >= psm_aggregates.size()) {
+            continue;
+        }
+        const auto razor = assignment.find(stripped_peptide(psm.peptide));
+        if (razor == assignment.end() ||
+            protein_set.count(razor->second) == 0) {
+            continue;
+        }
+        auto& aggregate =
+            psm_aggregates[psm.file_id][razor->second];
+        aggregate.psm_ids.push_back(psm.id);
+        aggregate.peptides.push_back(
+            peptide_sequence(psm.peptide));
+        aggregate.ms1_abundances.push_back(
+            number_text(psm.ms1_isotopic_abundance));
+        aggregate.ms2_abundances.push_back(
+            number_text(psm.ms2_isotopic_abundance));
+        aggregate.sip_intensities.push_back(
+            number_text(psm.has_chromatographic_feature
+                ? psm.quantified_intensity : 0.0));
+    }
+    for (const auto& transfer : data.transferred_ions) {
+        const auto& psm = transfer.psm;
+        if (psm.file_id >= psm_aggregates.size()) continue;
+        const auto sequence = peptide_sequence(psm.peptide);
+        const auto razor = assignment.find(stripped_peptide(psm.peptide));
+        if (razor == assignment.end() ||
+            protein_set.count(razor->second) == 0) {
+            continue;
+        }
+        auto& aggregate =
+            psm_aggregates[psm.file_id][razor->second];
+        aggregate.psm_ids.push_back(sequence + "_MBR");
+        aggregate.peptides.push_back(sequence);
+        // The transferred PSM is copied from the donor before its file_id is
+        // changed to the acceptor, so these abundance values remain the
+        // donor's SIP estimates while the intensity is quantified in the
+        // acceptor run.
+        aggregate.ms1_abundances.push_back(
+            number_text(psm.ms1_isotopic_abundance));
+        aggregate.ms2_abundances.push_back(
+            number_text(psm.ms2_isotopic_abundance));
+        aggregate.sip_intensities.push_back(
+            number_text(psm.has_chromatographic_feature
+                ? psm.quantified_intensity : 0.0));
+    }
+    const auto join = [](const std::vector<std::string>& values) {
+        std::ostringstream stream;
+        for (std::size_t index = 0; index < values.size(); ++index) {
+            if (index) stream << ',';
+            stream << values[index];
+        }
+        return stream.str();
+    };
+    const auto annotated_path =
+        directory / "combined_protein_with_PSM.tsv";
+    std::ofstream annotated(annotated_path);
+    if (!annotated) {
+        throw std::runtime_error(
+            "Cannot create output: " + annotated_path.string());
+    }
+    std::ifstream base_table(table_path);
+    if (!base_table) {
+        throw std::runtime_error(
+            "Cannot reopen native protein report: " +
+            table_path.string());
+    }
+    std::string line;
+    if (!std::getline(base_table, line)) {
+        throw std::runtime_error(
+            "Native protein report is empty: " + table_path.string());
+    }
+    annotated << line;
+    for (const auto& name : names) {
+        annotated << '\t' << name << "_PSMids"
+                  << '\t' << name << "_PeptideSequences"
+                  << '\t' << name << "_MS1IsotopicAbundances"
+                  << '\t' << name << "_MS2IsotopicAbundances"
+                  << '\t' << name << "_SIP_intensity";
+    }
+    annotated << '\n';
+    while (std::getline(base_table, line)) {
+        const auto tab = line.find('\t');
+        const std::string protein =
+            line.substr(0, tab == std::string::npos ? line.size() : tab);
+        annotated << line;
+        for (std::size_t sample = 0; sample < samples.size(); ++sample) {
+            const auto aggregate =
+                psm_aggregates[sample].find(protein);
+            if (aggregate == psm_aggregates[sample].end()) {
+                annotated << "\t\t\t\t\t";
+            } else {
+                annotated
+                    << '\t' << join(aggregate->second.psm_ids)
+                    << '\t' << join(aggregate->second.peptides)
+                    << '\t' << join(
+                        aggregate->second.ms1_abundances)
+                    << '\t' << join(
+                        aggregate->second.ms2_abundances)
+                    << '\t' << join(
+                        aggregate->second.sip_intensities);
+            }
+        }
+        annotated << '\n';
     }
 
     const auto fasta_path = directory / "combined_protein.fas";
@@ -1582,11 +1705,483 @@ void write_combined_reports(
     std::filesystem::create_directories(directory);
     write_combined_peptide_reports(directory, config, data, samples, fasta);
     write_combined_protein_report(
-        directory, config, data, samples, fasta, protein_scores);
+        directory, config, data, samples, fasta, protein_scores, assignment, q);
     const auto all_files = std::numeric_limits<std::size_t>::max();
     write_psm_report(
         directory, "combined_psm.tsv", all_files, config, data, scores, q, pep,
         fasta, peptides, assignment, accepted);
+}
+
+void ProteinAssembler::write_sip_psm_mapping(
+    const Config& config, const Dataset& data,
+    const std::vector<double>& q) {
+    if (config.protein_reference_path.empty() ||
+        config.sip_protein_output_path.empty()) {
+        throw std::runtime_error(
+            "Native SIP protein mapping requires explicit input and output paths");
+    }
+    if (q.size() != data.rows.size()) {
+        throw std::runtime_error(
+            "Native SIP protein mapping received inconsistent PSM arrays");
+    }
+
+    const auto split_tabs = [](const std::string& value) {
+        std::vector<std::string> fields;
+        std::size_t begin = 0;
+        while (begin <= value.size()) {
+            const auto tab = value.find('\t', begin);
+            const auto end =
+                tab == std::string::npos ? value.size() : tab;
+            fields.push_back(value.substr(begin, end - begin));
+            if (tab == std::string::npos) break;
+            begin = tab + 1;
+        }
+        return fields;
+    };
+    const auto split_commas = [](const std::string& value) {
+        std::vector<std::string> fields;
+        std::size_t begin = 0;
+        while (begin <= value.size()) {
+            const auto comma = value.find(',', begin);
+            const auto end =
+                comma == std::string::npos ? value.size() : comma;
+            auto field = trim(value.substr(begin, end - begin));
+            if (!field.empty()) fields.push_back(std::move(field));
+            if (comma == std::string::npos) break;
+            begin = comma + 1;
+        }
+        return fields;
+    };
+    const auto join_tabs = [](const std::vector<std::string>& fields) {
+        std::ostringstream stream;
+        for (std::size_t index = 0; index < fields.size(); ++index) {
+            if (index) stream << '\t';
+            stream << fields[index];
+        }
+        return stream.str();
+    };
+    const auto join = [](const std::vector<std::string>& values) {
+        std::ostringstream stream;
+        for (std::size_t index = 0; index < values.size(); ++index) {
+            if (index) stream << ',';
+            stream << values[index];
+        }
+        return stream.str();
+    };
+    const auto number_text = [](double value) {
+        std::ostringstream stream;
+        stream << std::setprecision(10) << value;
+        return stream.str();
+    };
+    const auto integer_intensity_text = [](double value) {
+        std::ostringstream stream;
+        stream << std::fixed << std::setprecision(0) << value;
+        return stream.str();
+    };
+    const auto peptide_sequence = [](const std::string& peptide) {
+        const auto open = peptide.find('[');
+        const auto close = peptide.find(']', open == std::string::npos
+            ? 0 : open + 1);
+        return open != std::string::npos && close != std::string::npos
+            ? peptide.substr(open + 1, close - open - 1)
+            : peptide;
+    };
+
+    std::ifstream reference(config.protein_reference_path);
+    if (!reference) {
+        throw std::runtime_error(
+            "Cannot open protein reference: " +
+            config.protein_reference_path);
+    }
+    std::string line;
+    if (!std::getline(reference, line)) {
+        throw std::runtime_error(
+            "Protein reference is empty: " +
+            config.protein_reference_path);
+    }
+    const auto reference_header = split_tabs(line);
+    if (reference_header.empty() || reference_header.front() != "Protein") {
+        throw std::runtime_error(
+            "Protein reference must begin with a Protein column");
+    }
+    std::unordered_map<std::string, std::size_t> reference_columns;
+    for (std::size_t column = 0;
+         column < reference_header.size(); ++column) {
+        reference_columns.emplace(reference_header[column], column);
+    }
+    const auto required_column = [&](const std::string& name) {
+        const auto found = reference_columns.find(name);
+        if (found == reference_columns.end()) {
+            throw std::runtime_error(
+                "Protein reference is missing required column: " + name);
+        }
+        return found->second;
+    };
+
+    constexpr std::string_view spectral_suffix = " Spectral Count";
+    constexpr std::string_view unique_spectral_suffix =
+        " Unique Spectral Count";
+    constexpr std::string_view total_spectral_suffix =
+        " Total Spectral Count";
+    std::vector<std::string> reference_samples;
+    for (const auto& column : reference_header) {
+        if (column == "Combined Spectral Count" ||
+            column.size() <= spectral_suffix.size() ||
+            (column.size() >= unique_spectral_suffix.size() &&
+             column.compare(
+                 column.size() - unique_spectral_suffix.size(),
+                 unique_spectral_suffix.size(),
+                 unique_spectral_suffix) == 0) ||
+            (column.size() >= total_spectral_suffix.size() &&
+             column.compare(
+                 column.size() - total_spectral_suffix.size(),
+                 total_spectral_suffix.size(),
+                 total_spectral_suffix) == 0) ||
+            column.compare(
+                column.size() - spectral_suffix.size(),
+                spectral_suffix.size(), spectral_suffix) != 0) {
+            continue;
+        }
+        reference_samples.push_back(
+            column.substr(0, column.size() - spectral_suffix.size()));
+    }
+    if (reference_samples.empty()) {
+        throw std::runtime_error(
+            "Protein reference has no per-sample spectral-count columns");
+    }
+    const std::unordered_set<std::string> control_samples(
+        config.negative_control_samples.begin(),
+        config.negative_control_samples.end());
+    for (const auto& control : control_samples) {
+        if (std::find(
+                reference_samples.begin(), reference_samples.end(),
+                control) == reference_samples.end()) {
+            throw std::runtime_error(
+                "Negative-control sample is absent from protein reference: " +
+                control);
+        }
+    }
+    std::vector<std::string> samples;
+    for (const auto& sample : reference_samples) {
+        if (control_samples.count(sample) == 0) {
+            samples.push_back(sample);
+        }
+    }
+    if (samples.empty()) {
+        throw std::runtime_error(
+            "SIP protein mapping requires at least one non-control sample");
+    }
+    std::unordered_map<std::string, std::size_t> sample_indices;
+    for (std::size_t sample = 0; sample < samples.size(); ++sample) {
+        if (!sample_indices.emplace(samples[sample], sample).second) {
+            throw std::runtime_error(
+                "Protein reference contains duplicate sample columns: " +
+                samples[sample]);
+        }
+    }
+    std::unordered_set<std::string> omitted_reference_columns;
+    for (const auto& control : control_samples) {
+        omitted_reference_columns.insert(control + " Spectral Count");
+        omitted_reference_columns.insert(
+            control + " Unique Spectral Count");
+        omitted_reference_columns.insert(
+            control + " Total Spectral Count");
+        omitted_reference_columns.insert(control + " Intensity");
+        omitted_reference_columns.insert(control + " MaxLFQ Intensity");
+    }
+    std::vector<std::size_t> output_reference_columns;
+    for (std::size_t column = 0;
+         column < reference_header.size(); ++column) {
+        if (omitted_reference_columns.count(
+                reference_header[column]) == 0) {
+            output_reference_columns.push_back(column);
+        }
+    }
+
+    struct ReferenceRow {
+        std::string protein;
+        std::vector<std::string> fields;
+    };
+    std::vector<ReferenceRow> reference_rows;
+    std::unordered_set<std::string> protein_set;
+    while (std::getline(reference, line)) {
+        auto fields = split_tabs(line);
+        if (fields.size() != reference_header.size()) {
+            throw std::runtime_error(
+                "Protein reference contains a misaligned row");
+        }
+        if (!protein_set.insert(fields.front()).second) {
+            throw std::runtime_error(
+                "Protein reference contains duplicate protein row: " +
+                fields.front());
+        }
+        reference_rows.push_back({fields.front(), std::move(fields)});
+    }
+
+    const auto assignment_path =
+        std::filesystem::path(config.protein_reference_path).parent_path() /
+        "combined_protein_with_PSM.tsv";
+    std::ifstream assignment_reference(assignment_path);
+    if (!assignment_reference || !std::getline(assignment_reference, line)) {
+        throw std::runtime_error(
+            "Cannot read razor-protein PSM assignments: " +
+            assignment_path.string());
+    }
+    const auto assignment_header = split_tabs(line);
+    std::unordered_map<std::string, std::size_t> assignment_columns;
+    for (std::size_t column = 0;
+         column < assignment_header.size(); ++column) {
+        assignment_columns.emplace(assignment_header[column], column);
+    }
+    std::vector<std::size_t> psm_id_columns;
+    psm_id_columns.reserve(samples.size());
+    for (const auto& sample : samples) {
+        const auto found =
+            assignment_columns.find(sample + "_PSMids");
+        if (found == assignment_columns.end()) {
+            throw std::runtime_error(
+                "Razor-protein assignment report is missing column: " +
+                sample + "_PSMids");
+        }
+        psm_id_columns.push_back(found->second);
+    }
+    std::unordered_map<std::string, std::string> psm_razor_proteins;
+    while (std::getline(assignment_reference, line)) {
+        const auto fields = split_tabs(line);
+        if (fields.size() != assignment_header.size()) {
+            throw std::runtime_error(
+                "Razor-protein assignment report contains a misaligned row");
+        }
+        const auto& protein = fields.front();
+        for (const auto column : psm_id_columns) {
+            for (const auto& psm_id : split_commas(fields[column])) {
+                if (psm_id.size() >= 4 &&
+                    psm_id.compare(psm_id.size() - 4, 4, "_MBR") == 0) {
+                    continue;
+                }
+                const auto inserted =
+                    psm_razor_proteins.emplace(psm_id, protein);
+                if (!inserted.second &&
+                    inserted.first->second != protein) {
+                    throw std::runtime_error(
+                        "PSM has multiple razor-protein assignments: " +
+                        psm_id);
+                }
+            }
+        }
+    }
+
+    struct Aggregate {
+        std::vector<std::string> psm_ids;
+        std::vector<std::string> peptides;
+        std::vector<std::string> ms1;
+        std::vector<std::string> ms2;
+        std::vector<std::string> sip_intensity;
+    };
+    std::vector<std::unordered_map<std::string, Aggregate>> aggregates(
+        samples.size());
+    std::vector<ReportData> report_samples(samples.size());
+    std::unordered_map<std::string, std::set<std::string>>
+        peptide_proteins;
+    for (std::size_t row = 0; row < data.rows.size(); ++row) {
+        const auto& psm = data.rows[row];
+        if (psm.label != 1 || q[row] > config.q_threshold) continue;
+        if (psm.sample_name.empty()) {
+            throw std::runtime_error(
+                "SIP PSM mapping requires SampleName in every accepted row");
+        }
+        if (sample_indices.count(psm.sample_name) == 0) {
+            throw std::runtime_error(
+                "Accepted SIP PSM has unknown sample name: " +
+                psm.sample_name);
+        }
+        auto& mappings =
+            peptide_proteins[stripped_peptide(psm.peptide)];
+        for (const auto& protein :
+             protein_ids(psm, config.decoy_prefix)) {
+            if (!starts_with(protein, config.decoy_prefix)) {
+                mappings.insert(protein);
+            }
+        }
+    }
+    for (std::size_t row = 0; row < data.rows.size(); ++row) {
+        const auto& psm = data.rows[row];
+        if (psm.label != 1 || q[row] > config.q_threshold) continue;
+        const auto sample = sample_indices.at(psm.sample_name);
+        const auto razor = psm_razor_proteins.find(psm.id);
+        if (razor == psm_razor_proteins.end() ||
+            protein_set.count(razor->second) == 0) {
+            continue;
+        }
+        const auto peptide = stripped_peptide(psm.peptide);
+        const bool unique =
+            peptide_proteins.at(peptide).size() == 1;
+        const auto ion = ion_form(psm);
+        const double intensity = psm_intensity(psm);
+        for (const auto& protein :
+             protein_ids(psm, config.decoy_prefix)) {
+            if (protein_set.count(protein) == 0) continue;
+            auto& stats = report_samples[sample].proteins[protein];
+            stats.total_peptides.insert(peptide);
+            ++stats.total_spectra;
+            update_ion_intensity(
+                stats.total_ion_intensities, ion, intensity);
+            if (unique) {
+                stats.unique_peptides.insert(peptide);
+                ++stats.unique_spectra;
+                update_ion_intensity(
+                    stats.unique_ion_intensities, ion, intensity);
+            }
+            if (protein == razor->second) {
+                stats.razor_peptides.insert(peptide);
+                ++stats.razor_spectra;
+                update_ion_intensity(
+                    stats.razor_ion_intensities, ion, intensity);
+            }
+        }
+        auto& ion_aggregate = report_samples[sample].ions[ion];
+        ion_aggregate.mz = psm.calculated_mz;
+        update_ion_intensity(
+            ion_aggregate.ion_intensities, ion, intensity);
+        auto& aggregate = aggregates[sample][razor->second];
+        aggregate.psm_ids.push_back(psm.id);
+        aggregate.peptides.push_back(
+            peptide_sequence(psm.peptide));
+        aggregate.ms1.push_back(
+            number_text(psm.ms1_isotopic_abundance));
+        aggregate.ms2.push_back(
+            number_text(psm.ms2_isotopic_abundance));
+        aggregate.sip_intensity.push_back(
+            number_text(psm.has_chromatographic_feature
+                ? psm.quantified_intensity : 0.0));
+    }
+    const auto normalizer =
+        build_report_intensity_normalizer(
+            report_samples, config.quant_normalize);
+
+    const auto combined_total_peptides =
+        required_column("Combined Total Peptides");
+    const auto combined_razor_spectra =
+        required_column("Combined Spectral Count");
+    const auto combined_unique_spectra =
+        required_column("Combined Unique Spectral Count");
+    const auto combined_total_spectra =
+        required_column("Combined Total Spectral Count");
+    std::vector<std::size_t> sample_razor_columns;
+    std::vector<std::size_t> sample_unique_columns;
+    std::vector<std::size_t> sample_total_columns;
+    std::vector<std::size_t> sample_intensity_columns;
+    std::vector<std::size_t> sample_maxlfq_columns;
+    for (const auto& sample : samples) {
+        sample_razor_columns.push_back(
+            required_column(sample + " Spectral Count"));
+        sample_unique_columns.push_back(
+            required_column(sample + " Unique Spectral Count"));
+        sample_total_columns.push_back(
+            required_column(sample + " Total Spectral Count"));
+        sample_intensity_columns.push_back(
+            required_column(sample + " Intensity"));
+        sample_maxlfq_columns.push_back(
+            required_column(sample + " MaxLFQ Intensity"));
+    }
+
+    for (auto& row : reference_rows) {
+        std::set<std::string> total_peptides;
+        std::size_t razor_spectra = 0;
+        std::size_t unique_spectra = 0;
+        std::size_t total_spectra = 0;
+        std::vector<IonIntensityMap> ion_matrix(samples.size());
+        for (std::size_t sample = 0;
+             sample < samples.size(); ++sample) {
+            const auto found =
+                report_samples[sample].proteins.find(row.protein);
+            if (found == report_samples[sample].proteins.end()) {
+                row.fields[sample_razor_columns[sample]] = "0";
+                row.fields[sample_unique_columns[sample]] = "0";
+                row.fields[sample_total_columns[sample]] = "0";
+                row.fields[sample_intensity_columns[sample]] = "0";
+                continue;
+            }
+            const auto& stats = found->second;
+            total_peptides.insert(
+                stats.total_peptides.begin(), stats.total_peptides.end());
+            razor_spectra += stats.razor_spectra;
+            unique_spectra += stats.unique_spectra;
+            total_spectra += stats.total_spectra;
+            row.fields[sample_razor_columns[sample]] =
+                std::to_string(stats.razor_spectra);
+            row.fields[sample_unique_columns[sample]] =
+                std::to_string(stats.unique_spectra);
+            row.fields[sample_total_columns[sample]] =
+                std::to_string(stats.total_spectra);
+            row.fields[sample_intensity_columns[sample]] =
+                integer_intensity_text(normalized_top_three(
+                    stats.razor_ion_intensities, sample, normalizer));
+            ion_matrix[sample] = stats.razor_ion_intensities;
+        }
+        const auto lfq = maxlfq(ion_matrix, normalizer);
+        for (std::size_t sample = 0;
+             sample < samples.size(); ++sample) {
+            row.fields[sample_maxlfq_columns[sample]] =
+                integer_intensity_text(lfq[sample]);
+        }
+        row.fields[combined_total_peptides] =
+            std::to_string(total_peptides.size());
+        row.fields[combined_razor_spectra] =
+            std::to_string(razor_spectra);
+        row.fields[combined_unique_spectra] =
+            std::to_string(unique_spectra);
+        row.fields[combined_total_spectra] =
+            std::to_string(total_spectra);
+    }
+
+    const std::filesystem::path output(config.sip_protein_output_path);
+    if (output.has_parent_path()) {
+        std::filesystem::create_directories(output.parent_path());
+    }
+    std::ofstream report(output);
+    if (!report) {
+        throw std::runtime_error(
+            "Cannot create native SIP protein mapping: " +
+            output.string());
+    }
+    std::vector<std::string> output_reference_header;
+    output_reference_header.reserve(output_reference_columns.size());
+    for (const auto column : output_reference_columns) {
+        output_reference_header.push_back(reference_header[column]);
+    }
+    report << join_tabs(output_reference_header);
+    for (const auto& sample : samples) {
+        report
+            << "\tSIP_" << sample << "_PSMids"
+            << "\tSIP_" << sample << "_PeptideSequences"
+            << "\tSIP_" << sample << "_MS1IsotopicAbundances"
+            << "\tSIP_" << sample << "_MS2IsotopicAbundances"
+            << "\tSIP_" << sample << "_SIP_intensity";
+    }
+    report << '\n';
+    for (const auto& row : reference_rows) {
+        std::vector<std::string> output_fields;
+        output_fields.reserve(output_reference_columns.size());
+        for (const auto column : output_reference_columns) {
+            output_fields.push_back(row.fields[column]);
+        }
+        report << join_tabs(output_fields);
+        for (std::size_t sample = 0; sample < samples.size(); ++sample) {
+            const auto found = aggregates[sample].find(row.protein);
+            if (found == aggregates[sample].end()) {
+                report << "\t\t\t\t\t";
+                continue;
+            }
+            report
+                << '\t' << join(found->second.psm_ids)
+                << '\t' << join(found->second.peptides)
+                << '\t' << join(found->second.ms1)
+                << '\t' << join(found->second.ms2)
+                << '\t' << join(found->second.sip_intensity);
+        }
+        report << '\n';
+    }
 }
 
 void ProteinAssembler::sequential_filter(

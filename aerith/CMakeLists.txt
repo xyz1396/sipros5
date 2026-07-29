@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(aerith_filter
   src/filter.cpp
+  src/isotope.cpp
   src/output.cpp
   src/pin.cpp
   src/protein_assembly.cpp
@@ -20,6 +21,15 @@ add_library(aerith_filter
   src/svm.cpp
 )
 target_include_directories(aerith_filter PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(TARGET sipros_core)
+  sipros_optimization_options(aerith_filter)
+  target_include_directories(aerith_filter PRIVATE
+    ${PROJECT_SOURCE_DIR}/sipros/include)
+  target_link_libraries(aerith_filter PRIVATE sipros_core)
+else()
+  message(FATAL_ERROR
+    "Aerith requires the Sipros core isotope-chemistry target")
+endif()
 if(NOT TARGET OpenMP::OpenMP_CXX)
   find_package(OpenMP REQUIRED)
 endif()
@@ -183,5 +193,8 @@ include(CTest)
 if(BUILD_TESTING)
   add_executable(aerith_tests tests/test_filter.cpp)
   target_link_libraries(aerith_tests PRIVATE aerith_filter)
+  if(Torch_FOUND)
+    target_compile_definitions(aerith_tests PRIVATE AERITH_TEST_WITH_TORCH=1)
+  endif()
   add_test(NAME aerith_unit_tests COMMAND aerith_tests)
 endif()

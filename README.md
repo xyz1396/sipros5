@@ -56,6 +56,9 @@ siproswf -i raw -f db.faa -e C13 -o sip_output
 siproswf -i raw -f db.faa -e C13 --negative_control Pan_062822_X1iso5 -o sip2_output
 ```
 
+Use a comma-separated `-r` list to search disjoint SIP enrichments in one
+joint filtering run, for example `-r 1,2,3,49,50,51 -p 1`.
+
 #### Search chemistry and defaults
 
 The Regular and SIP search profiles, residue/PTM chemistry, isotope
@@ -115,14 +118,19 @@ same composition-weighted spacing defines that peptide's configured precursor
 isotope windows; FASTA assignment does not fall back to a global target-isotope
 spacing.
 
+SIP FASTA search evaluates only precursor hypotheses stored by Raxport in each
+HDF5 scan. It does not synthesize a precursor candidate from the reaction
+precursor when the candidate list is empty.
+
 ### 5. Output Files
 
-- `SIP_filtered_psms.tsv`: PSMs from all samples that pass the unlabeled negative-control filter (1% FDR), with SIP element labeling percentages (`MS1IsotopicAbundances`, `MS2IsotopicAbundances`). `isotopicPeakNumbers` is the raw number of extracted MS1 isotope peaks. `MS1IsotopeFitScore` is the theoretical-envelope coverage from `0` to `1`, set to `0` unless at least two compatible peaks are present; scores of at least `0.02` pass the MS1 abundance-fit validity threshold. MS1IsotopicAbundances are more sensitive; MS2IsotopicAbundances are more accurate.
+- `SIP_filtered_psms.tsv`: target PSMs from all non-control samples that pass the unlabeled negative-control filter (1% FDR). It reports the final `SVMscore` and SIP element labeling percentages (`MS1IsotopicAbundances`, `MS2IsotopicAbundances`); training-only `Label` and `diffScores` fields are not exported. `isotopicPeakNumbers` is the raw number of extracted MS1 isotope peaks. `MS1IsotopeFitScore` is the theoretical-envelope coverage from `0` to `1`, set to `0` unless at least two compatible peaks are present; scores of at least `0.02` pass the MS1 abundance-fit validity threshold. MS1IsotopicAbundances are more sensitive; MS2IsotopicAbundances are more accurate.
+- `SIP_target_psms.tsv`, `SIP_decoy_psms.tsv`: all target and negative-control candidates used by the secondary SIP SVM, written in the same `PSMId`, `SVMscore`, `q-value`, `posterior_error_prob`, `peptide`, and `proteinIds` format as the corresponding sample-subdirectory score tables.
 - `combined_protein_with_SIP_filtered_PSM.tsv`: maps unlabeled negative-control filtered PSMs to the proteins identified in each sample.
 - For each raw-file subdirectory:
   - `<sample>.h5`: Raxport scan data.
   - `<sample>_target.pin`, `<sample>_decoy.pin`: target and decoy search intermediates.
-  - `<sample>_target_psms.tsv`, `<sample>_decoy_psms.tsv`: Aerith reranked score tables.
+  - `<sample>_target_psms.tsv`, `<sample>_decoy_psms.tsv`: Aerith reranked `SVMscore` tables.
   - `<sample>_filtered_psms.tsv`: Aerith 1% FDR PSMs with original search and RT features.
   - `psm.tsv`: FragPipe/Philosopher-style accepted PSM report with precursor
     intensity, assigned modifications, search class, protein coordinates, and
@@ -131,7 +139,7 @@ spacing.
     by peptide ion, modified peptide, and naked peptide, with probabilities,
     spectral counts, precursor intensities, modifications, and protein mappings.
   - `protein.tsv`, `protein.fas`: Aerith's per-sample picked-FDR/razor protein report and identified FASTA entries.
-  - `*_filtered_psms.tsv`: PSMs passing 1% FDR decoy filtering with `isotopicPeakNumbers`, `MS1IsotopeFitScore`, `MS1IsotopicAbundances`, `MS2IsotopicAbundances`, and, for regular FASTA search, `unweighted_spectral_entropy`, `delta_RT_loess`, `delta_RT_loess_real`, and `pred_RT_real_units`.
+  - `*_filtered_psms.tsv`: PSMs passing 1% FDR decoy filtering with `isotopicPeakNumbers`, `MS1IsotopeFitScore`, `MS1IsotopicAbundances`, `MS2IsotopicAbundances`, and, for regular and SIP FASTA search, `unweighted_spectral_entropy`, `delta_RT_loess_real`, and `pred_RT_real_units`.
 - At the workflow root, `combined_psm.tsv`, `combined_ion.tsv`,
   `combined_modified_peptide.tsv`, `combined_peptide.tsv`, and
   `combined_protein.tsv` contain cross-sample reports with FragPipe-compatible
@@ -139,6 +147,22 @@ spacing.
   reports sequence coverage from the union of observed peptides. Aerith
   performs this directly from its in-memory scored PSMs, without pepXML,
   ProteinProphet, Philosopher workspaces, or `.meta` intermediates.
+- `combined_protein_with_PSM.tsv` is also written natively by Aerith. For each
+  sample it contains aligned comma-separated PSM IDs, peptide sequences, MS1
+  and MS2 isotopic abundances, and chromatographically quantified SIP
+  intensities. Values at the same comma-separated position belong to the same
+  accepted PSM.
+  Shared peptides and all of their aligned PSM values are included only in
+  the selected razor protein row; alternative compatible proteins are not
+  given duplicate peptide or intensity values.
+  Accepted match-between-runs features are appended to the acceptor sample
+  with `<PeptideSequence>_MBR` as the PSM ID, donor MS1/MS2 isotopic
+  abundances, and the transferred intensity quantified in the acceptor run.
+  It omits `<sample>_ProteinAbundance` and
+  `<sample>_log10_precursorIntensities`. When SIP negative controls are
+  requested, Aerith also writes
+  `combined_protein_with_SIP_filtered_PSM.tsv`; there is no Python report
+  implementation or fallback.
 - FASTA workflows pass the original target FASTA and generated decoy FASTA to
   Aerith separately; the workflow does not create `targetDecoy.faa`. SIP
   spectra-search mode runs Aerith filtering only and produces the per-sample
@@ -155,19 +179,21 @@ peptide forms, PTM peptide forms, and PTM-bearing PSMs at the configured FDR.
 
 Aerith converts `log10_precursorIntensities` back to linear PSM intensity and
 uses Philosopher's top-three peptide-ion rule for total, unique, and razor
-protein intensity. `combined_protein_with_PSM.tsv` includes a
-`<sample>_ProteinAbundance` column sourced from each sample's razor intensity.
+protein intensity in its standard protein reports.
 
 ### Native IonQuant-style chromatographic quantification
 
-For regular FASTA workflows, Aerith reads the MS1 scans directly from each
-Raxport HDF5 file. It calculates the exact modified precursor mass, traces the
-monoisotopic, M+1, and M+2 XICs, resamples them to a uniform retention-time
-grid, applies Savitzky-Golay smoothing for peak detection, and subtracts
-boundary background from the unsmoothed interpolated trace. The monoisotopic
-trace defines the reported feature geometry; automatic intensity sums the
-background-corrected apex-1/apex/apex+1 values from the traced isotope
-envelope. Aerith reports the feature apex, apex scan,
+For FASTA workflows, Aerith reads the MS1 scans directly from each Raxport
+HDF5 file. Regular search retains its monoisotopic, M+1, and M+2 traces. SIP
+search instead calculates the source-aware exact isotope distribution for the
+modified peptide at its reported MS2 labeling abundance and traces the most
+probable `--quant-top-isotopes` peaks (six by default). It resamples the XICs
+to a uniform retention-time grid, applies Savitzky-Golay smoothing for peak
+detection, and subtracts boundary background from the unsmoothed interpolated
+trace. The most probable theoretical isotope trace defines the reported
+feature geometry; automatic intensity sums the background-corrected
+apex-1/apex/apex+1 values across the traced envelope. Aerith reports the
+feature apex, apex scan,
 start/end retention times, FWHM, traced scans, and intensity in `psm.tsv`,
 `ion.tsv`, and `combined_ion.tsv`. This runs in memory between Aerith filtering
 and native protein assembly; it does not create pepXML or another temporary
@@ -193,10 +219,6 @@ scans, and cross-run intensity normalization. They can be adjusted with
 reports. MBR is controlled with `--mbr-rt-window`, `--mbr-top-runs`,
 `--mbr-min-correlation`, and `--mbr-ion-fdr`, or disabled with `--no-mbr`.
 
-The FragPipe-compatible calibrated observed-mass columns remain present in
-`psm.tsv` for schema compatibility but are empty because Aerith does not
-perform precursor-mass calibration.
-
 `combined_modified_peptide.tsv`, `combined_peptide.tsv`, and
 `combined_protein.tsv` contain sample-specific `MaxLFQ Intensity` columns.
 Aerith computes median pairwise log ion ratios, solves each connected sample
@@ -205,8 +227,17 @@ graph, and anchors its absolute scale to the contributing ion intensities.
 The Python workflow has one post-search module, `script33/filter.py`, which
 launches one cross-sample Aerith process for filtering, chromatographic
 quantification, normalization, MaxLFQ, and protein assembly. The optional SIP
-negative-control pass is also filtered by Aerith. There is no separate
-`quant.py` or IonQuant command in the workflow.
+negative-control pass selects only primary target PSMs that already passed the
+normal target/decoy filter, relabels the designated control samples, and
+rescores them inside that same Aerith process using the in-memory dataset.
+The secondary SVM reuses each PSM's primary `delta_RT_loess` value and does
+not rerun RT prediction or calibration. It does not perform a second
+peptide-collision filter, write
+or reread `SIP.pin`, launch another Aerith process, or fall back to Python
+filtering. The Aerith report includes the total and per-stage native
+negative-control timings, the configured SIP label threshold, counts before
+and below that threshold, and the three-fold secondary SVM feature weights.
+There is no separate `quant.py` or IonQuant command in the workflow.
 
 ### Native predicted-spectrum entropy in Aerith
 
@@ -219,6 +250,15 @@ The implementation keeps DIA-NN's predicted top fragments, applies each
 Raxport scan's MS2 m/z window, matches experimental peaks at 20 ppm by default,
 and computes the entropy similarity when at least two predicted ions have
 experimental matches.
+For SIP FASTA PSMs, Aerith expands every predicted b/y product ion through the
+same source-aware theoretical isotope model used by Sipros, shifts each peak
+according to fragment charge, and weights it by its exact isotope probability
+before entropy matching. The selected isotope probabilities are renormalized
+per product ion so their expanded intensities sum to the original DIA-NN
+product-ion intensity. Aerith retains the five most probable isotopes of every
+product ion by default, with no isotope-probability cutoff and no
+spectrum-wide 20-peak limit. Change the per-ion count with
+`--product-top-isotopes`. All retained DIA-NN product ions are expanded.
 
 Build the release binaries with:
 
@@ -251,7 +291,7 @@ statically embedded in Aerith.
 Aerith automatically uses CUDA for DIA-NN spectrum and RT prediction when a
 CUDA-enabled PyTorch installation and an accessible GPU are available. If CUDA
 is unavailable or initialization/inference fails, Aerith retries prediction on
-the CPU. The regular FASTA workflow does not override `CUDA_VISIBLE_DEVICES`,
+the CPU. The FASTA workflow does not override `CUDA_VISIBLE_DEVICES`,
 so it honors GPU visibility assigned by the user, container, or scheduler. The
 selected device or fallback reason is written to the workflow log. The timing
 table reports the exact DIA-NN model-inference wall and CPU times with `(GPU)`
@@ -272,18 +312,19 @@ Use `--spectrum-model` to override the checkpoint file and `--fragment-ppm` to
 change the matching tolerance. A build configured with
 `-DAERITH_ENABLE_TORCH=OFF` remains usable for filtering without `--spectra`.
 
-The complete regular FASTA workflow supplies each sample's Raxport HDF5 file
+The complete FASTA workflow supplies each sample's Raxport HDF5 file
 to Aerith automatically, so no extra flag is needed:
 
 ```bash
 siproswf -i raw -f Ecoli.fasta -t 40 -o regular_output
 ```
 
-This automatic predicted-spectrum feature is limited to regular FASTA search;
-SIP and search-spectra workflows keep their existing feature sets. The DIA-NN
-license notice available for the checkpoint is reproduced in `LICENSE`;
-review the version-specific terms before redistributing the checkpoint or a
-package containing it.
+Regular and SIP FASTA searches both receive predicted spectrum and RT
+features; SIP applies its theoretical product-ion isotope envelopes.
+Search-spectra keeps its existing feature set. The DIA-NN license notice
+available for the checkpoint is reproduced in `LICENSE`; review the
+version-specific terms before redistributing the checkpoint or a package
+containing it.
 
 When this feature is enabled, Aerith's timing report includes `Predict spectra
 and compute entropy`. This measures the complete feature-generation stage,

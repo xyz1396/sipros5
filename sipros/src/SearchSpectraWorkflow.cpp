@@ -1504,6 +1504,7 @@ std::vector<PinWriter::SearchSpectraPinRow> makeSearchSpectraPinRows(const std::
 		row.matchedYEnvelope = r.matchedY;
 		row.matchedBEnvelope = r.matchedB;
 		row.expMass = r.calcMassNeutral;
+		row.observedMass = r.expMassNeutral;
 		row.retentionTime = r.rtScan;
 		row.massError = r.mzAbsErrPpm;
 		row.mzShiftFromIsolationWindowCenter = r.mzShiftDa;

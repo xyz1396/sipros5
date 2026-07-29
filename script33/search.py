@@ -163,14 +163,20 @@ class search:
                 output.write(header + '\n' + decoy_sequence(sequence) + '\n')
 
     def input_entries(self, input_path: str) -> list[str]:
+        if ',' in input_path:
+            self.logger.info(f'{input_path} is a file list')
+            return [
+                item.strip()
+                for item in input_path.split(',')
+                if item.strip()
+            ]
         path = Path(input_path)
         if self.is_raw_input(input_path) or self.is_hdf5_input(input_path):
             return [input_path]
         if path.is_dir():
             self.logger.info(f'{input_path} is a directory')
             return [str(path / name) for name in sorted(os.listdir(path))]
-        self.logger.info(f'{input_path} is a file list')
-        return [item.strip() for item in input_path.split(',') if item.strip()]
+        return [input_path]
 
     def getInputFiles(self):
         self.raw_files.clear()
@@ -250,15 +256,6 @@ class search:
                 for _, _, expected, base in jobs:
                     self.hdf5_paths.setdefault(base, expected)
         self.logger.info(f'HDF5 scan files: {self.hdf5_paths}')
-
-    def validate_negative_controls(self):
-        if self.negative_control is not None and self.negative_control != '':
-            negative_control_files = [item.strip() for item in self.negative_control.split(',') if item.strip()]
-            for nc_file in negative_control_files:
-                if nc_file not in self.base_names:
-                    self.logger.error(f'Negative control file {nc_file} not found in input files')
-                    raise SystemExit(1)
-            self.logger.info(f'negative control files: {self.negative_control} verified in input files')
 
     def direct_sip_args(self) -> str:
         if self.element == 'R':
@@ -402,12 +399,14 @@ class search:
             commands.append(
                 f'{self.q(self.siprosPath)} search-fasta -fasta {self.q(self.fastaPath)} '
                 f'-f {self.q(hdf5_path)} -o {self.q(sample_dir)} --pin-output {self.q(target_pin_name)}{sip_args} '
-                f'--pin-label 1 --top-psms-per-scan {self.topPsmsPerScan}{tolerance_args}{ptm_args}'
+                f'--pin-label 1 --precursor-source raxport-candidates '
+                f'--top-psms-per-scan {self.topPsmsPerScan}{tolerance_args}{ptm_args}'
             )
             commands.append(
                 f'{self.q(self.siprosPath)} search-fasta -fasta {self.q(self.decoyPath)} '
                 f'-f {self.q(hdf5_path)} -o {self.q(sample_dir)} --pin-output {self.q(decoy_pin_name)}{sip_args} '
-                f'--pin-label -1 --top-psms-per-scan {self.topPsmsPerScan}{tolerance_args}{ptm_args}'
+                f'--pin-label -1 --precursor-source raxport-candidates '
+                f'--top-psms-per-scan {self.topPsmsPerScan}{tolerance_args}{ptm_args}'
             )
         allocation = allocate_threads(
             self.threadNumber,
@@ -541,7 +540,6 @@ class search:
             f'({self.core_count} available)'
         )
         self.getInputFiles()
-        self.validate_negative_controls()
         self.create_sample_directories()
         if not self.dryrun:
             self.prepare_hdf5_inputs()
@@ -555,7 +553,6 @@ class search:
             f'({self.core_count} available)'
         )
         self.getInputFiles()
-        self.validate_negative_controls()
         self.create_sample_directories()
         if not self.dryrun:
             self.prepare_hdf5_inputs()

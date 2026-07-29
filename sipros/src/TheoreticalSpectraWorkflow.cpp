@@ -57,8 +57,7 @@ struct PsmRow
 	std::string retention = "0";
 	std::string proteins = "{UNKNOWN}";
 	double probability = 0.0;
-	double expectation = std::numeric_limits<double>::infinity();
-	double hyperscore = -std::numeric_limits<double>::infinity();
+	double svmScore = -std::numeric_limits<double>::infinity();
 	size_t order = 0;
 };
 
@@ -477,8 +476,12 @@ void readInputFile(const fs::path &path,
 			  "proteinName", "Protein", "protein"});
 	const size_t idxMappedProteins = optionalColumn(col, {"Mapped Proteins"});
 	const size_t idxProbability = optionalColumn(col, {"Probability"});
-	const size_t idxExpectation = optionalColumn(col, {"Expectation"});
-	const size_t idxHyperscore = optionalColumn(col, {"Hyperscore"});
+	const size_t idxSvmScore = optionalColumn(col, {"SVMscore"});
+	if (idxSvmScore == std::string::npos)
+	{
+		throw std::runtime_error(
+			"Missing required column SVMscore in " + path.string());
+	}
 	const bool fragpipeInput = col.find("Spectrum") != col.end();
 
 	std::string line;
@@ -499,7 +502,7 @@ void readInputFile(const fs::path &path,
 		for (const size_t optional : {idxCharge, idxModifiedPeptide,
 									  idxAssignedModifications, idxRetention,
 									  idxProteins, idxMappedProteins, idxProbability,
-									  idxExpectation, idxHyperscore})
+									  idxSvmScore})
 		{
 			if (optional != std::string::npos)
 			{
@@ -571,13 +574,9 @@ void readInputFile(const fs::path &path,
 			{
 				(void)parseDoubleField(f[idxProbability], row.probability);
 			}
-			if (idxExpectation != std::string::npos)
+			if (!parseDoubleField(f[idxSvmScore], row.svmScore))
 			{
-				(void)parseDoubleField(f[idxExpectation], row.expectation);
-			}
-			if (idxHyperscore != std::string::npos)
-			{
-				(void)parseDoubleField(f[idxHyperscore], row.hyperscore);
+				throw std::runtime_error("invalid SVMscore");
 			}
 		}
 		catch (const std::exception &)
@@ -635,20 +634,13 @@ bool isBetterPsm(const PsmRow &candidate, const PsmRow &current)
 	}
 	if (std::abs(candidate.probability - current.probability) <= epsilon)
 	{
-		if (candidate.expectation < current.expectation - epsilon)
+		if (candidate.svmScore > current.svmScore + epsilon)
 		{
 			return true;
 		}
-		if (std::abs(candidate.expectation - current.expectation) <= epsilon)
+		if (std::abs(candidate.svmScore - current.svmScore) <= epsilon)
 		{
-			if (candidate.hyperscore > current.hyperscore + epsilon)
-			{
-				return true;
-			}
-			if (std::abs(candidate.hyperscore - current.hyperscore) <= epsilon)
-			{
-				return candidate.order < current.order;
-			}
+			return candidate.order < current.order;
 		}
 	}
 	return false;

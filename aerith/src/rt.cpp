@@ -259,7 +259,7 @@ RtImplementation::RtAlignmentModel RtImplementation::fit_retention_alignment(
         if (!(maximum > 0.0)) maximum = 1.0;
         maximum = std::ceil(maximum);
     }
-    const double missing = std::numeric_limits<double>::quiet_NaN();
+    const double missing = -std::numeric_limits<double>::max();
     std::unordered_map<std::string, std::vector<double>> peptide_rt;
     for (std::size_t i = 0; i < data.rows.size(); ++i) {
         const auto& psm = data.rows[i];
@@ -268,7 +268,7 @@ RtImplementation::RtAlignmentModel RtImplementation::fit_retention_alignment(
         auto entry = peptide_rt.try_emplace(std::string(peptide_body(psm.peptide)),
                                             files, missing).first;
         double& rt = entry->second[psm.file_id];
-        if (!std::isfinite(rt) || psm.retention < rt) rt = psm.retention;
+        if (rt == missing || psm.retention < rt) rt = psm.retention;
     }
     struct PeptideTimes { std::vector<double> normalized; double mean = 0.0; };
     std::vector<PeptideTimes> times;
@@ -277,7 +277,7 @@ RtImplementation::RtAlignmentModel RtImplementation::fit_retention_alignment(
         PeptideTimes peptide{std::vector<double>(files, missing), 0.0};
         std::size_t observed = 0;
         for (std::size_t file = 0; file < files; ++file) {
-            if (std::isfinite(entry.second[file])) {
+            if (entry.second[file] != missing) {
                 peptide.normalized[file] = entry.second[file] / model.max_rt[file];
                 peptide.mean += peptide.normalized[file];
                 ++observed;
@@ -293,7 +293,7 @@ RtImplementation::RtAlignmentModel RtImplementation::fit_retention_alignment(
         double dot = 0.0, sum_x = 0.0, sum_y = 0.0;
         for (const auto& peptide : times) {
             const double x = peptide.normalized[file];
-            if (std::isfinite(x)) {
+            if (x != missing) {
                 ++count; dot += x * peptide.mean; sum_x += x; sum_y += peptide.mean;
             }
         }
@@ -302,7 +302,7 @@ RtImplementation::RtAlignmentModel RtImplementation::fit_retention_alignment(
         double sx2 = 1e-8;
         for (const auto& peptide : times) {
             const double x = peptide.normalized[file];
-            if (std::isfinite(x)) sx2 += (x - x_mean) * (x - x_mean);
+            if (x != missing) sx2 += (x - x_mean) * (x - x_mean);
         }
         const double slope = (dot - count * x_mean * y_mean) / sx2;
         const double intercept = y_mean - slope * x_mean;

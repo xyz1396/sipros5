@@ -133,12 +133,6 @@ bool MS2ScanVector::loadRaxportHdf5File()
 			}
 		};
 
-		if (raxportReadOptions.precursorSource == sipros::PrecursorSource::RaxportCandidates &&
-			scan->iParentChargeState > 0 && scan->dParentMZ > 0.0)
-		{
-			appendPrecursorMz(scan->dParentMZ, scan->iParentChargeState);
-		}
-
 		const size_t nCandidates = std::min(scan->dParentMZs.size(), scan->iParentChargeStates.size());
 		for (size_t j = 0; j < nCandidates; ++j)
 		{
@@ -1511,14 +1505,43 @@ struct FragmentSeriesFeatures
 
 static bool matchesMvhPeak(const MS2Scan *scan, double mz)
 {
-	if (scan == nullptr || scan->pPeakList == nullptr ||
+	if (scan == nullptr ||
 		mz < scan->mzLowerBound || mz > scan->mzUpperBound)
 	{
 		return false;
 	}
-	const char peakClass = scan->pPeakList->findNear(
-		mz, ProNovoConfig::getMassAccuracyFragmentIon());
-	return peakClass != scan->pPeakList->end() && peakClass > 0;
+	const double tolerance = ProNovoConfig::getMassAccuracyFragmentIon();
+	if (scan->pPeakList != nullptr)
+	{
+		const char peakClass = scan->pPeakList->findNear(mz, tolerance);
+		return peakClass != scan->pPeakList->end() && peakClass > 0;
+	}
+	// MVH releases its temporary PeakList before PIN rows are collected.
+	// Raxport keeps vdMZ sorted, so use the retained experimental peaks rather
+	// than silently reporting every matched-ion feature as zero.
+	const auto peak = lower_bound(
+		scan->vdMZ.begin(), scan->vdMZ.end(), mz - tolerance);
+	return peak != scan->vdMZ.end() && *peak < mz + tolerance;
+}
+
+static bool matchesIsotopeEnvelope(
+	const MS2Scan *scan, const vector<double> &neutralMasses, int charge)
+{
+	if (charge <= 0)
+	{
+		return false;
+	}
+	for (double neutralMass : neutralMasses)
+	{
+		const double mz =
+			(neutralMass + Proton * static_cast<double>(charge)) /
+			static_cast<double>(charge);
+		if (matchesMvhPeak(scan, mz))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 static int longestMatchedSeries(const vector<bool> &matches)
@@ -1562,6 +1585,22 @@ static FragmentSeriesFeatures calculateFragmentSeriesFeatures(
 	const int peptideLength = static_cast<int>(residues.size());
 	vector<bool> bMatches(static_cast<size_t>(peptideLength - 1), false);
 	vector<bool> yMatches(static_cast<size_t>(peptideLength - 1), false);
+	const bool sipEnvelopes =
+		ProNovoConfig::getSearchType() == "SIP" &&
+		peptide->vvdBionMass.size() == bMatches.size() &&
+		peptide->vvdYionMass.size() == yMatches.size();
+	const auto matchB = [&](size_t index, int charge, double fallbackMz) {
+		return sipEnvelopes
+			? matchesIsotopeEnvelope(
+				scan, peptide->vvdBionMass[index], charge)
+			: matchesMvhPeak(scan, fallbackMz);
+	};
+	const auto matchY = [&](size_t index, int charge, double fallbackMz) {
+		return sipEnvelopes
+			? matchesIsotopeEnvelope(
+				scan, peptide->vvdYionMass[index], charge)
+			: matchesMvhPeak(scan, fallbackMz);
+	};
 
 	if (peptide->iMeasuredParentCharge > 2 && MVH::bUseSmartPlusThreeModel)
 	{
@@ -1625,8 +1664,8 @@ static FragmentSeriesFeatures calculateFragmentSeriesFeatures(
 				(aaForward[bIndex] + Proton * bCharge) / bCharge;
 			const double yMz =
 				(aaReverse[yIndex] + Proton * yCharge) / yCharge;
-			bMatches[bIndex] = matchesMvhPeak(scan, bMz);
-			yMatches[yIndex] = matchesMvhPeak(scan, yMz);
+			bMatches[bIndex] = matchB(bIndex, bCharge, bMz);
+			yMatches[yIndex] = matchY(yIndex, yCharge, yMz);
 		}
 	}
 	else
@@ -1634,10 +1673,22 @@ static FragmentSeriesFeatures calculateFragmentSeriesFeatures(
 		for (size_t ionIndex = 0;
 			ionIndex < bMatches.size(); ++ionIndex)
 		{
-			bMatches[ionIndex] = matchesMvhPeak(
-				scan, aaForward[ionIndex] + Proton);
-			yMatches[ionIndex] = matchesMvhPeak(
-				scan, aaReverse[ionIndex] + Proton);
+			const int maxCharge =
+				peptide->iMeasuredParentCharge > 2
+				? peptide->iMeasuredParentCharge - 1 : 1;
+			for (int charge = 1; charge <= maxCharge; ++charge)
+			{
+				const double bMz =
+					(aaForward[ionIndex] + Proton * charge) / charge;
+				const double yMz =
+					(aaReverse[ionIndex] + Proton * charge) / charge;
+				bMatches[ionIndex] =
+					bMatches[ionIndex] ||
+					matchB(ionIndex, charge, bMz);
+				yMatches[ionIndex] =
+					yMatches[ionIndex] ||
+					matchY(ionIndex, charge, yMz);
+			}
 		}
 	}
 

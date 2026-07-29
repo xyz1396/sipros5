@@ -81,7 +81,9 @@ citation:
         parser.add_argument('-e', '--element', required=False,
                             help="SIP isotope: C13, H2, N15, O18, or S34. Do not provide this flag for regular search")
         parser.add_argument('-r', '--range', required=False,
-                            help="SIP label range, e.g., 0-100. Don't provide this flag for regular search")
+                            help=("SIP label percentage, range, or comma-separated "
+                                  "list, e.g., 50, 49-51, or 1,2,3,49,50,51. "
+                                  "Don't provide this flag for regular search"))
         parser.add_argument('-p', '--precision', required=False,
                             help="SIP label precision in percentage, e.g., 1. Don't provide this flag for regular search")
         parser.add_argument('--psm-tsv', required=False,
@@ -96,6 +98,10 @@ citation:
                             type=int, default=6,
                             help=("Raxport isotope-envelope apex m/z values selected per MSn scan "
                                   "before charge expansion (default: 6; consider 15 for DIA)"))
+        parser.add_argument('--product-top-isotopes', required=False,
+                            type=int, default=5,
+                            help=("Theoretical isotope peaks retained for each "
+                                  "predicted SIP product ion (default: 5)"))
         parser.add_argument('-t', '--thread', required=False, type=int, default=0,
                             help=("Total CPU-thread budget for the whole workflow "
                                   "(default: all CPUs available to this process). "
@@ -137,6 +143,8 @@ citation:
             parser.error('--topN must be a positive integer')
         if args.nPrecursor <= 0:
             parser.error('--nPrecursor must be a positive integer')
+        if args.product_top_isotopes <= 0:
+            parser.error('--product-top-isotopes must be a positive integer')
         if args.max_ptm_count is not None and args.max_ptm_count < 0:
             parser.error('--max-ptm-count must be a non-negative integer')
         
@@ -229,13 +237,21 @@ citation:
                                    value.strip().lower() == "none"
                                    for value in (self.args.fixed_ptm or [])
                                ),
+                               sipIsotope=self.args.element or "",
+                               ptms=self.args.ptm,
+                               fixedPtms=self.args.fixed_ptm,
+                               maxPtmCount=self.args.max_ptm_count,
+                               productTopIsotopes=(
+                                   self.args.product_top_isotopes
+                               ),
+                               quantTopIsotopes=self.args.nPrecursor,
                                spectraPaths=(
                                    [sipros_search.hdf5_paths.get(
                                        name,
                                        sipros_search.expected_hdf5_path(name),
                                    )
                                     for name in sipros_search.base_names]
-                                   if self.args.element == "R" and not spectra_mode
+                                   if not spectra_mode
                                    else None
                                ))
         sipros_filter.run()

@@ -1,6 +1,7 @@
 #include "filter.hpp"
 
 #include <cstdlib>
+#include <cmath>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -46,10 +47,16 @@ void CommandLine::usage(std::ostream& out) {
         << "  --spectrum-model FILE    DIA-NN TorchScript model (default: beside aerith)\n"
         << "  --rt-model FILE          DIA-NN RT TorchScript model (default: beside aerith)\n"
         << "  --no-predicted-rt        Use legacy Aerith RT model instead of DIA-NN RT\n"
+        << "  --sip-isotope NAME       Shift predicted/quant ions for C13,H2,N15,O18,S34\n"
+        << "  --fixed-ptm NAME         Fixed-PTM chemistry used by the FASTA search; repeatable\n"
+        << "  --ptm NAME               Variable-PTM chemistry used by the FASTA search; repeatable\n"
+        << "  --max-ptm-count INT      FASTA-search variable-PTM limit\n"
         << "  --fragment-ppm FLOAT     Fragment matching tolerance (default 20)\n"
+        << "  --product-top-isotopes INT Top SIP isotopes per predicted product ion (default 5)\n"
         << "  --quant-mz-ppm FLOAT     MS1 XIC tolerance (default 10)\n"
         << "  --quant-rt-window FLOAT  MS1 XIC RT window in minutes (default 0.4)\n"
         << "  --quant-min-isotopes INT Minimum isotope traces (default 2)\n"
+        << "  --quant-top-isotopes INT Top theoretical SIP precursor peaks (default 6)\n"
         << "  --quant-min-scans INT    Minimum MS1 scans in a feature (default 3)\n"
         << "  --quant-intensity-mode INT Ion intensity: 0 apex, 1 area, 2 auto (default 2)\n"
         << "  --no-quant-normalization Keep combined intensities on their raw scale\n"
@@ -59,6 +66,10 @@ void CommandLine::usage(std::ostream& out) {
         << "  --mbr-min-correlation FLOAT Minimum overlap-weighted donor correlation (default 0)\n"
         << "  --mbr-ion-fdr FLOAT      Transferred-ion FDR threshold (default 0.01)\n"
         << "  --decoy-prefix TEXT      Target-decoy FASTA prefix (default Decoy_)\n"
+        << "  --protein-reference FILE Existing combined_protein.tsv for SIP PSM mapping\n"
+        << "  --sip-protein-output FILE Native SIP protein/PSM mapping output\n"
+        << "  --negative-control NAME  Input sample basename used as an unlabeled control; comma-separated\n"
+        << "  --label-threshold FLOAT  Minimum MS2 SIP abundance for negative-control filtering (default 2)\n"
         << "  --ignore-pct             Exclude SIP abundance columns from the SVM\n"
         << "  -h, --help               Show this help\n\n"
         << "Outputs per sample are PREFIX_target_psms.tsv, PREFIX_decoy_psms.tsv,\n"
@@ -113,13 +124,17 @@ void CommandLine::validate(const aerith::Config& config, int& exit_status) {
         !(config.train_fdr > 0.0 && config.train_fdr <= 1.0) ||
         config.rt_ridge < 0.0 || config.svm_c_pos <= 0.0 ||
         config.svm_c_neg <= 0.0 || config.fragment_ppm <= 0.0 ||
+        config.product_top_isotopes == 0 ||
         config.quant_mz_ppm <= 0.0 || config.quant_rt_window <= 0.0 ||
-        config.quant_min_isotopes == 0 || config.quant_min_isotopes > 3 ||
+        config.quant_min_isotopes == 0 ||
+        config.quant_top_isotopes == 0 ||
+        config.quant_min_isotopes > config.quant_top_isotopes ||
         config.quant_min_scans == 0 || config.quant_intensity_mode > 2 ||
         config.mbr_rt_window <= 0.0 ||
         config.mbr_top_runs == 0 || config.mbr_min_correlation < -1.0 ||
         config.mbr_min_correlation > 1.0 || config.mbr_ion_fdr <= 0.0 ||
-        config.mbr_ion_fdr > 1.0) {
+        config.mbr_ion_fdr > 1.0 || !std::isfinite(config.label_threshold) ||
+        config.label_threshold < 0.0 || config.label_threshold > 100.0) {
         throw std::runtime_error(
             "FDR thresholds must be in (0,1], SVM costs and fragment ppm positive, "
             "quantification tolerances/minima valid, and RT ridge non-negative");
@@ -128,6 +143,17 @@ void CommandLine::validate(const aerith::Config& config, int& exit_status) {
         (config.database_path.empty() || config.decoy_database_path.empty())) {
         throw std::runtime_error(
             "--protein-output-dir requires --database and --decoy-database");
+    }
+    if (config.protein_reference_path.empty() !=
+        config.sip_protein_output_path.empty()) {
+        throw std::runtime_error(
+            "--protein-reference and --sip-protein-output must be provided together");
+    }
+    if (!config.protein_reference_path.empty() &&
+        !std::filesystem::is_regular_file(config.protein_reference_path)) {
+        throw std::runtime_error(
+            "Protein reference does not exist: " +
+            config.protein_reference_path);
     }
     if (config.assemble_proteins &&
         (config.database_path.empty() != config.decoy_database_path.empty())) {
@@ -142,6 +168,14 @@ void CommandLine::validate(const aerith::Config& config, int& exit_status) {
                     "Protein database does not exist: " + database);
             }
         }
+    }
+    if (!config.negative_control_samples.empty() &&
+        (!paired || config.protein_output_dir.empty() ||
+         !config.assemble_proteins || config.sip_isotope.empty())) {
+        throw std::runtime_error(
+            "--negative-control requires paired target/decoy inputs and "
+            "native SIP protein assembly with --protein-output-dir and "
+            "--sip-isotope");
     }
     exit_status = EXIT_SUCCESS;
 }
@@ -188,8 +222,21 @@ bool CommandLine::parse(
             config.rt_model_path = value("--rt-model");
         } else if (arg == "--no-predicted-rt") {
             config.predict_rt = false;
+        } else if (arg == "--sip-isotope") {
+            config.sip_isotope = value("--sip-isotope");
+        } else if (arg == "--fixed-ptm") {
+            config.fixed_ptm_selectors.push_back(value("--fixed-ptm"));
+        } else if (arg == "--ptm") {
+            config.ptm_selectors.push_back(value("--ptm"));
+        } else if (arg == "--max-ptm-count") {
+            config.max_ptm_count = static_cast<int>(
+                unsigned_number(value("--max-ptm-count"), "--max-ptm-count"));
         } else if (arg == "--fragment-ppm") {
             config.fragment_ppm = number(value("--fragment-ppm"), "--fragment-ppm");
+        } else if (arg == "--product-top-isotopes") {
+            config.product_top_isotopes =
+                unsigned_number(value("--product-top-isotopes"),
+                                "--product-top-isotopes");
         } else if (arg == "--quant-mz-ppm") {
             config.quant_mz_ppm =
                 number(value("--quant-mz-ppm"), "--quant-mz-ppm");
@@ -200,6 +247,10 @@ bool CommandLine::parse(
             config.quant_min_isotopes =
                 unsigned_number(value("--quant-min-isotopes"),
                                 "--quant-min-isotopes");
+        } else if (arg == "--quant-top-isotopes") {
+            config.quant_top_isotopes =
+                unsigned_number(value("--quant-top-isotopes"),
+                                "--quant-top-isotopes");
         } else if (arg == "--quant-min-scans") {
             config.quant_min_scans =
                 unsigned_number(value("--quant-min-scans"),
@@ -226,6 +277,27 @@ bool CommandLine::parse(
                 number(value("--mbr-ion-fdr"), "--mbr-ion-fdr");
         } else if (arg == "--decoy-prefix") {
             config.decoy_prefix = value("--decoy-prefix");
+        } else if (arg == "--protein-reference") {
+            config.protein_reference_path = value("--protein-reference");
+        } else if (arg == "--sip-protein-output") {
+            config.sip_protein_output_path = value("--sip-protein-output");
+        } else if (arg == "--negative-control" ||
+                   arg == "--negative_control") {
+            std::istringstream names(value(arg.c_str()));
+            std::string name;
+            while (std::getline(names, name, ',')) {
+                const auto begin = name.find_first_not_of(" \t\r\n");
+                const auto end = name.find_last_not_of(" \t\r\n");
+                if (begin == std::string::npos) {
+                    throw std::runtime_error(
+                        "Empty sample in " + arg);
+                }
+                config.negative_control_samples.push_back(
+                    name.substr(begin, end - begin + 1));
+            }
+        } else if (arg == "--label-threshold") {
+            config.label_threshold = number(
+                value("--label-threshold"), "--label-threshold");
         } else if (arg == "--ignore-pct") {
             config.ignore_pct = true;
         } else if (arg == "--initial-score") {

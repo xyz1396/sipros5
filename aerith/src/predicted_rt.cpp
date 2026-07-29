@@ -167,13 +167,13 @@ EncodedPeptide encode_peptide(const Psm& psm) {
         if (position < body.size() && modification_symbol(body[position])) {
             modification = body[position++];
         }
-        double numeric_shift = std::numeric_limits<double>::quiet_NaN();
-        numeric_modification(body, position, numeric_shift);
+        double numeric_shift = 0.0;
+        const bool numeric =
+            numeric_modification(body, position, numeric_shift);
         std::int64_t token = residue_token(residue);
         // This is the exact DIA-NN 2.6 dict.txt vocabulary used by rt.d0.pt.
         // Unknown search modifications, including deamidation, are stripped as
         // they are by DIA-NN/MSBooster with --strip-unknown-mods.
-        const bool numeric = std::isfinite(numeric_shift);
         if (residue == 'C' && modification != '(' &&
             (!numeric || close_mass(numeric_shift, 57.0215))) token = 25;
         else if (residue == 'M' &&
@@ -196,6 +196,10 @@ EncodedPeptide encode_peptide(const Psm& psm) {
                                  psm.peptide);
     }
     return encoded;
+}
+
+std::vector<std::int64_t> diann_rt_tokens_for_testing(const Psm& psm) {
+    return encode_peptide(psm).tokens;
 }
 
 std::string token_key(const std::vector<std::int64_t>& tokens) {
@@ -550,7 +554,8 @@ MonotoneCurve select_curve(const std::vector<TrainingPoint>& points) {
             const auto curve = fit_curve(train_x, train_y, bandwidth);
             double mse = 0.0;
             std::size_t count = 0;
-            for (std::size_t i = split; i < points.size(); i += kRegressionSplits) {
+            for (std::size_t i = split; i < points.size();
+                 i += kRegressionSplits) {
                 const double difference =
                     curve(points[i].observed) - points[i].predicted;
                 mse += difference * difference;

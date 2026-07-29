@@ -24,6 +24,7 @@ struct Psm {
     double initial_score = 0.0;
     double retention = 0.0;
     double exp_mass = 0.0;
+    double observed_mass = 0.0;
     double calculated_mass = 0.0;
     double calculated_mz = 0.0;
     std::size_t file_id = 0;
@@ -36,6 +37,9 @@ struct Psm {
     double diff_score = 0.0;
     double mass_error = 0.0;
     double log10_precursor_intensity = 0.0;
+    double ms1_isotopic_abundance = 0.0;
+    double ms2_isotopic_abundance = 0.0;
+    std::string sample_name;
     double quantified_intensity = 0.0;
     double apex_retention = 0.0;
     double retention_start = 0.0;
@@ -114,6 +118,12 @@ public:
     static void add(const Config& config, Dataset& data);
 };
 
+#if defined(AERITH_WITH_TORCH) || defined(AERITH_TEST_WITH_TORCH)
+// Exposes the shared DIA-NN tokenizer to the regression test. Regular and SIP
+// searches both call the same encoder through PredictedRetentionTimeFeature.
+std::vector<std::int64_t> diann_rt_tokens_for_testing(const Psm& psm);
+#endif
+
 class RetentionTimeModel {
 public:
     static RtResult fit(const Dataset& data,
@@ -163,7 +173,8 @@ private:
         const std::string& path, std::size_t file, const Dataset& data,
         const std::vector<double>& scores, const std::vector<double>& q,
         const std::vector<double>& pep,
-        const std::vector<double>& rt_residual, double threshold);
+        const std::vector<double>& rt_residual, double threshold,
+        bool sip_output);
 };
 
 struct QuantificationResult {
@@ -182,6 +193,30 @@ struct ProteinAssemblyResult {
     std::vector<AccelerationTiming> stages;
 };
 
+struct NegativeControlResult {
+    std::size_t candidates = 0;
+    std::size_t input_psms = 0;
+    std::size_t threshold_filtered_psms = 0;
+    std::size_t targets = 0;
+    std::size_t decoys = 0;
+    std::size_t target_ids = 0;
+    std::string output_path;
+    std::string target_output_path;
+    std::string decoy_output_path;
+    std::string protein_output_path;
+    StageTiming timing;
+    std::vector<AccelerationTiming> stages;
+    std::vector<std::string> feature_names;
+    SampleModelSummary model;
+};
+
+class NegativeControlFilter {
+public:
+    static NegativeControlResult run(
+        const Config& config, const Dataset& source,
+        const std::vector<double>& source_q);
+};
+
 class ProteinAssembler {
 public:
     static void sequential_filter(
@@ -192,6 +227,9 @@ public:
         const Config& config, const Dataset& data,
         const std::vector<double>& scores, const std::vector<double>& q,
         const std::vector<double>& pep);
+    static void write_sip_psm_mapping(
+        const Config& config, const Dataset& data,
+        const std::vector<double>& q);
 };
 
 } // namespace aerith

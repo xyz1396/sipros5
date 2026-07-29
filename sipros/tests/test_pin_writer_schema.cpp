@@ -40,7 +40,8 @@ std::vector<std::string> splitTabs(const std::string &line)
 
 void checkPin(const std::filesystem::path &path,
               int expectedRawCount,
-              double expectedFitScore)
+              double expectedFitScore,
+              double expectedObservedMass)
 {
     std::ifstream input(path);
     check(static_cast<bool>(input),
@@ -68,10 +69,14 @@ void checkPin(const std::filesystem::path &path,
     const auto abundanceIt = std::find(
         header.begin(), header.end(),
         "MS1IsotopicAbundances");
+    const auto observedMassIt = std::find(
+        header.begin(), header.end(), "ObservedMass");
     check(rawIt != header.end() &&
               scoreIt == rawIt + 1 &&
               abundanceIt == scoreIt + 1,
           "MS1 raw-count/fit-score columns are missing or misordered");
+    check(observedMassIt != header.end(),
+          "PIN is missing ObservedMass metadata");
 
     const size_t rawIndex = static_cast<size_t>(
         rawIt - header.begin());
@@ -83,6 +88,10 @@ void checkPin(const std::filesystem::path &path,
               std::stod(row[scoreIndex]) -
               expectedFitScore) < 1e-6,
           "PIN changed the MS1 isotope fit score");
+    check(std::fabs(std::stod(row[static_cast<size_t>(
+                            observedMassIt - header.begin())]) -
+                    expectedObservedMass) < 1e-6,
+          "PIN changed the observed precursor mass");
 
     const auto matchedBIt = std::find(
         header.begin(), header.end(), "matchedBIons");
@@ -112,6 +121,7 @@ sipPSM makeClassicPsm()
     psm.fileNames = {"sample"};
     psm.scanNumbers = {42};
     psm.calculatedParentMasses = {1000.0};
+    psm.measuredParentMasses = {999.5};
     psm.retentionTimes = {12.5f};
     psm.ranks = {1};
     psm.parentCharges = {2};
@@ -163,7 +173,7 @@ int main()
 
         PinWriter::writePecorlatorPin(
             classicPath.string(), {makeClassicPsm()}, false);
-        checkPin(classicPath, 1, 0.0);
+        checkPin(classicPath, 1, 0.0, 999.5);
 
         PinWriter::SearchSpectraPinRow spectraRow;
         spectraRow.label = 1;
@@ -171,13 +181,14 @@ int main()
         spectraRow.rank = 1;
         spectraRow.isotopicPeakNumber = 4;
         spectraRow.ms1IsotopeFitScore = 0.75;
+        spectraRow.observedMass = 998.5;
         spectraRow.peptide = "K[PEPTIDE]R";
         spectraRow.proteins = "{protein}";
         check(PinWriter::writeSearchSpectraPin(
                   spectraPath.string(), "sample",
                   {spectraRow}) == 1,
               "search-spectra PIN writer returned no rows");
-        checkPin(spectraPath, 4, 0.75);
+        checkPin(spectraPath, 4, 0.75, 998.5);
 
         std::filesystem::remove(classicPath);
         std::filesystem::remove(spectraPath);

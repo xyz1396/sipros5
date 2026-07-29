@@ -338,7 +338,8 @@ static std::vector<double> parsePctRange(const std::string &rangeSpec, double st
 {
 	if (rangeSpec.empty())
 	{
-		throw std::runtime_error("SIP range is required; use -b <pct|lower-upper>");
+		throw std::runtime_error(
+			"SIP range is required; use -b <pct|lower-upper|list>");
 	}
 	if (!std::isfinite(stepPct) || stepPct <= 0.0)
 	{
@@ -352,41 +353,77 @@ static std::vector<double> parsePctRange(const std::string &rangeSpec, double st
 				"SIP enrichment must be within [0,100]: " + rangeSpec);
 		}
 	};
-	const size_t dash = rangeSpec.find('-');
-	double lower = 0.0;
-	double upper = 0.0;
-	if (dash == std::string::npos)
-	{
-		if (!parseDouble(rangeSpec, lower))
-		{
-			throw std::runtime_error("Invalid SIP pct value: " + rangeSpec);
-		}
-		validatePct(lower);
-		return {lower};
-	}
-	if (!parseDouble(rangeSpec.substr(0, dash), lower) || !parseDouble(rangeSpec.substr(dash + 1), upper))
-	{
-		throw std::runtime_error("Invalid SIP range: " + rangeSpec);
-	}
-	validatePct(lower);
-	validatePct(upper);
-	if (upper < lower)
-	{
-		throw std::runtime_error("SIP range upper bound is lower than the lower bound: " + rangeSpec);
-	}
 	std::vector<double> values;
-	for (int step = 0;; ++step)
+	const auto appendValue = [&](double value)
 	{
-		const double value = lower + static_cast<double>(step) * stepPct;
-		if (value > upper + 1e-9)
+		const auto duplicate = std::find_if(
+			values.begin(), values.end(), [&](double existing)
+			{
+				return std::abs(existing - value) <= 1e-9;
+			});
+		if (duplicate == values.end())
+		{
+			values.push_back(value);
+		}
+	};
+	std::size_t begin = 0;
+	while (begin <= rangeSpec.size())
+	{
+		const auto comma = rangeSpec.find(',', begin);
+		const auto token = TextUtils::trim(rangeSpec.substr(
+			begin, comma == std::string::npos
+				? std::string::npos : comma - begin));
+		if (token.empty())
+		{
+			throw std::runtime_error("Invalid empty SIP range item: " + rangeSpec);
+		}
+		const auto dash = token.find('-');
+		double lower = 0.0;
+		double upper = 0.0;
+		if (dash == std::string::npos)
+		{
+			if (!parseDouble(token, lower))
+			{
+				throw std::runtime_error("Invalid SIP pct value: " + token);
+			}
+			validatePct(lower);
+			appendValue(lower);
+		}
+		else
+		{
+			if (!parseDouble(token.substr(0, dash), lower) ||
+				!parseDouble(token.substr(dash + 1), upper))
+			{
+				throw std::runtime_error("Invalid SIP range: " + token);
+			}
+			validatePct(lower);
+			validatePct(upper);
+			if (upper < lower)
+			{
+				throw std::runtime_error(
+					"SIP range upper bound is lower than the lower bound: " +
+					token);
+			}
+			for (int step = 0;; ++step)
+			{
+				const double value =
+					lower + static_cast<double>(step) * stepPct;
+				if (value > upper + 1e-9)
+				{
+					break;
+				}
+				appendValue(value);
+			}
+			if (values.empty() || std::abs(values.back() - upper) > 1e-6)
+			{
+				appendValue(upper);
+			}
+		}
+		if (comma == std::string::npos)
 		{
 			break;
 		}
-		values.push_back(value);
-	}
-	if (values.empty() || std::abs(values.back() - upper) > 1e-6)
-	{
-		values.push_back(upper);
+		begin = comma + 1;
 	}
 	return values;
 }
@@ -552,7 +589,7 @@ void SiprosSearchRunner::printUsage(std::ostream &out, const std::string &prog)
 	out << "  --precursor-source <mode>    profile policy: Regular=ms1-neighborhood, SIP=raxport-candidates\n";
 	out << "                              Regular MS1 mode uses linked parent +/-2 scans and peak charge\n";
 	out << "  -a <SIP atom/isotope>       SIP isotope: C13, H2, N15, O18, or S34\n";
-	out << "  -b <pct|lower-upper>        SIP percentage or inclusive range\n";
+	out << "  -b <pct|range|list>         SIP percentage, inclusive range, or comma-separated list\n";
 	out << "  -s, --step <pct>            SIP percentage step\n";
 	out << "  --tolerance-ms1 <Da>        parent mass tolerance (default: 0.01 Da)\n";
 	out << "  --tolerance-ms2 <Da>        fragment mass tolerance (default: 0.01 Da)\n";
@@ -797,7 +834,7 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 		if (!args.fragmentIndexCache.empty() ||
 			args.rebuildFragmentIndex)
 		{
-			err << "SIP FASTA search uses only legacy H5 precursor candidates; "
+			err << "SIP FASTA search uses only Raxport HDF5 precursor candidates; "
 				<< "fragment-index options are not allowed\n";
 			return false;
 		}

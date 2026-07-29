@@ -238,8 +238,7 @@ struct PsmRow
 	int precursorCharge = 1;
 	std::string retentionText = "0";
 	double probability = 0.0;
-	double expectation = std::numeric_limits<double>::infinity();
-	double hyperscore = -std::numeric_limits<double>::infinity();
+	double svmScore = -std::numeric_limits<double>::infinity();
 	size_t order = 0;
 };
 
@@ -1032,13 +1031,14 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 	const size_t idxModifiedPeptide = getOptionalColumn(columns, "Modified Peptide");
 	const size_t idxAssignedModifications =
 		getOptionalColumn(columns, "Assigned Modifications");
-	const size_t idxExpectation = getOptionalColumn(columns, "Expectation");
-	const size_t idxHyperscore = getOptionalColumn(columns, "Hyperscore");
+	const size_t idxSvmScore = getRequiredColumn(columns, "SVMscore");
 	const size_t idxMappedProteins = getOptionalColumn(columns, "Mapped Proteins");
 	const size_t idxProteins = getRequiredColumnAny(columns, {"Proteins", "ProteinNames", "proteinNames",
 															  "ProteinName", "proteinName", "Protein", "protein"});
 
-	size_t requiredMax = std::max({idxSpectrum, idxPeptide, idxCharge, idxRetention, idxProbability, idxProteins});
+	size_t requiredMax = std::max({
+		idxSpectrum, idxPeptide, idxCharge, idxRetention,
+		idxProbability, idxSvmScore, idxProteins});
 	if (idxModifiedPeptide != std::string::npos)
 	{
 		requiredMax = std::max(requiredMax, idxModifiedPeptide);
@@ -1096,21 +1096,10 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 			++stats.invalidRows;
 			continue;
 		}
-		if (idxExpectation != std::string::npos && fields.size() > idxExpectation)
+		if (!parseDoubleField(fields[idxSvmScore], row.svmScore))
 		{
-			double value = 0.0;
-			if (parseDoubleField(fields[idxExpectation], value))
-			{
-				row.expectation = value;
-			}
-		}
-		if (idxHyperscore != std::string::npos && fields.size() > idxHyperscore)
-		{
-			double value = 0.0;
-			if (parseDoubleField(fields[idxHyperscore], value))
-			{
-				row.hyperscore = value;
-			}
+			++stats.invalidRows;
+			continue;
 		}
 
 		const std::string modified = (idxModifiedPeptide != std::string::npos && fields.size() > idxModifiedPeptide)
@@ -1171,20 +1160,13 @@ bool isBetterPsm(const PsmRow &candidate, const PsmRow &current)
 	}
 	if (std::abs(candidate.probability - current.probability) <= eps)
 	{
-		if (candidate.expectation < current.expectation - eps)
+		if (candidate.svmScore > current.svmScore + eps)
 		{
 			return true;
 		}
-		if (std::abs(candidate.expectation - current.expectation) <= eps)
+		if (std::abs(candidate.svmScore - current.svmScore) <= eps)
 		{
-			if (candidate.hyperscore > current.hyperscore + eps)
-			{
-				return true;
-			}
-			if (std::abs(candidate.hyperscore - current.hyperscore) <= eps)
-			{
-				return candidate.order < current.order;
-			}
+			return candidate.order < current.order;
 		}
 	}
 	return false;

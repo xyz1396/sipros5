@@ -254,7 +254,7 @@ def main() -> None:
     create_raxport_hdf5(mixed, [1, 2, 3], schema_version=6)
     result = run_sipros(mixed, TMP / "schema6_out")
     assert result.returncode == 0, result.stdout
-    assert "Preprocessing scans: 1" in result.stdout, result.stdout
+    assert "1 MS2 scans" in result.stdout, result.stdout
 
     run_flat_fasta_layout(mixed)
 
@@ -272,7 +272,12 @@ def main() -> None:
         candidates = handle["precursor_candidates"]
         del candidates["isotope_match_count"]
         write_dataset(candidates, "isotope_match_count", [], np.int32)
-    result = run_sipros(malformed, TMP / "malformed_out")
+    result = run_sipros(
+        malformed,
+        TMP / "malformed_out",
+        ["-a", "C13", "-b", "50", "-s", "1",
+         "--precursor-source", "raxport-candidates"],
+    )
     assert result.returncode != 0, result.stdout
     assert "precursor-candidate datasets have inconsistent lengths" in result.stdout, result.stdout
 

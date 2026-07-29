@@ -1,4 +1,5 @@
 #include "pipeline.hpp"
+#include "isotope.hpp"
 #include "quantification.hpp"
 
 #include <algorithm>
@@ -83,7 +84,7 @@ double summed_intensity(const IonIntensityMap& intensities) {
 }
 
 double summed_isotope_apex_intensity(
-    const std::array<double, 3>& isotope_apices) {
+    const std::vector<double>& isotope_apices) {
     // Automatic conventional-LC intensity sums the background-corrected
     // apex-1/apex/apex+1 signal over the traced isotope envelope. Integrated
     // chromatographic area remains available explicitly as intensity mode 1.
@@ -652,7 +653,7 @@ QuantPeak trace_peak(
 
 struct ResampledChromatogram {
     std::vector<double> retention;
-    std::array<std::vector<double>, 3> isotope;
+    std::vector<std::vector<double>> isotope;
 };
 
 ResampledChromatogram resample_chromatogram(
@@ -660,6 +661,7 @@ ResampledChromatogram resample_chromatogram(
     const std::vector<std::vector<double>>& isotope) {
     ResampledChromatogram result;
     if (isotope.empty() || isotope.front().empty()) return result;
+    result.isotope.resize(isotope.size());
     const std::size_t count = isotope.front().size();
     if (count == 1) {
         result.retention.push_back(scans[offset].retention);
@@ -954,7 +956,36 @@ void quantify_psm(
          static_cast<double>(psm.charge) * kQuantProton) /
         static_cast<double>(psm.charge);
     psm.calculated_mz = unshifted_mz;
-    const double precursor_mz = unshifted_mz + mz_shift;
+    struct QuantTheoreticalPeak {
+        double mz = 0.0;
+        double probability = 0.0;
+    };
+    std::vector<QuantTheoreticalPeak> theoretical_peaks;
+    if (sip_isotope_model_enabled()) {
+        const auto peaks = precursor_isotope_peaks(
+            psm.peptide, psm.ms2_isotopic_abundance,
+            config.quant_top_isotopes);
+        theoretical_peaks.reserve(peaks.size());
+        for (const auto& peak : peaks) {
+            theoretical_peaks.push_back({
+                (peak.neutral_mass +
+                 static_cast<double>(psm.charge) * kQuantProton) /
+                    static_cast<double>(psm.charge) +
+                    mz_shift,
+                peak.probability});
+        }
+    } else {
+        const double precursor_mz = unshifted_mz + mz_shift;
+        const double lambda =
+            std::max(0.05, psm.calculated_mass * 0.00049);
+        theoretical_peaks = {
+            {precursor_mz, 1.0},
+            {precursor_mz + kC13Spacing /
+                static_cast<double>(psm.charge), lambda},
+            {precursor_mz + 2.0 * kC13Spacing /
+                static_cast<double>(psm.charge),
+             0.5 * lambda * lambda}};
+    }
     const double active_window =
         rt_window > 0.0 ? rt_window : config.quant_rt_window;
     // MBR uses a narrow aligned target region for apex selection, but peak
@@ -983,30 +1014,31 @@ void quantify_psm(
     const auto count =
         static_cast<std::size_t>(std::distance(first, last));
     std::vector<std::vector<double>> isotope(
-        3, std::vector<double>(count, 0.0));
-    std::vector<double> mono_mz(count, 0.0);
+        theoretical_peaks.size(), std::vector<double>(count, 0.0));
+    std::vector<double> anchor_mz(count, 0.0);
     for (std::size_t scan = 0; scan < count; ++scan) {
         for (std::size_t mass = 0; mass < isotope.size(); ++mass) {
-            const double target = precursor_mz +
-                static_cast<double>(mass) * kC13Spacing /
-                    static_cast<double>(psm.charge);
             const auto peak = trace_peak(
-                ms1, ms1.scans[offset + scan], target,
+                ms1, ms1.scans[offset + scan],
+                theoretical_peaks[mass].mz,
                 config.quant_mz_ppm);
             isotope[mass][scan] = peak.intensity;
-            if (mass == 0) mono_mz[scan] = peak.mz;
+            if (mass == 0) anchor_mz[scan] = peak.mz;
         }
     }
     const auto chromatogram =
         resample_chromatogram(ms1.scans, offset, isotope);
     if (chromatogram.retention.empty()) return;
 
-    const double lambda = std::max(0.05, psm.calculated_mass * 0.00049);
-    std::array<double, 3> theoretical{
-        1.0, lambda, 0.5 * lambda * lambda};
-    // Anchor reported feature geometry to the monoisotopic trace across the
-    // peptide-mass range. Other isotope traces validate the envelope and
-    // contribute intensity without moving the reported apex.
+    std::vector<double> theoretical;
+    theoretical.reserve(theoretical_peaks.size());
+    for (const auto& peak : theoretical_peaks) {
+        theoretical.push_back(peak.probability);
+    }
+    // Regular quantification anchors to M+0. SIP quantification orders the
+    // exact source-aware precursor distribution by probability, so index zero
+    // is the theoretical envelope apex. Other isotope traces validate the
+    // envelope and contribute intensity without moving the reported apex.
     constexpr std::size_t base_isotope = 0;
     const auto anchor_position = std::lower_bound(
         chromatogram.retention.begin(), chromatogram.retention.end(),
@@ -1040,8 +1072,10 @@ void quantify_psm(
         if (chromatogram.isotope[base_isotope][scan] > 0.0) ++traced;
     }
 
-    std::array<double, 3> isotope_totals{};
-    std::array<double, 3> isotope_apices{};
+    std::vector<double> isotope_totals(
+        chromatogram.isotope.size(), 0.0);
+    std::vector<double> isotope_apices(
+        chromatogram.isotope.size(), 0.0);
     for (std::size_t mass = 0;
          mass < chromatogram.isotope.size(); ++mass) {
         ChromatographicPeak peak = base_peak;
@@ -1114,10 +1148,11 @@ void quantify_psm(
     psm.retention_fwhm = interpolated_half_width(
         chromatogram.retention, base_smooth, apex, left, right - 1);
     psm.traced_scans = traced;
-    if (mono_mz[nearest_index] > 0.0) {
+    if (anchor_mz[nearest_index] > 0.0) {
         psm.quant_mass_error_ppm =
-            (mono_mz[nearest_index] - precursor_mz) /
-                precursor_mz * 1e6;
+            (anchor_mz[nearest_index] -
+             theoretical_peaks[base_isotope].mz) /
+                theoretical_peaks[base_isotope].mz * 1e6;
     }
     const double isotope_sum = std::accumulate(
         isotope_totals.begin(), isotope_totals.end(), 0.0);

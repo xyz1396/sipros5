@@ -202,16 +202,6 @@ void appendCandidatePrecursors(MS2Scan *scan,
     }
 }
 
-void addFallbackPrecursorIfNeeded(MS2Scan *scan)
-{
-    if (!scan->iParentChargeStates.empty() || scan->iParentChargeState <= 0 || scan->dParentMZ <= 0.0)
-    {
-        return;
-    }
-    scan->iParentChargeStates.push_back(scan->iParentChargeState);
-    scan->dParentMZs.push_back(scan->dParentMZ);
-}
-
 size_t appendNeighborhoodMs1Precursors(MS2Scan *scan,
                                        const RaxportMs1Data &ms1Data,
                                        int parentScanNumber,
@@ -593,13 +583,7 @@ bool readRaxportHdf5Scans(const std::string &path,
                     }
                 }
             }
-            if (!useMs1Neighborhood)
-            {
-                addFallbackPrecursorIfNeeded(scan.get());
-            }
-            if ((useMs1Neighborhood && scan->iParentChargeStates.empty()) ||
-                (!useMs1Neighborhood && scan->iParentChargeState <= 0 &&
-                 scan->iParentChargeStates.empty()))
+            if (scan->iParentChargeStates.empty())
             {
                 continue;
             }

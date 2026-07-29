@@ -1,4 +1,5 @@
 #include "pipeline.hpp"
+#include "isotope.hpp"
 #include "torch_device.hpp"
 
 #include <algorithm>
@@ -10,8 +11,8 @@
 #include <filesystem>
 #include <limits>
 #include <numeric>
-#include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -74,6 +75,9 @@ struct ParsedPeptide {
 struct Fragment {
     float mz = 0.0f;
     float intensity = 0.0f;
+    char ion_kind = '\0';
+    std::size_t ion_position = 0;
+    int charge = 1;
 };
 
 struct Spectrum {
@@ -190,7 +194,7 @@ const std::unordered_map<std::string, std::int64_t>& diann_dictionary() {
     return dictionary;
 }
 
-std::string spectrum_peptide_body(const std::string& peptide) {
+std::string_view spectrum_peptide_body_view(std::string_view peptide) {
     const auto first_bracket = peptide.find('[');
     const auto last_bracket = peptide.rfind(']');
     if (first_bracket != std::string::npos && last_bracket > first_bracket &&
@@ -204,6 +208,10 @@ std::string spectrum_peptide_body(const std::string& peptide) {
         return peptide.substr(first_dot + 1, last_dot - first_dot - 1);
     }
     return peptide;
+}
+
+std::string spectrum_peptide_body(const std::string& peptide) {
+    return std::string(spectrum_peptide_body_view(peptide));
 }
 
 std::string token_for(char residue, char modification, bool fixed_cam) {
@@ -303,21 +311,32 @@ void merge_close_fragments(std::vector<Fragment>& fragments) {
     fragments.swap(merged);
 }
 
-void preprocess_for_entropy(std::vector<Fragment>& fragments) {
+void preprocess_for_entropy(
+    std::vector<Fragment>& fragments, bool select_top_fragments = true) {
     merge_close_fragments(fragments);
     if (fragments.empty()) return;
     float maximum = 0.0f;
     for (const auto& fragment : fragments) maximum = std::max(maximum, fragment.intensity);
-    const float cutoff = static_cast<float>(kPredictedBasePeakCutoff) * maximum;
-    fragments.erase(std::remove_if(fragments.begin(), fragments.end(), [&](const Fragment& f) {
-        return f.intensity < cutoff;
-    }), fragments.end());
-    if (fragments.size() > kEntropyFragments) {
-        std::nth_element(fragments.begin(), fragments.begin() + kEntropyFragments,
-                         fragments.end(), [](const Fragment& a, const Fragment& b) {
-                             return a.intensity > b.intensity;
-                         });
-        fragments.resize(kEntropyFragments);
+    if (select_top_fragments) {
+        const float cutoff =
+            static_cast<float>(kPredictedBasePeakCutoff) * maximum;
+        fragments.erase(
+            std::remove_if(
+                fragments.begin(), fragments.end(),
+                [&](const Fragment& fragment) {
+                    return fragment.intensity < cutoff;
+                }),
+            fragments.end());
+        if (fragments.size() > kEntropyFragments) {
+            std::nth_element(
+                fragments.begin(),
+                fragments.begin() + kEntropyFragments,
+                fragments.end(),
+                [](const Fragment& left, const Fragment& right) {
+                    return left.intensity > right.intensity;
+                });
+            fragments.resize(kEntropyFragments);
+        }
     }
     maximum = 0.0f;
     for (const auto& fragment : fragments) maximum = std::max(maximum, fragment.intensity);
@@ -331,7 +350,7 @@ void preprocess_for_entropy(std::vector<Fragment>& fragments) {
 
 std::vector<Fragment> predicted_fragments(
     const ParsedPeptide& peptide, const float* values,
-    std::size_t output_columns) {
+    std::size_t output_columns, bool sip_prediction) {
     const std::size_t residues = peptide.residue_masses.size();
     const std::size_t cleavages = residues - 3;
     if (output_columns != 4 * cleavages) {
@@ -357,6 +376,9 @@ std::vector<Fragment> predicted_fragments(
     struct Candidate {
         float mz;
         float raw;
+        char ion_kind;
+        std::size_t ion_position;
+        int charge;
     };
     std::vector<Candidate> candidates;
     candidates.reserve(output_columns);
@@ -376,7 +398,9 @@ std::vector<Fragment> predicted_fragments(
             const double mz =
                 (neutral + fragment_charge * kProton) / fragment_charge;
             if (mz >= kMinFragmentMz && mz <= kMaxFragmentMz) {
-                candidates.push_back({static_cast<float>(mz), raw});
+                candidates.push_back({
+                    static_cast<float>(mz), raw,
+                    y_ion ? 'y' : 'b', number, fragment_charge});
             }
         }
     }
@@ -397,15 +421,80 @@ std::vector<Fragment> predicted_fragments(
     for (const auto& candidate : candidates) {
         const auto packed = static_cast<float>(std::lround(
             candidate.raw / retained_maximum * 60000.0f));
-        fragments.push_back({candidate.mz, packed});
+        fragments.push_back({
+            candidate.mz, packed, candidate.ion_kind,
+            candidate.ion_position, candidate.charge});
     }
-    preprocess_for_entropy(fragments);
+    preprocess_for_entropy(fragments, !sip_prediction);
     return fragments;
+}
+
+std::vector<Fragment> shift_predicted_fragments(
+    const Psm& psm, const std::vector<Fragment>& predicted,
+    std::size_t top_isotopes) {
+    const auto envelopes = product_isotope_envelopes(
+        psm.peptide, psm.ms2_isotopic_abundance);
+    std::vector<Fragment> shifted;
+    shifted.reserve(predicted.size() * 8);
+    for (const auto& fragment : predicted) {
+        const auto& masses = fragment.ion_kind == 'y'
+            ? envelopes.y_mass : envelopes.b_mass;
+        const auto& probabilities = fragment.ion_kind == 'y'
+            ? envelopes.y_probability : envelopes.b_probability;
+        if (fragment.ion_position == 0 ||
+            fragment.ion_position > masses.size() ||
+            fragment.ion_position > probabilities.size()) {
+            continue;
+        }
+        const auto& envelope_mass = masses[fragment.ion_position - 1];
+        const auto& envelope_probability =
+            probabilities[fragment.ion_position - 1];
+        const std::size_t count = std::min(
+            envelope_mass.size(), envelope_probability.size());
+        std::vector<std::size_t> isotope_order(count);
+        std::iota(isotope_order.begin(), isotope_order.end(), 0);
+        std::stable_sort(
+            isotope_order.begin(), isotope_order.end(),
+            [&](std::size_t left, std::size_t right) {
+                return envelope_probability[left] >
+                       envelope_probability[right];
+            });
+        if (isotope_order.size() > top_isotopes) {
+            isotope_order.resize(top_isotopes);
+        }
+        // DIA-NN predicts one intensity per product ion. Renormalize the
+        // selected theoretical probabilities so isotope expansion preserves
+        // that product ion's total predicted intensity.
+        double selected_probability = 0.0;
+        for (const auto isotope : isotope_order) {
+            selected_probability += envelope_probability[isotope];
+        }
+        if (!(selected_probability > 0.0)) continue;
+        for (const auto isotope : isotope_order) {
+            const double relative =
+                envelope_probability[isotope] / selected_probability;
+            const double mz =
+                (envelope_mass[isotope] +
+                 static_cast<double>(fragment.charge) * kProton) /
+                static_cast<double>(fragment.charge);
+            if (mz < kMinFragmentMz || mz > kMaxFragmentMz) continue;
+            shifted.push_back({
+                static_cast<float>(mz),
+                static_cast<float>(fragment.intensity * relative),
+                fragment.ion_kind, fragment.ion_position,
+                fragment.charge});
+        }
+    }
+    // SIP selection is per product ion. Do not apply the conventional
+    // spectrum-wide 1% cutoff or 20-fragment limit after isotope expansion.
+    preprocess_for_entropy(shifted, false);
+    return shifted;
 }
 
 std::unordered_map<std::string, std::vector<Fragment>> predict_fragments(
     const std::filesystem::path& model_path, const Dataset& data,
     std::string& selected_device) {
+    const bool sip_prediction = sip_isotope_model_enabled();
     const auto& dictionary = diann_dictionary();
     std::unordered_map<std::string, ParsedPeptide> unique;
     unique.reserve(data.rows.size() / 2);
@@ -468,7 +557,7 @@ std::unordered_map<std::string, std::vector<Fragment>> predict_fragments(
                         batch_predictions[local] = predicted_fragments(
                             *group[begin + local],
                             values + local * output_columns,
-                            output_columns);
+                            output_columns, sip_prediction);
                     } catch (...) {
                         #pragma omp critical(aerith_spectrum_prediction_failure)
                         if (!failure) failure = std::current_exception();
@@ -654,34 +743,123 @@ void SpectralEntropyFeature::add(const Config& config, Dataset& data) {
         rows_by_file[data.rows[i].file_id].push_back(i);
     }
     for (std::size_t file = 0; file < config.spectrum_paths.size(); ++file) {
+        auto& file_rows = rows_by_file[file];
         std::unordered_set<std::uint64_t> requested;
-        requested.reserve(rows_by_file[file].size());
-        for (const auto index : rows_by_file[file]) {
+        requested.reserve(file_rows.size());
+        for (const auto index : file_rows) {
             requested.insert(data.rows[index].scan);
         }
         const auto spectra = load_spectra(config.spectrum_paths[file], requested);
         std::exception_ptr failure;
-        #pragma omp parallel for schedule(dynamic, 512)
-        for (std::ptrdiff_t index = 0;
-             index < static_cast<std::ptrdiff_t>(rows_by_file[file].size()); ++index) {
-            try {
-                auto& row = data.rows[
-                    rows_by_file[file][static_cast<std::size_t>(index)]];
-                const std::string key = spectrum_peptide_body(row.peptide) + '\x1f' +
-                                        std::to_string(row.charge);
-                const auto prediction = predictions.find(key);
-                const auto spectrum = spectra.find(row.scan);
-                if (prediction == predictions.end()) {
-                    throw std::runtime_error("Missing DIA-NN prediction for " + row.peptide);
+        if (sip_isotope_model_enabled()) {
+            // A SIP prediction can contain hundreds of isotope-expanded
+            // fragments. Retaining one for every peptide/charge/label key made
+            // this workload hold roughly two million large vectors at once.
+            // Group equal keys using only row indices, construct one expanded
+            // prediction per group, score every PSM in that group, and release
+            // the fragments immediately.
+            std::sort(
+                file_rows.begin(), file_rows.end(),
+                [&](std::size_t left, std::size_t right) {
+                    const auto& a = data.rows[left];
+                    const auto& b = data.rows[right];
+                    const auto a_body =
+                        spectrum_peptide_body_view(a.peptide);
+                    const auto b_body =
+                        spectrum_peptide_body_view(b.peptide);
+                    if (a_body != b_body) return a_body < b_body;
+                    if (a.charge != b.charge) return a.charge < b.charge;
+                    return a.ms2_isotopic_abundance <
+                           b.ms2_isotopic_abundance;
+                });
+            const auto same_prediction = [&](std::size_t left,
+                                             std::size_t right) {
+                const auto& a = data.rows[left];
+                const auto& b = data.rows[right];
+                return a.charge == b.charge &&
+                    a.ms2_isotopic_abundance ==
+                        b.ms2_isotopic_abundance &&
+                    spectrum_peptide_body_view(a.peptide) ==
+                        spectrum_peptide_body_view(b.peptide);
+            };
+            std::vector<std::size_t> group_starts;
+            group_starts.reserve(file_rows.size() / 2 + 2);
+            group_starts.push_back(0);
+            for (std::size_t position = 1;
+                 position < file_rows.size(); ++position) {
+                if (!same_prediction(
+                        file_rows[position - 1], file_rows[position])) {
+                    group_starts.push_back(position);
                 }
-                const float score = spectrum == spectra.end()
-                    ? 0.0f
-                    : entropy_similarity(prediction->second, spectrum->second,
-                                         config.fragment_ppm);
-                row.features.push_back(score);
-            } catch (...) {
-                #pragma omp critical(aerith_entropy_failure)
-                if (!failure) failure = std::current_exception();
+            }
+            group_starts.push_back(file_rows.size());
+
+            #pragma omp parallel for schedule(dynamic, 64)
+            for (std::ptrdiff_t task = 0;
+                 task < static_cast<std::ptrdiff_t>(
+                     group_starts.size() - 1); ++task) {
+                try {
+                    const std::size_t begin =
+                        group_starts[static_cast<std::size_t>(task)];
+                    const std::size_t end =
+                        group_starts[static_cast<std::size_t>(task) + 1];
+                    const auto& exemplar = data.rows[file_rows[begin]];
+                    const std::string key =
+                        spectrum_peptide_body(exemplar.peptide) + '\x1f' +
+                        std::to_string(exemplar.charge);
+                    const auto base = predictions.find(key);
+                    if (base == predictions.end()) {
+                        throw std::runtime_error(
+                            "Missing DIA-NN prediction for " +
+                            exemplar.peptide);
+                    }
+                    const auto shifted = shift_predicted_fragments(
+                        exemplar, base->second,
+                        config.product_top_isotopes);
+                    for (std::size_t position = begin;
+                         position < end; ++position) {
+                        auto& row = data.rows[file_rows[position]];
+                        const auto spectrum = spectra.find(row.scan);
+                        const float score = spectrum == spectra.end()
+                            ? 0.0f
+                            : entropy_similarity(
+                                  shifted, spectrum->second,
+                                  config.fragment_ppm);
+                        row.features.push_back(score);
+                    }
+                } catch (...) {
+                    #pragma omp critical(aerith_entropy_failure)
+                    if (!failure) failure = std::current_exception();
+                }
+            }
+        } else {
+            #pragma omp parallel for schedule(dynamic, 512)
+            for (std::ptrdiff_t index = 0;
+                 index < static_cast<std::ptrdiff_t>(
+                     file_rows.size()); ++index) {
+                try {
+                    auto& row = data.rows[
+                        file_rows[static_cast<std::size_t>(index)]];
+                    const auto spectrum = spectra.find(row.scan);
+                    const std::string key =
+                        spectrum_peptide_body(row.peptide) + '\x1f' +
+                        std::to_string(row.charge);
+                    const auto prediction = predictions.find(key);
+                    if (prediction == predictions.end()) {
+                        throw std::runtime_error(
+                            "Missing DIA-NN prediction for " +
+                            row.peptide);
+                    }
+                    const float score = spectrum == spectra.end()
+                        ? 0.0f
+                        : entropy_similarity(
+                              prediction->second, spectrum->second,
+                              config.fragment_ppm);
+                    row.features.push_back(score);
+                } catch (...) {
+                    #pragma omp critical(aerith_entropy_failure)
+                    if (!failure) failure = std::current_exception();
+                }
             }
         }
         if (failure) std::rethrow_exception(failure);

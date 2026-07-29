@@ -88,6 +88,7 @@ Dataset PinReader::read_file(const Config& config, const std::string& input_path
     const auto proteins_col = required_column(columns, "Proteins");
     const auto rt_col = required_column(columns, "retentiontime");
     const auto mass_col = required_column(columns, "ExpMass");
+    const auto observed_mass_col = required_column(columns, "ObservedMass");
     const auto initial_col = required_column(columns, config.initial_score);
     const auto merge_col = required_column(columns, "WDPscores");
     const auto rank_col = required_column(columns, "ranks");
@@ -97,9 +98,13 @@ Dataset PinReader::read_file(const Config& config, const std::string& input_path
     const auto ptm_col = columns.find("PTMnumbers");
     const auto mass_error_col = columns.find("massErrors");
     const auto intensity_col = columns.find("log10_precursorIntensities");
+    const auto ms1_abundance_col = columns.find("MS1IsotopicAbundances");
+    const auto ms2_abundance_col = columns.find("MS2IsotopicAbundances");
+    const auto sample_name_col = columns.find("SampleName");
 
     const std::unordered_set<std::string> excluded{
         "SpecId", "Label", "ScanNr", "retentiontime", "ExpMass",
+        "ObservedMass",
         "Peptide", "Proteins", "SampleName"};
     std::vector<std::size_t> numeric_columns;
     Dataset data;
@@ -153,6 +158,8 @@ Dataset PinReader::read_file(const Config& config, const std::string& input_path
         }
         row.retention = parse_number(fields[rt_col], "retentiontime", line_number);
         row.exp_mass = parse_number(fields[mass_col], "ExpMass", line_number);
+        row.observed_mass = parse_number(
+            fields[observed_mass_col], "ObservedMass", line_number);
         row.file_id = file_id;
         row.scan = static_cast<std::uint64_t>(
             parse_number(fields[scan_col], "ScanNr", line_number));
@@ -187,7 +194,26 @@ Dataset PinReader::read_file(const Config& config, const std::string& input_path
                 fields[intensity_col->second], "log10_precursorIntensities",
                 line_number);
         }
-        row.features.reserve(numeric_columns.size());
+        if (ms1_abundance_col != columns.end()) {
+            row.ms1_isotopic_abundance = parse_number(
+                fields[ms1_abundance_col->second],
+                "MS1IsotopicAbundances", line_number);
+        }
+        if (ms2_abundance_col != columns.end()) {
+            row.ms2_isotopic_abundance = parse_number(
+                fields[ms2_abundance_col->second],
+                "MS2IsotopicAbundances", line_number);
+        }
+        if (sample_name_col != columns.end()) {
+            row.sample_name = std::string(fields[sample_name_col->second]);
+        }
+        // Generated spectrum-entropy and RT features are appended in place.
+        // Reserve their slots now so millions of small feature vectors do not
+        // grow geometrically from N to 2N elements later in the pipeline.
+        row.features.reserve(
+            numeric_columns.size() +
+            (!config.spectrum_paths.empty() ? 1u : 0u) +
+            (config.predict_rt ? 1u : 0u));
         for (const auto column : numeric_columns) {
             row.features.push_back(static_cast<float>(
                 parse_number(fields[column], headers[column], line_number)));
@@ -225,6 +251,9 @@ Dataset PinReader::read(const Config& config) {
         }
     }
     if (failure) std::rethrow_exception(failure);
+    std::size_t combined_rows = 0;
+    for (const auto& part : parts) combined_rows += part.rows.size();
+    combined.rows.reserve(combined_rows);
     for (std::size_t file_id = 0; file_id < samples; ++file_id) {
         combined.input_paths[file_id] = paired
             ? config.target_pins[file_id] + " + " + config.decoy_pins[file_id]
@@ -244,6 +273,10 @@ Dataset PinReader::read(const Config& config) {
         for (auto& row : part.rows) {
             combined.rows.push_back(std::move(row));
         }
+        // A moved-from Psm still occupies the full, relatively large Psm
+        // object in the part vector. Release each part as soon as it has been
+        // merged instead of retaining a second row-object array until return.
+        std::vector<Psm>().swap(part.rows);
     }
     // A decoy whose naked peptide is also observed as a target is not valid
     // null evidence.  Remove these collisions before joint scan ranking, SVM

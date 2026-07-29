@@ -96,7 +96,7 @@ int main()
 		require(!parse({"sipros search-fasta", "-fasta", "target.fasta",
 			"-f", "one.h5", "-a", "C13", "-b", "1-5", "-s", "1",
 			"--fragment-index-cache", "sip.sfi"}, badSipIndex, error) &&
-			error.find("legacy H5 precursor candidates") != std::string::npos,
+			error.find("Raxport HDF5 precursor candidates") != std::string::npos,
 			"SIP fragment-index conflict was not rejected clearly");
 
 		sipros::DatabaseSearchArguments badRegularSource;

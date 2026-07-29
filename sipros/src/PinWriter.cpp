@@ -40,6 +40,7 @@ std::string formatPsmChunk(const sipPSM &psm,
         ss << (psm.isDecoys[k] ? -1 : 1) << "\t";
         ss << psm.scanNumbers[k] << "\t"
            << psm.calculatedParentMasses[k] << "\t"
+           << psm.measuredParentMasses[k] << "\t"
            << psm.retentionTimes[k] << "\t"
            << psm.ranks[k] << "\t"
            << psm.parentCharges[k] << "\t"
@@ -101,7 +102,7 @@ void PinWriter::writePecorlatorPin(const std::string &fileName, const std::vecto
     setlocale(LC_ALL, "C");
     std::ios_base::sync_with_stdio(false);
     static const char *header =
-        "SpecId\tLabel\tScanNr\tExpMass\tretentiontime\tranks\tparentCharges\t"
+        "SpecId\tLabel\tScanNr\tExpMass\tObservedMass\tretentiontime\tranks\tparentCharges\t"
         "massErrors\tisotopicMassWindowShifts\tmzShiftFromisolationWindowCenters\t"
         "peptideLengths\tmissCleavageSiteNumbers\tPTMnumbers\tisotopicPeakNumbers\t"
         "MS1IsotopeFitScore\tMS1IsotopicAbundances\tMS2IsotopicAbundances\t"
@@ -147,7 +148,7 @@ size_t PinWriter::writeSearchSpectraPin(const std::string &fileName,
                                         const std::vector<SearchSpectraPinRow> &rows)
 {
     static const char *header =
-        "SpecId\tLabel\tScanNr\tExpMass\tretentiontime\tranks\tparentCharges\t"
+        "SpecId\tLabel\tScanNr\tExpMass\tObservedMass\tretentiontime\tranks\tparentCharges\t"
         "massErrors\tisotopicMassWindowShifts\tmzShiftFromisolationWindowCenters\t"
         "peptideLengths\tmissCleavageSiteNumbers\tPTMnumbers\tisotopicPeakNumbers\t"
         "MS1IsotopeFitScore\tMS1IsotopicAbundances\tMS2IsotopicAbundances\t"
@@ -178,6 +179,7 @@ size_t PinWriter::writeSearchSpectraPin(const std::string &fileName,
         pin << row.label << '\t';
         pin << row.scanNumber << '\t';
         pin << row.expMass << '\t';
+        pin << row.observedMass << '\t';
         pin << row.retentionTime << '\t';
         pin << row.rank << '\t';
         pin << row.parentCharge << '\t';

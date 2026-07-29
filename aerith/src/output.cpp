@@ -52,8 +52,16 @@ void ResultWriter::write_original_field(
     const std::vector<std::string_view>& fields, std::size_t column) {
     const auto& name = data.headers[column];
     if (name == "SpecId") stream << psm.id;
+    else if (name == "Label") stream << psm.label;
     else if (name == "ranks") stream << psm.rank;
     else if (name == "diffScores") stream << formatted_number(psm.diff_score);
+    else if (name == "MS1IsotopicAbundances") {
+        stream << formatted_number(psm.ms1_isotopic_abundance);
+    } else if (name == "MS2IsotopicAbundances") {
+        stream << formatted_number(psm.ms2_isotopic_abundance);
+    } else if (name == "SampleName") {
+        stream << psm.sample_name;
+    }
     else stream << fields[column];
 }
 
@@ -82,7 +90,8 @@ void ResultWriter::write_results(
     if (!stream) {
         throw std::runtime_error("Cannot create output: " + path);
     }
-    stream << "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n";
+    stream << "PSMId\tSVMscore\tq-value\tposterior_error_prob"
+           << "\tpeptide\tproteinIds\n";
     auto order = selected_rows(data, file, label);
     std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
         return scores[a] > scores[b];
@@ -99,14 +108,18 @@ void ResultWriter::write_filtered_results(
     const std::string& path, std::size_t file, const Dataset& data,
     const std::vector<double>& scores, const std::vector<double>& q,
     const std::vector<double>& pep, const std::vector<double>& rt_residual,
-    double threshold) {
+    double threshold, bool sip_output) {
     const std::filesystem::path output(path);
     if (output.has_parent_path()) std::filesystem::create_directories(output.parent_path());
     std::ofstream stream(output);
     if (!stream) throw std::runtime_error("Cannot create output: " + path);
-    stream << "PSMId\tscore\tq-value\tposterior_error_prob";
+    stream << "PSMId\tSVMscore\tq-value\tposterior_error_prob";
     for (const auto& header : data.headers) {
-        if (header == "SpecId") continue;
+        if (header == "SpecId" ||
+            (sip_output && (header == "Label" ||
+                            header == "diffScores"))) {
+            continue;
+        }
         if (header == "Peptide") {
             for (const auto& generated : data.generated_feature_names) {
                 if (generated == "delta_RT_loess") continue;
@@ -122,7 +135,7 @@ void ResultWriter::write_filtered_results(
         }
     }
     stream << '\n' << std::setprecision(10);
-    auto rows = selected_rows(data, file);
+    auto rows = selected_rows(data, file, sip_output ? 1 : 0);
     rows.erase(std::remove_if(rows.begin(), rows.end(), [&](std::size_t i) {
         return q[i] > threshold;
     }), rows.end());
@@ -135,7 +148,11 @@ void ResultWriter::write_filtered_results(
         const auto fields = row_fields(data, psm);
         stream << psm.id << '\t' << scores[i] << '\t' << q[i] << '\t' << pep[i];
         for (std::size_t column = 0; column < data.headers.size(); ++column) {
-            if (data.headers[column] == "SpecId") continue;
+            if (data.headers[column] == "SpecId" ||
+                (sip_output && (data.headers[column] == "Label" ||
+                                data.headers[column] == "diffScores"))) {
+                continue;
+            }
             if (data.headers[column] == "Peptide") {
                 const std::size_t first_generated =
                     data.feature_names.size() - data.generated_feature_names.size();
@@ -210,7 +227,8 @@ void ResultWriter::write(
             }
             write_filtered_results(prefix + "_filtered_psms.tsv", file, data,
                                    scores, q, pep, held_out_rt_residuals,
-                                   config.q_threshold);
+                                   config.q_threshold,
+                                   !config.sip_isotope.empty());
         } catch (...) {
             #pragma omp critical(aerith_write_failure)
             if (!failure) failure = std::current_exception();
@@ -223,44 +241,75 @@ void print_summary(std::ostream& output, const Summary& summary) {
     const auto old_flags = output.flags();
     const auto old_precision = output.precision();
     const auto old_fill = output.fill();
+    const auto print_summary_value = [&](
+        const std::string& label, const auto& value,
+        const char* suffix = "") {
+        output << "  " << std::left << std::setw(32) << label
+               << std::right << value << suffix << '\n';
+    };
     output << "Aerith SVM+RT report\n"
            << "========================================================================\n"
            << "Inputs\n";
     for (const auto& path : summary.input_paths) output << "  " << path << '\n';
-    output << "\nDataset\n"
-           << "  Files                         " << summary.files << '\n'
-           << "  Input PSMs                    " << summary.psms << '\n'
-           << "  Targets                       " << summary.targets << '\n'
-           << "  Decoys                        " << summary.decoys << '\n'
-           << "  Removed colliding decoy PSMs  "
-           << summary.removed_decoy_peptide_collisions << '\n'
-           << "  OpenMP threads                " << summary.threads << '\n'
-           << "  Score model                   " << summary.score_model << "\n\n"
-           << "Results\n"
-           << "  Reporting FDR                 "
-           << summary.reporting_fdr * 100.0 << "%\n"
-           << "  Target PSMs                   " << summary.target_ids << '\n'
-           << "  Distinct naked peptides       "
-           << summary.distinct_target_peptides << '\n'
-           << "  Distinct peptide forms        "
-           << summary.distinct_target_peptide_forms << '\n'
-           << "  Distinct PTM peptide forms    "
-           << summary.distinct_target_ptm_peptides << '\n'
-           << "  PSMs carrying PTMs            "
-           << summary.target_ptm_psms << '\n';
+    output << "\nDataset\n";
+    print_summary_value("Files", summary.files);
+    print_summary_value("Input PSMs", summary.psms);
+    print_summary_value("Targets", summary.targets);
+    print_summary_value("Decoys", summary.decoys);
+    print_summary_value(
+        "Removed colliding decoy PSMs",
+        summary.removed_decoy_peptide_collisions);
+    print_summary_value("OpenMP threads", summary.threads);
+    print_summary_value("Score model", summary.score_model);
+
+    output << "\nResults\n";
+    print_summary_value(
+        "Reporting FDR", summary.reporting_fdr * 100.0, "%");
+    print_summary_value("Target PSMs", summary.target_ids);
+    print_summary_value(
+        "Distinct naked peptides", summary.distinct_target_peptides);
+    print_summary_value(
+        "Distinct peptide forms", summary.distinct_target_peptide_forms);
+    print_summary_value(
+        "Distinct PTM peptide forms", summary.distinct_target_ptm_peptides);
+    print_summary_value("PSMs carrying PTMs", summary.target_ptm_psms);
     if (summary.mbr_ions > 0) {
-        output << "  MBR transferred ions          " << summary.mbr_ions << '\n';
+        print_summary_value("MBR transferred ions", summary.mbr_ions);
     }
     if (summary.protein_ids > 0) {
-        output << "  Protein IDs at 1% FDR         " << summary.protein_ids << '\n';
+        print_summary_value("Protein IDs at 1% FDR", summary.protein_ids);
+    }
+    if (summary.negative_control_candidates > 0) {
+        print_summary_value(
+            "SIP-Negative-control threshold",
+            summary.negative_control_label_threshold, "%");
+        print_summary_value(
+            "Primary-filtered target PSMs",
+            summary.negative_control_input_psms);
+        print_summary_value(
+            "PSMs below SIP threshold",
+            summary.negative_control_threshold_filtered_psms);
+        print_summary_value(
+            "SIP-Negative-control candidates",
+            summary.negative_control_candidates);
+        print_summary_value(
+            "SIP-Negative-control targets",
+            summary.negative_control_targets);
+        print_summary_value(
+            "SIP-Negative-control decoys",
+            summary.negative_control_decoys);
+        print_summary_value(
+            "SIP-Negative-control target IDs",
+            summary.negative_control_target_ids);
     }
     output << std::fixed << std::setprecision(6);
     if (summary.used_internal_rt_model) {
-        output << "  RT training targets/fold      " << summary.rt_training_targets << '\n'
-               << "  Held-out RT R2                " << summary.rt_r2 << '\n';
+        print_summary_value(
+            "RT training targets/fold", summary.rt_training_targets);
+        print_summary_value("Held-out RT R2", summary.rt_r2);
     } else {
-        output << "  RT feature source             DIA-NN prediction\n"
-               << "  Aerith internal RT model      skipped\n";
+        print_summary_value("RT feature source", "DIA-NN prediction");
+        print_summary_value("Aerith internal RT model", "skipped");
     }
     output << "\nSample-specific SVM results\n";
     output << std::left << std::setw(30) << "Sample"
@@ -332,25 +381,39 @@ void print_summary(std::ostream& output, const Summary& summary) {
     for (const auto& stage : summary.protein_assembly_stages) {
         print_timing("Protein assembly: " + stage.name, stage.timing);
     }
+    if (summary.negative_control_candidates > 0) {
+        print_timing(
+            "SIP-Negative-control filtering total",
+            summary.negative_control_timing);
+        for (const auto& stage : summary.negative_control_stages) {
+            print_timing("  " + stage.name, stage.timing);
+        }
+    }
     print_timing("Total", summary.total_timing);
     output << "  Overall OpenMP efficiency: "
            << summary.omp_parallel_efficiency * 100.0 << "%\n";
     output << "\nSVM feature weights\n"
            << "  Positive raises the target score; negative lowers it.\n"
            << "  Values are calibrated weights on each fold's standardized scale.\n";
-    for (const auto& sample : summary.sample_models) {
+    const auto print_feature_weights = [&](
+        const std::vector<std::string>& feature_names,
+        const SampleModelSummary& sample,
+        bool print_sample_name = true) {
         const auto mean_weight = [&](std::size_t index) {
             return (sample.feature_weights[0][index] +
                     sample.feature_weights[1][index] +
                     sample.feature_weights[2][index]) / 3.0;
         };
-        std::vector<std::size_t> order(summary.feature_names.size());
+        std::vector<std::size_t> order(feature_names.size());
         std::iota(order.begin(), order.end(), 0);
         std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
             return std::abs(mean_weight(a)) > std::abs(mean_weight(b));
         });
-        output << "\n  Sample: " << sample.name << '\n'
-               << std::left << std::setw(36) << "Feature"
+        output << '\n';
+        if (print_sample_name) {
+            output << "  Sample: " << sample.name << '\n';
+        }
+        output << std::left << std::setw(36) << "Feature"
                << std::right << std::setw(13) << "Mean"
                << std::setw(13) << "Fold 1"
                << std::setw(13) << "Fold 2" << std::setw(13) << "Fold 3" << '\n'
@@ -363,9 +426,24 @@ void print_summary(std::ostream& output, const Summary& summary) {
                    << std::setw(13) << sample.feature_weights[1][index]
                    << std::setw(13) << sample.feature_weights[2][index] << '\n';
         };
-        for (const auto index : order) print_weight(summary.feature_names[index], index);
+        for (const auto index : order) {
+            print_weight(feature_names[index], index);
+        }
         output << std::noshowpos;
-        print_weight("(intercept)", summary.feature_names.size());
+        print_weight("(intercept)", feature_names.size());
+    };
+    for (const auto& sample : summary.sample_models) {
+        print_feature_weights(summary.feature_names, sample);
+    }
+    if (summary.negative_control_candidates > 0) {
+        output
+            << "\nSIP-Negative-control SVM feature weights\n"
+            << "  These weights are fitted during the native in-memory "
+               "secondary control pass.\n";
+        print_feature_weights(
+            summary.negative_control_feature_names,
+            summary.negative_control_model,
+            false);
     }
     output << "\nOutputs\n";
     for (const auto& prefix : summary.output_prefixes) {
@@ -386,6 +464,18 @@ void print_summary(std::ostream& output, const Summary& summary) {
                << "/combined_protein.tsv\n"
                << "  " << summary.protein_output_dir
                << "/combined_protein.fas\n";
+    }
+    if (!summary.negative_control_target_output_path.empty()) {
+        output << "  " << summary.negative_control_target_output_path << '\n';
+    }
+    if (!summary.negative_control_decoy_output_path.empty()) {
+        output << "  " << summary.negative_control_decoy_output_path << '\n';
+    }
+    if (!summary.negative_control_output_path.empty()) {
+        output << "  " << summary.negative_control_output_path << '\n';
+    }
+    if (!summary.negative_control_protein_output_path.empty()) {
+        output << "  " << summary.negative_control_protein_output_path << '\n';
     }
     output.flags(old_flags);
     output.precision(old_precision);

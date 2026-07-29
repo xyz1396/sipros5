@@ -23,6 +23,7 @@ public:
         int32_t matchedYEnvelope = 0;
         int32_t matchedBEnvelope = 0;
         double expMass = 0.0;
+        double observedMass = 0.0;
         double retentionTime = 0.0;
         double massError = 0.0;
         double mzShiftFromIsolationWindowCenter = 0.0;

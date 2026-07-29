@@ -55,7 +55,7 @@ def scores(prefix: Path) -> dict[str, float]:
     for suffix in ("_target_psms.tsv", "_decoy_psms.tsv"):
         with Path(f"{prefix}{suffix}").open(newline="") as stream:
             for row in csv.DictReader(stream, delimiter="\t"):
-                result[row["PSMId"]] = float(row["score"])
+                result[row["PSMId"]] = float(row["SVMscore"])
     return result
 
 

@@ -1,4 +1,5 @@
 #include "filter.hpp"
+#include "isotope.hpp"
 #include "pipeline.hpp"
 
 #include <algorithm>
@@ -7,6 +8,7 @@
 #include <ctime>
 #include <filesystem>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -25,6 +27,215 @@ std::string peptide_form(const std::string& peptide) {
     return peptide;
 }
 
+NegativeControlResult NegativeControlFilter::run(
+    const Config& config, const Dataset& source,
+    const std::vector<double>& source_q) {
+    using Clock = std::chrono::steady_clock;
+    NegativeControlResult result;
+    const auto total_begin = Clock::now();
+    const auto total_cpu_begin = std::clock();
+    const auto record_stage = [&](
+        std::string name, Clock::time_point wall_begin,
+        std::clock_t cpu_begin, bool uses_omp = false) {
+        const auto wall_end = Clock::now();
+        const auto cpu_end = std::clock();
+        result.stages.push_back({
+            std::move(name),
+            {std::chrono::duration<double>(
+                 wall_end - wall_begin).count(),
+             static_cast<double>(cpu_end - cpu_begin) / CLOCKS_PER_SEC},
+            uses_omp,
+            false});
+    };
+    if (source.rows.size() != source_q.size()) {
+        throw std::runtime_error(
+            "Native negative-control filtering received inconsistent PSM arrays");
+    }
+    if (config.negative_control_samples.empty()) return {};
+    if (config.output_prefixes.size() != source.input_paths.size()) {
+        throw std::runtime_error(
+            "Native negative-control filtering requires one output prefix per sample");
+    }
+
+    const auto selection_begin = Clock::now();
+    const auto selection_cpu_begin = std::clock();
+    std::vector<std::string> sample_names;
+    sample_names.reserve(config.output_prefixes.size());
+    std::unordered_map<std::string, std::size_t> sample_indices;
+    for (std::size_t file = 0; file < config.output_prefixes.size(); ++file) {
+        const auto name = std::filesystem::path(
+            config.output_prefixes[file]).filename().string();
+        if (name.empty() || !sample_indices.emplace(name, file).second) {
+            throw std::runtime_error(
+                "Negative-control sample basenames must be nonempty and unique");
+        }
+        sample_names.push_back(name);
+    }
+    std::unordered_set<std::size_t> controls;
+    for (const auto& name : config.negative_control_samples) {
+        const auto found = sample_indices.find(name);
+        if (found == sample_indices.end()) {
+            throw std::runtime_error(
+                "Negative-control sample not found in input basenames: " + name);
+        }
+        controls.insert(found->second);
+    }
+    if (controls.size() == sample_names.size()) {
+        throw std::runtime_error(
+            "At least one non-control sample is required for negative-control filtering");
+    }
+
+    Dataset data;
+    data.input_paths = {"native negative-control PSMs"};
+    data.headers = source.headers;
+    data.columns = source.columns;
+    data.numeric_columns = source.numeric_columns;
+    data.feature_names = source.feature_names;
+    data.generated_feature_names = source.generated_feature_names;
+    data.has_predicted_rt_diagnostics =
+        source.has_predicted_rt_diagnostics;
+    const bool append_sample_name =
+        data.columns.find("SampleName") == data.columns.end();
+    if (append_sample_name) {
+        data.columns.emplace("SampleName", data.headers.size());
+        data.headers.push_back("SampleName");
+    }
+    for (std::size_t row = 0; row < source.rows.size(); ++row) {
+        const auto& psm = source.rows[row];
+        if (psm.label != 1 || source_q[row] > config.q_threshold ||
+            psm.file_id >= sample_names.size()) {
+            continue;
+        }
+        ++result.input_psms;
+        if (psm.ms2_isotopic_abundance < config.label_threshold) {
+            ++result.threshold_filtered_psms;
+            continue;
+        }
+        data.rows.push_back(psm);
+        auto& selected = data.rows.back();
+        selected.sample_name = sample_names[psm.file_id];
+        selected.label = controls.count(psm.file_id) == 0 ? 1 : -1;
+        selected.file_id = 0;
+        selected.ms1_isotopic_abundance =
+            std::clamp(selected.ms1_isotopic_abundance, 0.0, 100.0);
+        if (append_sample_name) {
+            selected.raw_line += '\t' + selected.sample_name;
+        }
+    }
+    result.candidates = data.rows.size();
+    record_stage(
+        "Select and relabel accepted in-memory PSMs",
+        selection_begin, selection_cpu_begin);
+    if (data.rows.empty()) {
+        throw std::runtime_error(
+            "No accepted SIP PSMs meet the negative-control label threshold");
+    }
+
+    for (const auto& psm : data.rows) {
+        psm.label == 1 ? ++result.targets : ++result.decoys;
+    }
+    if (result.targets == 0 || result.decoys == 0) {
+        throw std::runtime_error(
+            "Native negative-control filtering requires target and control PSMs "
+            "after primary target/decoy filtering");
+    }
+
+    const auto rt_feature = std::find(
+        data.feature_names.begin(), data.feature_names.end(),
+        "delta_RT_loess");
+    if (rt_feature == data.feature_names.end()) {
+        throw std::runtime_error(
+            "Native negative-control filtering requires the primary "
+            "delta_RT_loess feature; RT recomputation is disabled");
+    }
+
+    const auto fold_begin = Clock::now();
+    const auto fold_cpu_begin = std::clock();
+    std::vector<int> labels;
+    labels.reserve(data.rows.size());
+    for (const auto& psm : data.rows) {
+        labels.push_back(psm.label);
+    }
+    const auto outer_folds = SvmRescorer::assign_folds(data);
+    record_stage(
+        "Assign SIP-Negative-control folds",
+        fold_begin, fold_cpu_begin, true);
+    RtResult rt;
+    const auto svm_begin = Clock::now();
+    const auto svm_cpu_begin = std::clock();
+    auto fitted = SvmRescorer::fit(
+        data, rt.residuals, outer_folds, config.train_fdr,
+        config.max_iterations, config.svm_c_pos, config.svm_c_neg);
+    auto scores = std::move(fitted.scores);
+    record_stage(
+        "Fit and score SIP-Negative-control SVM folds",
+        svm_begin, svm_cpu_begin, true);
+    const auto statistics_begin = Clock::now();
+    const auto statistics_cpu_begin = std::clock();
+    double pi0 = 1.0;
+    const auto q = mixmax_qvalues(scores, labels, &pi0);
+    const auto pep =
+        SvmRescorer::local_error_probabilities(scores, labels);
+    std::unordered_set<std::string> accepted_peptides;
+    for (std::size_t row = 0; row < data.rows.size(); ++row) {
+        if (data.rows[row].label == 1 && q[row] <= config.q_threshold) {
+            ++result.target_ids;
+            accepted_peptides.insert(
+                stripped_peptide(data.rows[row].peptide));
+        }
+    }
+    result.feature_names = data.feature_names;
+    result.model.name = "SIP-Negative-control";
+    result.model.psms = data.rows.size();
+    result.model.target_ids = result.target_ids;
+    result.model.distinct_target_peptides = accepted_peptides.size();
+    result.model.pi0 = pi0;
+    result.model.score_iterations = fitted.iterations.at(0);
+    result.model.feature_weights =
+        std::move(fitted.calibrated_weights.at(0));
+    record_stage(
+        "Compute SIP-Negative-control q-values and PEPs",
+        statistics_begin, statistics_cpu_begin);
+
+    const auto write_begin = Clock::now();
+    const auto write_cpu_begin = std::clock();
+    const std::filesystem::path output_dir(config.protein_output_dir);
+    Config output_config = config;
+    output_config.inputs.clear();
+    output_config.target_pins.clear();
+    output_config.decoy_pins.clear();
+    output_config.spectrum_paths.clear();
+    output_config.output_prefixes = {(output_dir / "SIP").string()};
+    output_config.filtered_only = false;
+    output_config.assemble_proteins = false;
+    output_config.protein_reference_path =
+        (output_dir / "combined_protein.tsv").string();
+    output_config.sip_protein_output_path =
+        (output_dir / "combined_protein_with_SIP_filtered_PSM.tsv").string();
+    ResultWriter::write(
+        output_config, data, scores, q, pep, rt, outer_folds);
+    ProteinAssembler::write_sip_psm_mapping(
+        output_config, data, q);
+    result.output_path =
+        output_config.output_prefixes.front() + "_filtered_psms.tsv";
+    result.target_output_path =
+        output_config.output_prefixes.front() + "_target_psms.tsv";
+    result.decoy_output_path =
+        output_config.output_prefixes.front() + "_decoy_psms.tsv";
+    result.protein_output_path =
+        output_config.sip_protein_output_path;
+    record_stage(
+        "Write native SIP-Negative-control reports",
+        write_begin, write_cpu_begin, true);
+    const auto total_end = Clock::now();
+    const auto total_cpu_end = std::clock();
+    result.timing = {
+        std::chrono::duration<double>(total_end - total_begin).count(),
+        static_cast<double>(total_cpu_end - total_cpu_begin) /
+            CLOCKS_PER_SEC};
+    return result;
+}
+
 Summary run(const Config& config) {
     using Clock = std::chrono::steady_clock;
     const auto elapsed_seconds = [](Clock::time_point begin, Clock::time_point end) {
@@ -38,6 +249,7 @@ Summary run(const Config& config) {
     const auto read_begin = Clock::now();
     const std::clock_t read_cpu_begin = std::clock();
     auto data = PinReader::read(config);
+    initialize_sip_isotope_model(config);
     const std::clock_t read_cpu_end = std::clock();
     const auto read_end = Clock::now();
 
@@ -219,6 +431,9 @@ Summary run(const Config& config) {
     const auto write_begin = Clock::now();
     const std::clock_t write_cpu_begin = std::clock();
     ResultWriter::write(config, data, scores, q, pep, rt, outer_folds);
+    if (!config.sip_protein_output_path.empty()) {
+        ProteinAssembler::write_sip_psm_mapping(config, data, q);
+    }
     const std::clock_t write_cpu_end = std::clock();
     const auto write_end = Clock::now();
 
@@ -234,6 +449,32 @@ Summary run(const Config& config) {
     }
     const std::clock_t protein_cpu_end = std::clock();
     const auto protein_end = Clock::now();
+    if (!config.negative_control_samples.empty()) {
+        const auto negative =
+            NegativeControlFilter::run(config, data, q);
+        summary.negative_control_candidates = negative.candidates;
+        summary.negative_control_input_psms = negative.input_psms;
+        summary.negative_control_threshold_filtered_psms =
+            negative.threshold_filtered_psms;
+        summary.negative_control_targets = negative.targets;
+        summary.negative_control_decoys = negative.decoys;
+        summary.negative_control_target_ids = negative.target_ids;
+        summary.negative_control_label_threshold =
+            config.label_threshold;
+        summary.negative_control_output_path = negative.output_path;
+        summary.negative_control_target_output_path =
+            negative.target_output_path;
+        summary.negative_control_decoy_output_path =
+            negative.decoy_output_path;
+        summary.negative_control_protein_output_path =
+            negative.protein_output_path;
+        summary.negative_control_timing = negative.timing;
+        summary.negative_control_stages = negative.stages;
+        summary.negative_control_feature_names =
+            negative.feature_names;
+        summary.negative_control_model = negative.model;
+    }
+    const auto completion_end = Clock::now();
     const std::clock_t cpu_end = std::clock();
 
     summary.read_timing = {
@@ -268,7 +509,7 @@ Summary run(const Config& config) {
         elapsed_seconds(protein_begin, protein_end),
         cpu_seconds(protein_cpu_begin, protein_cpu_end)};
     summary.total_timing = {
-        elapsed_seconds(total_begin, protein_end),
+        elapsed_seconds(total_begin, completion_end),
         cpu_seconds(cpu_begin, cpu_end)};
     if (summary.total_timing.wall_seconds > 0.0) {
         summary.omp_speedup_ratio =
