@@ -46,6 +46,9 @@ void CommandLine::usage(std::ostream& out) {
         << "  --spectra FILE           Raxport HDF5 MS2 file; repeat once per sample\n"
         << "  --spectrum-model FILE    DIA-NN TorchScript model (default: beside aerith)\n"
         << "  --rt-model FILE          DIA-NN RT TorchScript model (default: beside aerith)\n"
+        << "  --prediction-cache FILE  Reuse/save generated spectrum and RT features\n"
+        << "  --no-streaming           Keep all sample PSMs in RAM (diagnostic)\n"
+        << "  --sample-parallelism INT Concurrent streamed samples (default 3; raises RAM)\n"
         << "  --no-predicted-rt        Use legacy Aerith RT model instead of DIA-NN RT\n"
         << "  --sip-isotope NAME       Shift predicted/quant ions for C13,H2,N15,O18,S34\n"
         << "  --fixed-ptm NAME         Fixed-PTM chemistry used by the FASTA search; repeatable\n"
@@ -65,6 +68,7 @@ void CommandLine::usage(std::ostream& out) {
         << "  --mbr-top-runs INT       Maximum donor runs per acceptor (default 10)\n"
         << "  --mbr-min-correlation FLOAT Minimum overlap-weighted donor correlation (default 0)\n"
         << "  --mbr-ion-fdr FLOAT      Transferred-ion FDR threshold (default 0.01)\n"
+        << "  --mbr-sip-bin-width FLOAT SIP abundance-bin width in percent (default 10)\n"
         << "  --decoy-prefix TEXT      Target-decoy FASTA prefix (default Decoy_)\n"
         << "  --protein-reference FILE Existing combined_protein.tsv for SIP PSM mapping\n"
         << "  --sip-protein-output FILE Native SIP protein/PSM mapping output\n"
@@ -120,6 +124,10 @@ void CommandLine::validate(const aerith::Config& config, int& exit_status) {
         throw std::runtime_error(
             "Use one aggregate --output-prefix or repeat it once per --input");
     }
+    if (config.sample_parallelism == 0) {
+        throw std::runtime_error(
+            "--sample-parallelism must be a positive integer");
+    }
     if (!(config.q_threshold > 0.0 && config.q_threshold <= 1.0) ||
         !(config.train_fdr > 0.0 && config.train_fdr <= 1.0) ||
         config.rt_ridge < 0.0 || config.svm_c_pos <= 0.0 ||
@@ -133,7 +141,11 @@ void CommandLine::validate(const aerith::Config& config, int& exit_status) {
         config.mbr_rt_window <= 0.0 ||
         config.mbr_top_runs == 0 || config.mbr_min_correlation < -1.0 ||
         config.mbr_min_correlation > 1.0 || config.mbr_ion_fdr <= 0.0 ||
-        config.mbr_ion_fdr > 1.0 || !std::isfinite(config.label_threshold) ||
+        config.mbr_ion_fdr > 1.0 ||
+        !std::isfinite(config.mbr_sip_bin_width) ||
+        config.mbr_sip_bin_width <= 0.0 ||
+        config.mbr_sip_bin_width > 100.0 ||
+        !std::isfinite(config.label_threshold) ||
         config.label_threshold < 0.0 || config.label_threshold > 100.0) {
         throw std::runtime_error(
             "FDR thresholds must be in (0,1], SVM costs and fragment ppm positive, "
@@ -220,6 +232,13 @@ bool CommandLine::parse(
             config.spectrum_model_path = value("--spectrum-model");
         } else if (arg == "--rt-model") {
             config.rt_model_path = value("--rt-model");
+        } else if (arg == "--prediction-cache") {
+            config.prediction_cache_path = value("--prediction-cache");
+        } else if (arg == "--no-streaming") {
+            config.stream_samples = false;
+        } else if (arg == "--sample-parallelism") {
+            config.sample_parallelism = unsigned_number(
+                value("--sample-parallelism"), "--sample-parallelism");
         } else if (arg == "--no-predicted-rt") {
             config.predict_rt = false;
         } else if (arg == "--sip-isotope") {
@@ -275,6 +294,9 @@ bool CommandLine::parse(
         } else if (arg == "--mbr-ion-fdr") {
             config.mbr_ion_fdr =
                 number(value("--mbr-ion-fdr"), "--mbr-ion-fdr");
+        } else if (arg == "--mbr-sip-bin-width") {
+            config.mbr_sip_bin_width = number(
+                value("--mbr-sip-bin-width"), "--mbr-sip-bin-width");
         } else if (arg == "--decoy-prefix") {
             config.decoy_prefix = value("--decoy-prefix");
         } else if (arg == "--protein-reference") {

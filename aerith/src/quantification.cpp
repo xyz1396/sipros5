@@ -11,11 +11,13 @@
 #include <ctime>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -48,6 +50,9 @@ std::string ion_form(const Psm& psm) {
         ? psm.calculated_mass : psm.exp_mass;
     stream << psm.peptide << '#' << psm.charge << '#'
            << std::fixed << std::setprecision(4) << mass;
+    if (psm.sip_abundance_bin >= 0) {
+        stream << "#sipbin" << psm.sip_abundance_bin;
+    }
     return stream.str();
 }
 
@@ -84,6 +89,12 @@ double summed_intensity(const IonIntensityMap& intensities) {
 }
 
 double summed_isotope_apex_intensity(
+    const std::array<double, 3>& isotope_apices) {
+    return std::accumulate(
+        isotope_apices.begin(), isotope_apices.end(), 0.0);
+}
+
+double summed_isotope_apex_intensity(
     const std::vector<double>& isotope_apices) {
     // Automatic conventional-LC intensity sums the background-corrected
     // apex-1/apex/apex+1 signal over the traced isotope envelope. Integrated
@@ -104,15 +115,20 @@ double quantification_median(std::vector<double> values) {
 }
 
 double quantification_mz_from_ion_key(const std::string& key) {
-    const auto mass_separator = key.rfind('#');
+    const auto sip_separator = key.rfind("#sipbin");
+    const std::string_view base(
+        key.data(), sip_separator == std::string::npos
+            ? key.size() : sip_separator);
+    const auto mass_separator = base.rfind('#');
     if (mass_separator == std::string::npos) return 0.0;
-    const auto charge_separator = key.rfind('#', mass_separator - 1);
+    const auto charge_separator = base.rfind('#', mass_separator - 1);
     if (charge_separator == std::string::npos) return 0.0;
     try {
-        const double mass = std::stod(key.substr(mass_separator + 1));
-        const int charge = std::stoi(key.substr(
+        const double mass = std::stod(std::string(
+            base.substr(mass_separator + 1)));
+        const int charge = std::stoi(std::string(base.substr(
             charge_separator + 1,
-            mass_separator - charge_separator - 1));
+            mass_separator - charge_separator - 1)));
         constexpr double proton = 1.007276466621;
         return charge <= 0 ? 0.0
             : (mass + static_cast<double>(charge) * proton) /
@@ -946,6 +962,9 @@ void quantify_psm(
     psm.traced_scans = 0;
     psm.quant_mass_error_ppm = 0.0;
     psm.quant_isotope_kl = 0.0;
+    psm.quant_isotope_correlation = 0.0;
+    psm.quant_isotope_fraction = 0.0;
+    psm.quant_isotope_apex_spread = 0.0;
     const auto parent = ms1.parent_scans.find(psm.scan);
     if (parent != ms1.parent_scans.end()) psm.parent_scan = parent->second;
     if (psm.charge <= 0 || ms1.scans.empty()) return;
@@ -1076,6 +1095,10 @@ void quantify_psm(
         chromatogram.isotope.size(), 0.0);
     std::vector<double> isotope_apices(
         chromatogram.isotope.size(), 0.0);
+    std::vector<std::size_t> isotope_peak_apex(
+        chromatogram.isotope.size(), apex);
+    std::vector<bool> isotope_detected(
+        chromatogram.isotope.size(), false);
     for (std::size_t mass = 0;
          mass < chromatogram.isotope.size(); ++mass) {
         ChromatographicPeak peak = base_peak;
@@ -1099,6 +1122,8 @@ void quantify_psm(
         if (isotope_totals[mass] > 0.0 ||
             isotope_apices[mass] > 0.0) {
             ++isotope_count;
+            isotope_detected[mass] = true;
+            isotope_peak_apex[mass] = peak.apex;
         }
     }
     if (traced < config.quant_min_scans ||
@@ -1166,6 +1191,55 @@ void quantify_psm(
             std::max(1e-12, theoretical[mass] / theoretical_sum);
         psm.quant_isotope_kl += observed * std::log(observed / expected);
     }
+    psm.quant_isotope_fraction = static_cast<double>(isotope_count) /
+        static_cast<double>(chromatogram.isotope.size());
+    double correlation_sum = 0.0;
+    double apex_spread_sum = 0.0;
+    std::size_t correlation_count = 0;
+    std::size_t apex_count = 0;
+    for (std::size_t mass = 1; mass < chromatogram.isotope.size(); ++mass) {
+        if (!isotope_detected[mass]) continue;
+        double base_mean = 0.0;
+        double isotope_mean = 0.0;
+        const double point_count = static_cast<double>(right - left);
+        for (std::size_t scan = left; scan < right; ++scan) {
+            base_mean += std::log1p(
+                chromatogram.isotope[base_isotope][scan]);
+            isotope_mean += std::log1p(
+                chromatogram.isotope[mass][scan]);
+        }
+        base_mean /= point_count;
+        isotope_mean /= point_count;
+        double covariance = 0.0;
+        double base_square = 0.0;
+        double isotope_square = 0.0;
+        for (std::size_t scan = left; scan < right; ++scan) {
+            const double base_value = std::log1p(
+                chromatogram.isotope[base_isotope][scan]) - base_mean;
+            const double isotope_value = std::log1p(
+                chromatogram.isotope[mass][scan]) - isotope_mean;
+            covariance += base_value * isotope_value;
+            base_square += base_value * base_value;
+            isotope_square += isotope_value * isotope_value;
+        }
+        const double denominator = std::sqrt(base_square * isotope_square);
+        if (denominator > 0.0) {
+            correlation_sum += covariance / denominator;
+            ++correlation_count;
+        }
+        apex_spread_sum += std::abs(
+            chromatogram.retention[isotope_peak_apex[mass]] -
+            chromatogram.retention[apex]) * 60.0;
+        ++apex_count;
+    }
+    if (correlation_count > 0) {
+        psm.quant_isotope_correlation = correlation_sum /
+            static_cast<double>(correlation_count);
+    }
+    if (apex_count > 0) {
+        psm.quant_isotope_apex_spread = apex_spread_sum /
+            static_cast<double>(apex_count);
+    }
     psm.has_chromatographic_feature = true;
 }
 
@@ -1179,9 +1253,34 @@ std::string quant_peptide_body(const std::string& peptide) {
     return peptide;
 }
 
-std::string quant_ion_key(const Psm& psm) {
+int quant_sip_abundance_bin(const Config& config, double abundance) {
+    if (config.sip_isotope.empty()) return -1;
+    const double width = config.mbr_sip_bin_width;
+    const int bin_count = std::max(
+        1, static_cast<int>(std::ceil(100.0 / width)));
+    const double bounded = std::clamp(abundance, 0.0, 100.0);
+    return std::min(
+        bin_count - 1, static_cast<int>(std::floor(bounded / width)));
+}
+
+double quant_sip_bin_center(const Config& config, int bin) {
+    if (config.sip_isotope.empty() || bin < 0) return 0.0;
+    return std::min(
+        100.0, (static_cast<double>(bin) + 0.5) *
+            config.mbr_sip_bin_width);
+}
+
+std::string quant_base_ion_key(const Psm& psm) {
     return quant_peptide_body(psm.peptide) + "#" +
         std::to_string(psm.charge);
+}
+
+std::string quant_ion_key(const Psm& psm) {
+    std::string key = quant_base_ion_key(psm);
+    if (psm.sip_abundance_bin >= 0) {
+        key += "#sipbin" + std::to_string(psm.sip_abundance_bin);
+    }
+    return key;
 }
 
 double quant_median(std::vector<double> values) {
@@ -1278,11 +1377,12 @@ QuantAlignment build_quant_alignment(
         result.donor_rt_delta.emplace_back(
             donor_time, acceptor_time - donor_time);
     }
-    const double overlap = donor_ions.empty() || acceptor_ions.empty()
+    const std::size_t ion_union =
+        donor_ions.size() + acceptor_ions.size() - deltas.size();
+    const double overlap = ion_union == 0
         ? 0.0
         : static_cast<double>(deltas.size()) /
-            static_cast<double>(
-                std::max(donor_ions.size(), acceptor_ions.size()));
+            static_cast<double>(ion_union);
     result.correlation = overlap * 0.5 *
         (quant_spearman(donor_rt, acceptor_rt) +
          quant_spearman(donor_intensity, acceptor_intensity));
@@ -1323,58 +1423,112 @@ struct QuantTransferJob {
     std::size_t donor_row = 0;
     std::size_t acceptor_row = std::numeric_limits<std::size_t>::max();
     double predicted_rt = 0.0;
+    double trace_rt = 0.0;
     double rt_window = 0.0;
 };
+
+using QuantTransferFeatures = std::array<double, 4>;
 
 struct QuantTransferCandidate {
     std::string key;
     Psm psm;
-    std::array<double, 4> features{};
+    QuantTransferFeatures features{};
     double score = 0.0;
+    double probability = 0.0;
     double qvalue = 1.0;
+    double false_prior = 1.0;
+    double decoy_score = std::numeric_limits<double>::quiet_NaN();
+    std::size_t donor_row = 0;
     bool identified = false;
+    bool blocked_by_direct = false;
+    bool selected_bin = false;
     bool has_decoy = false;
-    std::array<double, 4> decoy_features{};
+    double predicted_rt = 0.0;
+    QuantTransferFeatures decoy_features{};
 };
 
-std::array<double, 4> quant_transfer_features(
-    const Psm& psm, double predicted_rt) {
+QuantTransferFeatures quant_transfer_features(
+    const Psm& psm, const Psm& donor, double predicted_rt) {
+    (void)donor;
+    // IonQuant's natural-abundance LDA uses exactly these four transformed
+    // measurements. Aerith stores KL with natural logarithms, so convert it
+    // to IonQuant's base-10 divergence and apply the same 0.01 floor before
+    // the signed square-root transform.
+    const double log_isotope_kl = std::log10(std::max(
+        0.01, psm.quant_isotope_kl / std::log(10.0)));
+    const double isotope_fit = std::copysign(
+        std::sqrt(std::abs(log_isotope_kl)), log_isotope_kl);
     return {
         std::log10(std::max(1.0, psm.quantified_intensity)),
-        std::sqrt(std::abs(std::log10(
-            std::max(1e-12, psm.quant_isotope_kl)))),
+        isotope_fit,
         std::sqrt(std::abs(psm.quant_mass_error_ppm)),
         std::sqrt(std::abs(
             psm.apex_retention / 60.0 - predicted_rt))};
 }
 
+struct QuantFeatureLocation {
+    double mz = 0.0;
+    double apex_retention = 0.0;
+    int charge = 0;
+};
+
 bool trace_quant_decoy(
     const Config& config, const QuantMs1Data& ms1,
     const Psm& donor, double predicted_rt, double rt_window,
+    const std::vector<QuantFeatureLocation>& acceptor_features,
     Psm& result) {
-    for (int shift = 11; shift >= 4; --shift) {
+    // IonQuant 1.11.18 tries the first traceable shifted envelope from
+    // +11 through +7 Da. Keeping the same null search space is important for
+    // comparable posterior calibration.
+    for (int shift = 11; shift >= 7; --shift) {
         result = donor;
         result.id.clear();
-        result.raw_line.clear();
         result.file_id = donor.file_id;
         result.scan = 0;
         result.parent_scan = 0;
         result.retention = predicted_rt;
         quantify_psm(
             config, ms1, result, rt_window,
-            static_cast<double>(shift) * 1.0005);
-        if (result.has_chromatographic_feature) return true;
+            static_cast<double>(shift) * 1.0005 /
+                static_cast<double>(std::max(1, donor.charge)));
+        if (!result.has_chromatographic_feature) continue;
+        // IonQuant does not treat a shifted envelope as null evidence when it
+        // coincides with a real acceptor feature (same charge, within 0.01
+        // m/z and two seconds). Its feature index includes both identified
+        // and newly detected targets, so apply the same exclusion here.
+        const double shifted_mz = result.calculated_mz +
+            static_cast<double>(shift) * 1.0005 /
+                static_cast<double>(std::max(1, donor.charge));
+        const auto first = std::lower_bound(
+            acceptor_features.begin(), acceptor_features.end(),
+            shifted_mz - 0.01,
+            [](const QuantFeatureLocation& feature, double mz) {
+                return feature.mz < mz;
+            });
+        bool collision = false;
+        for (auto feature = first;
+             feature != acceptor_features.end() &&
+                 feature->mz < shifted_mz + 0.01;
+             ++feature) {
+            if (feature->charge == donor.charge &&
+                std::abs(feature->apex_retention -
+                    result.apex_retention) < 2.0) {
+                collision = true;
+                break;
+            }
+        }
+        if (!collision) return true;
     }
     return false;
 }
 
 struct QuantLdaModel {
-    std::array<double, 4> mean{};
-    std::array<double, 4> scale{};
-    std::array<double, 4> weight{};
+    QuantTransferFeatures mean{};
+    QuantTransferFeatures scale{};
+    QuantTransferFeatures weight{};
     bool valid = false;
 
-    double predict(const std::array<double, 4>& features) const {
+    double predict(const QuantTransferFeatures& features) const {
         double result = 0.0;
         for (std::size_t index = 0; index < features.size(); ++index) {
             result += weight[index] *
@@ -1384,11 +1538,55 @@ struct QuantLdaModel {
     }
 };
 
+using QuantTransferMatrix = std::array<
+    std::array<double, std::tuple_size_v<QuantTransferFeatures>>,
+    std::tuple_size_v<QuantTransferFeatures>>;
+
+bool solve_quant_linear_system(
+    QuantTransferMatrix matrix, QuantTransferFeatures right,
+    QuantTransferFeatures& solution) {
+    constexpr std::size_t count =
+        std::tuple_size_v<QuantTransferFeatures>;
+    for (std::size_t column = 0; column < count; ++column) {
+        std::size_t pivot = column;
+        for (std::size_t row = column + 1; row < count; ++row) {
+            if (std::abs(matrix[row][column]) >
+                std::abs(matrix[pivot][column])) {
+                pivot = row;
+            }
+        }
+        if (std::abs(matrix[pivot][column]) < 1e-12) return false;
+        if (pivot != column) {
+            std::swap(matrix[pivot], matrix[column]);
+            std::swap(right[pivot], right[column]);
+        }
+        const double diagonal = matrix[column][column];
+        for (std::size_t index = column; index < count; ++index) {
+            matrix[column][index] /= diagonal;
+        }
+        right[column] /= diagonal;
+        for (std::size_t row = 0; row < count; ++row) {
+            if (row == column) continue;
+            const double factor = matrix[row][column];
+            if (factor == 0.0) continue;
+            for (std::size_t index = column; index < count; ++index) {
+                matrix[row][index] -= factor * matrix[column][index];
+            }
+            right[row] -= factor * right[column];
+        }
+    }
+    solution = right;
+    return true;
+}
+
 QuantLdaModel fit_quant_lda(
-    const std::vector<std::array<double, 4>>& targets,
-    const std::vector<std::array<double, 4>>& decoys) {
+    const std::vector<QuantTransferFeatures>& targets,
+    const std::vector<QuantTransferFeatures>& decoys) {
     QuantLdaModel result;
-    if (targets.size() < 50 || decoys.size() < 50) return result;
+    // IonQuant trains with unpaired type +2/-2 observations and only needs
+    // ten positive and four negative examples. A small ridge term keeps the
+    // covariance solve stable for sparse SIP-bin feature sets.
+    if (targets.size() < 10 || decoys.size() < 4) return result;
     const double total =
         static_cast<double>(targets.size() + decoys.size());
     for (std::size_t feature = 0; feature < result.mean.size(); ++feature) {
@@ -1405,119 +1603,479 @@ QuantLdaModel fit_quant_lda(
         result.scale[feature] = std::sqrt(
             square / std::max(1.0, total - 1.0));
         result.scale[feature] = std::max(1e-6, result.scale[feature]);
-        double target_mean = 0.0;
-        double decoy_mean = 0.0;
-        for (const auto& row : targets) target_mean += row[feature];
-        for (const auto& row : decoys) decoy_mean += row[feature];
-        target_mean /= static_cast<double>(targets.size());
-        decoy_mean /= static_cast<double>(decoys.size());
-        result.weight[feature] =
-            (target_mean - decoy_mean) / result.scale[feature];
     }
+    QuantTransferFeatures target_mean{};
+    QuantTransferFeatures decoy_mean{};
+    for (const auto& row : targets) {
+        for (std::size_t feature = 0; feature < row.size(); ++feature) {
+            target_mean[feature] +=
+                (row[feature] - result.mean[feature]) /
+                result.scale[feature];
+        }
+    }
+    for (const auto& row : decoys) {
+        for (std::size_t feature = 0; feature < row.size(); ++feature) {
+            decoy_mean[feature] +=
+                (row[feature] - result.mean[feature]) /
+                result.scale[feature];
+        }
+    }
+    for (std::size_t feature = 0; feature < result.mean.size(); ++feature) {
+        target_mean[feature] /= static_cast<double>(targets.size());
+        decoy_mean[feature] /= static_cast<double>(decoys.size());
+    }
+    QuantTransferMatrix covariance{};
+    const auto add_covariance = [&](const auto& rows,
+                                    const auto& class_mean) {
+        if (rows.size() < 2) return;
+        const double denominator = static_cast<double>(rows.size() - 1);
+        for (const auto& row : rows) {
+            QuantTransferFeatures delta{};
+            for (std::size_t feature = 0; feature < row.size(); ++feature) {
+                delta[feature] =
+                    (row[feature] - result.mean[feature]) /
+                        result.scale[feature] -
+                    class_mean[feature];
+            }
+            for (std::size_t left = 0; left < delta.size(); ++left) {
+                for (std::size_t right = 0; right < delta.size(); ++right) {
+                    covariance[left][right] +=
+                        delta[left] * delta[right] / denominator;
+                }
+            }
+        }
+    };
+    add_covariance(targets, target_mean);
+    add_covariance(decoys, decoy_mean);
+    double trace = 0.0;
+    for (std::size_t feature = 0; feature < result.mean.size(); ++feature) {
+        trace += covariance[feature][feature];
+    }
+    const double ridge = std::max(
+        1e-4, 1e-3 * trace /
+            static_cast<double>(result.mean.size()));
+    QuantTransferFeatures difference{};
+    for (std::size_t feature = 0; feature < result.mean.size(); ++feature) {
+        covariance[feature][feature] += ridge;
+        difference[feature] = target_mean[feature] - decoy_mean[feature];
+    }
+    if (!solve_quant_linear_system(
+            covariance, difference, result.weight)) {
+        return result;
+    }
+    double length = 0.0;
+    for (const double weight : result.weight) length += weight * weight;
+    length = std::sqrt(length);
+    if (!(length > 0.0) || !std::isfinite(length)) return result;
+    for (auto& weight : result.weight) weight /= length;
     result.valid = true;
     return result;
 }
 
-void assign_quant_transfer_qvalues(
+std::pair<double, double> quant_mean_sd(
+    const std::vector<double>& values) {
+    if (values.empty()) return {0.0, 0.0};
+    const double mean = std::accumulate(
+        values.begin(), values.end(), 0.0) /
+        static_cast<double>(values.size());
+    double square = 0.0;
+    for (const double value : values) {
+        const double delta = value - mean;
+        square += delta * delta;
+    }
+    return {
+        mean,
+        std::sqrt(square /
+            static_cast<double>(std::max<std::size_t>(1, values.size() - 1)))};
+}
+
+std::vector<double> mbr_posterior_probabilities(
+    const std::vector<double>& target_scores,
+    const std::vector<double>& decoy_scores,
+    const std::vector<double>& identified_target_scores,
+    const std::vector<double>& identified_decoy_scores,
+    double* false_prior_result) {
+    (void)identified_decoy_scores;
+    // IonQuant fits this model only when +1, -1, and +2 each contain more
+    // than ten observations. Its -2 scores are passed to the model but are
+    // not used by the one-dimensional mixture implementation.
+    if (target_scores.size() <= 10 || decoy_scores.size() <= 10 ||
+        identified_target_scores.size() <= 10) {
+        return {};
+    }
+    constexpr std::size_t grid_size = 1000;
+    constexpr double sqrt_two_pi = 2.5066282746310005024;
+    const auto [target_mean, target_sd] = quant_mean_sd(target_scores);
+    const auto [decoy_mean, decoy_sd] = quant_mean_sd(decoy_scores);
+    std::vector<double> sorted_targets = target_scores;
+    std::vector<double> sorted_decoys = decoy_scores;
+    std::vector<double> sorted_identified = identified_target_scores;
+    std::sort(sorted_targets.begin(), sorted_targets.end());
+    std::sort(sorted_decoys.begin(), sorted_decoys.end());
+    std::sort(sorted_identified.begin(), sorted_identified.end());
+    const auto median = [](const std::vector<double>& values) {
+        const auto middle = values.size() / 2;
+        return values.size() % 2 == 0
+            ? 0.5 * (values[middle - 1] + values[middle])
+            : values[middle];
+    };
+    // SSJ's EmpiricalDist defines the quartiles as the medians of the two
+    // half samples (excluding the overall median for odd-sized samples).
+    const std::size_t half = sorted_targets.size() / 2;
+    const auto half_median = [&](std::size_t begin) {
+        const auto middle = half / 2;
+        return half % 2 == 0
+            ? 0.5 * (sorted_targets[begin + middle - 1] +
+                     sorted_targets[begin + middle])
+            : sorted_targets[begin + middle];
+    };
+    const double first_quartile = half_median(0);
+    const double third_quartile =
+        half_median(sorted_targets.size() - half);
+    double bandwidth = 0.99 * std::min(
+        target_sd, (third_quartile - first_quartile) / 1.34) /
+        std::pow(static_cast<double>(target_scores.size()), 0.2);
+    // This asymmetric grid is intentional: IonQuant uses the lower extent of
+    // +1/-1 and the upper extent of +1/+2.
+    const float minimum_float = static_cast<float>(std::min(
+        sorted_targets.front(), sorted_decoys.front()));
+    const float maximum_float = static_cast<float>(std::max(
+        sorted_targets.back(), sorted_identified.back()));
+    const double minimum = minimum_float;
+    const double maximum = maximum_float;
+    const double score_range = maximum - minimum;
+    if (!(score_range > 1e-9) || !(bandwidth > 0.0) ||
+        !std::isfinite(bandwidth)) return {};
+    const float step_float = static_cast<float>(
+        score_range / static_cast<double>(grid_size));
+    std::vector<double> grid(grid_size);
+    for (std::size_t index = 0; index < grid_size; ++index) {
+        grid[index] = static_cast<double>(static_cast<float>(
+            minimum_float + static_cast<float>(index) * step_float));
+    }
+    const auto floor_bin = [&](double score) {
+        const auto found = std::upper_bound(grid.begin(), grid.end(), score);
+        return found == grid.begin() ? std::size_t{0} :
+            static_cast<std::size_t>(found - grid.begin() - 1);
+    };
+    std::vector<std::size_t> target_bins(target_scores.size());
+    for (std::size_t index = 0; index < target_scores.size(); ++index) {
+        target_bins[index] = floor_bin(target_scores[index]);
+    }
+    const double kernel_scale = 1.0 / (bandwidth * sqrt_two_pi);
+    std::vector<double> false_density(grid_size, 0.0);
+    #pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t grid_index = 0;
+         grid_index < static_cast<std::ptrdiff_t>(grid_size); ++grid_index) {
+        double sum = 0.0;
+        for (const double score : decoy_scores) {
+            const double z = (grid[static_cast<std::size_t>(grid_index)] -
+                score) / bandwidth;
+            sum += std::exp(-0.5 * z * z);
+        }
+        false_density[static_cast<std::size_t>(grid_index)] =
+            sum * kernel_scale / static_cast<double>(decoy_scores.size());
+    }
+    // Preserve each target's exact location in the weighted KDE. Binning
+    // these observations materially changes IonQuant's fitted prior.
+    std::vector<double> target_kernel(
+        grid_size * target_scores.size());
+    #pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t grid_index = 0;
+         grid_index < static_cast<std::ptrdiff_t>(grid_size); ++grid_index) {
+        const auto offset = static_cast<std::size_t>(grid_index) *
+            target_scores.size();
+        for (std::size_t target = 0; target < target_scores.size(); ++target) {
+            const double z = (grid[static_cast<std::size_t>(grid_index)] -
+                target_scores[target]) / bandwidth;
+            target_kernel[offset + target] = std::exp(-0.5 * z * z);
+        }
+    }
+    const double lower_threshold = std::max(
+        target_mean - 2.5 * target_sd,
+        decoy_mean - decoy_sd);
+    const auto target_lower = static_cast<double>(std::count_if(
+        target_scores.begin(), target_scores.end(),
+        [&](double value) { return value <= lower_threshold; })) /
+        static_cast<double>(target_scores.size());
+    const auto decoy_lower = static_cast<double>(std::count_if(
+        decoy_scores.begin(), decoy_scores.end(),
+        [&](double value) { return value <= lower_threshold; })) /
+        static_cast<double>(decoy_scores.size());
+    const double initial_false_prior = decoy_lower > 0.0
+        ? target_lower / decoy_lower : 0.0;
+
+    // IonQuant seeds a two-cluster fit of the +1 scores at the medians of
+    // -1 and +2. The target-like cluster supplies the initial positive
+    // density before the weighted-KDE refinement.
+    double null_center = median(sorted_decoys);
+    const double identified_center = median(sorted_identified);
+    double true_center = identified_center;
+    std::vector<unsigned char> cluster(target_scores.size(), 2);
+    for (unsigned int iteration = 0; iteration < 30; ++iteration) {
+        double sums[2]{};
+        std::size_t counts[2]{};
+        bool changed = false;
+        for (std::size_t index = 0; index < target_scores.size(); ++index) {
+            const double score = target_scores[index];
+            const unsigned char label =
+                std::abs(score - true_center) <
+                    std::abs(score - null_center) ? 1 : 0;
+            changed |= cluster[index] != label;
+            cluster[index] = label;
+            sums[label] += score;
+            ++counts[label];
+        }
+        const double next_null = counts[0] > 0
+            ? sums[0] / static_cast<double>(counts[0]) : null_center;
+        const double next_true = counts[1] > 0
+            ? sums[1] / static_cast<double>(counts[1]) : true_center;
+        null_center = next_null;
+        true_center = next_true;
+        if (!changed) break;
+    }
+    double component_mean[2]{null_center, true_center};
+    double component_variance[2]{};
+    double component_weight[2]{};
+    std::size_t component_count[2]{};
+    for (std::size_t index = 0; index < target_scores.size(); ++index) {
+        const auto label = cluster[index];
+        const double delta = target_scores[index] - component_mean[label];
+        component_variance[label] += delta * delta;
+        ++component_count[label];
+    }
+    for (std::size_t component = 0; component < 2; ++component) {
+        if (component_count[component] == 0) return {};
+        component_variance[component] /=
+            static_cast<double>(component_count[component]);
+        component_weight[component] =
+            static_cast<double>(component_count[component]) /
+            static_cast<double>(target_scores.size());
+    }
+    // IonQuant follows k-means with a two-normal EM fit and deliberately uses
+    // component 1 (the component seeded at the +2 median) as the initial true
+    // distribution without multiplying by its fitted mixture weight.
+    std::vector<std::array<double, 2>> responsibilities(
+        target_scores.size());
+    double initial_likelihood = 0.0;
+    for (const double score : target_scores) {
+        double mixture = 0.0;
+        for (std::size_t component = 0; component < 2; ++component) {
+            const double z = (score - component_mean[component]) /
+                std::sqrt(component_variance[component]);
+            mixture += component_weight[component] *
+                std::exp(-0.5 * z * z) /
+                (std::sqrt(component_variance[component]) * sqrt_two_pi);
+        }
+        initial_likelihood += std::log(std::max(1e-300, mixture));
+    }
+    double previous_gaussian_likelihood = initial_likelihood;
+    const double gaussian_tolerance =
+        std::abs(initial_likelihood) * 1e-4;
+    for (unsigned int iteration = 0; iteration < 30; ++iteration) {
+        for (std::size_t index = 0; index < target_scores.size(); ++index) {
+            double total_density = 0.0;
+            for (std::size_t component = 0; component < 2; ++component) {
+                const double z =
+                    (target_scores[index] - component_mean[component]) /
+                    std::sqrt(component_variance[component]);
+                responsibilities[index][component] =
+                    component_weight[component] *
+                    std::exp(-0.5 * z * z) /
+                    (std::sqrt(component_variance[component]) * sqrt_two_pi);
+                total_density += responsibilities[index][component];
+            }
+            for (std::size_t component = 0; component < 2; ++component) {
+                responsibilities[index][component] /=
+                    std::max(1e-300, total_density);
+            }
+        }
+        for (std::size_t component = 0; component < 2; ++component) {
+            double responsibility_sum = 0.0;
+            double weighted_sum = 0.0;
+            for (std::size_t index = 0; index < target_scores.size(); ++index) {
+                responsibility_sum += responsibilities[index][component];
+                weighted_sum += responsibilities[index][component] *
+                    target_scores[index];
+            }
+            if (!(responsibility_sum > 0.0)) return {};
+            component_mean[component] = weighted_sum / responsibility_sum;
+            double weighted_square = 0.0;
+            for (std::size_t index = 0; index < target_scores.size(); ++index) {
+                const double delta =
+                    target_scores[index] - component_mean[component];
+                weighted_square += responsibilities[index][component] *
+                    delta * delta;
+            }
+            component_variance[component] =
+                weighted_square / responsibility_sum;
+            component_weight[component] = responsibility_sum /
+                static_cast<double>(target_scores.size());
+        }
+        double likelihood = 0.0;
+        for (const double score : target_scores) {
+            double mixture = 0.0;
+            for (std::size_t component = 0; component < 2; ++component) {
+                const double z =
+                    (score - component_mean[component]) /
+                    std::sqrt(component_variance[component]);
+                mixture += component_weight[component] *
+                    std::exp(-0.5 * z * z) /
+                    (std::sqrt(component_variance[component]) * sqrt_two_pi);
+            }
+            likelihood += std::log(std::max(1e-300, mixture));
+        }
+        if (std::abs(likelihood - previous_gaussian_likelihood) <=
+            gaussian_tolerance) {
+            break;
+        }
+        previous_gaussian_likelihood = likelihood;
+    }
+    const double initial_true_mean = component_mean[1];
+    const double initial_true_sd = std::sqrt(component_variance[1]);
+    std::vector<double> weighted_false(grid_size, 0.0);
+    std::vector<double> weighted_true(grid_size, 0.0);
+    for (std::size_t index = 0; index < grid_size; ++index) {
+        weighted_false[index] =
+            initial_false_prior * false_density[index];
+        const double score = grid[index];
+        const double z = (score - initial_true_mean) / initial_true_sd;
+        weighted_true[index] = (1.0 - initial_false_prior) *
+            std::exp(-0.5 * z * z) /
+            (initial_true_sd * sqrt_two_pi);
+    }
+    std::vector<double> posterior_true(target_scores.size(), 0.0);
+    const auto update_posteriors = [&]() {
+        double true_sum = 0.0;
+        for (std::size_t index = 0; index < target_scores.size(); ++index) {
+            const auto bin = target_bins[index];
+            const double null_value = weighted_false[bin];
+            const double true_value = weighted_true[bin];
+            const double denominator = null_value + true_value;
+            posterior_true[index] = denominator > 0.0
+                ? std::clamp(true_value / denominator, 0.0, 1.0)
+                : 0.0;
+            true_sum += posterior_true[index];
+        }
+        return true_sum;
+    };
+    double true_sum = update_posteriors();
+    const auto rebuild_true_density = [&](double true_prior) {
+        std::vector<double> result(grid_size, 0.0);
+        const double weight_sum = std::accumulate(
+            posterior_true.begin(), posterior_true.end(), 0.0);
+        if (!(weight_sum > 0.0)) return result;
+        #pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t grid_index = 0;
+             grid_index < static_cast<std::ptrdiff_t>(grid_size);
+             ++grid_index) {
+            const auto offset = static_cast<std::size_t>(grid_index) *
+                target_scores.size();
+            double sum = 0.0;
+            for (std::size_t target = 0;
+                 target < target_scores.size(); ++target) {
+                sum += target_kernel[offset + target] *
+                    posterior_true[target];
+            }
+            result[static_cast<std::size_t>(grid_index)] =
+                true_prior * sum * kernel_scale / weight_sum;
+        }
+        return result;
+    };
+    weighted_true = rebuild_true_density(1.0 - initial_false_prior);
+    double previous_likelihood = 0.0;
+    for (const auto bin : target_bins) {
+        const double mixture = weighted_false[bin] + weighted_true[bin];
+        if (mixture > 0.0) previous_likelihood += std::log(mixture);
+    }
+    const double likelihood_tolerance =
+        std::abs(previous_likelihood) * 1e-5;
+    for (unsigned int iteration = 0; iteration < 50; ++iteration) {
+        true_sum = update_posteriors();
+        weighted_true = rebuild_true_density(1.0 - initial_false_prior);
+        double likelihood = 0.0;
+        for (const auto bin : target_bins) {
+            const double mixture = weighted_false[bin] + weighted_true[bin];
+            if (mixture > 0.0) likelihood += std::log(mixture);
+        }
+        if (std::abs(likelihood - previous_likelihood) <=
+            likelihood_tolerance) {
+            break;
+        }
+        previous_likelihood = likelihood;
+    }
+    const double final_true_prior =
+        true_sum / static_cast<double>(target_scores.size());
+    const double final_false_prior = 1.0 - final_true_prior;
+    // IonQuant recomputes the two final weighted densities using the last
+    // posterior weights, then constructs a descending lookup table.
+    update_posteriors();
+    weighted_true = rebuild_true_density(final_true_prior);
+    for (std::size_t index = 0; index < grid_size; ++index) {
+        weighted_false[index] = final_false_prior * false_density[index];
+    }
+    if (false_prior_result != nullptr) {
+        *false_prior_result = final_false_prior;
+    }
+    std::vector<double> grid_probability(grid_size, 0.0);
+    for (std::size_t index = 0; index < grid_size; ++index) {
+        const double denominator = weighted_true[index] +
+            weighted_false[index];
+        grid_probability[index] = denominator == 0.0 ? 0.0 :
+            0.999999 * weighted_true[index] / denominator;
+    }
+    const auto above_decoy_mean = std::upper_bound(
+        grid.begin(), grid.end(), decoy_mean);
+    if (above_decoy_mean != grid.end()) {
+        std::size_t index = static_cast<std::size_t>(
+            above_decoy_mean - grid.begin());
+        while (index > 0) {
+            grid_probability[index - 1] = std::min(
+                grid_probability[index], grid_probability[index - 1]);
+            --index;
+        }
+    }
+    std::vector<double> result(target_scores.size());
+    for (std::size_t index = 0; index < target_scores.size(); ++index) {
+        const float score = static_cast<float>(target_scores[index]);
+        const auto found = std::lower_bound(
+            grid.begin(), grid.end(), static_cast<double>(score));
+        result[index] = found == grid.end() ? 1.0 :
+            grid_probability[static_cast<std::size_t>(
+                found - grid.begin())];
+    }
+    return result;
+}
+
+bool calibrate_quant_transfer_probabilities(
     std::vector<QuantTransferCandidate*>& targets,
-    const std::vector<double>& decoy_scores) {
-    if (targets.empty() || decoy_scores.size() < 20) return;
+    const std::vector<double>& decoy_scores,
+    const std::vector<double>& identified_target_scores,
+    const std::vector<double>& identified_decoy_scores,
+    double* false_prior) {
+    std::vector<double> target_scores;
+    target_scores.reserve(targets.size());
+    for (const auto* target : targets) target_scores.push_back(target->score);
+    const auto probabilities = mbr_posterior_probabilities(
+        target_scores, decoy_scores, identified_target_scores,
+        identified_decoy_scores, false_prior);
+    if (probabilities.size() != targets.size()) return false;
+    for (std::size_t index = 0; index < targets.size(); ++index) {
+        targets[index]->probability = probabilities[index];
+    }
+    return true;
+}
+
+void assign_quant_transfer_qvalues(
+    std::vector<QuantTransferCandidate*>& targets) {
     std::sort(targets.begin(), targets.end(), [](const auto* left,
                                                  const auto* right) {
-        return left->score > right->score;
+        return left->probability > right->probability;
     });
-    std::vector<double> decoys = decoy_scores;
-    std::sort(decoys.begin(), decoys.end(), std::greater<double>());
-    const auto mean_sd = [](const std::vector<double>& values) {
-        const double mean = std::accumulate(
-            values.begin(), values.end(), 0.0) / values.size();
-        double square = 0.0;
-        for (const auto value : values) {
-            square += (value - mean) * (value - mean);
-        }
-        return std::pair{
-            mean,
-            std::max(
-                0.1, std::sqrt(
-                    square / std::max<std::size_t>(1, values.size() - 1)))};
-    };
-    const auto [false_mean, false_sd] = mean_sd(decoys);
-    std::vector<double> upper;
-    upper.reserve(targets.size() / 2 + 1);
-    for (std::size_t index = 0; index < (targets.size() + 1) / 2; ++index) {
-        upper.push_back(targets[index]->score);
-    }
-    auto [true_mean, true_sd] = mean_sd(upper);
-    true_mean = std::max(true_mean, false_mean + 0.1);
-    double false_prior = 0.5;
-    std::vector<double> posterior_false(targets.size(), 1.0);
-    const auto log_normal = [](double value, double mean, double sd) {
-        constexpr double log_two_pi = 1.8378770664093453;
-        const double z = (value - mean) / sd;
-        return -0.5 * (log_two_pi + 2.0 * std::log(sd) + z * z);
-    };
-    for (unsigned int iteration = 0; iteration < 100; ++iteration) {
-        double false_sum = 0.0;
-        double true_weight = 0.0;
-        double true_sum = 0.0;
-        for (std::size_t index = 0; index < targets.size(); ++index) {
-            const double score = targets[index]->score;
-            const double log_false =
-                std::log(false_prior) +
-                log_normal(score, false_mean, false_sd);
-            const double log_true =
-                std::log(1.0 - false_prior) +
-                log_normal(score, true_mean, true_sd);
-            const double maximum = std::max(log_false, log_true);
-            const double false_density = std::exp(log_false - maximum);
-            const double true_density = std::exp(log_true - maximum);
-            const double local_false =
-                false_density / (false_density + true_density);
-            posterior_false[index] = local_false;
-            false_sum += local_false;
-            const double true_probability = 1.0 - local_false;
-            true_weight += true_probability;
-            true_sum += true_probability * score;
-        }
-        const double next_prior = std::clamp(
-            false_sum / targets.size(), 0.01, 0.99);
-        const double next_true_mean = true_weight > 0.0
-            ? true_sum / true_weight : true_mean;
-        double true_square = 0.0;
-        for (std::size_t index = 0; index < targets.size(); ++index) {
-            const double delta =
-                targets[index]->score - next_true_mean;
-            true_square +=
-                (1.0 - posterior_false[index]) * delta * delta;
-        }
-        const double next_true_sd = std::max(
-            0.1, std::sqrt(
-                true_square / std::max(1e-12, true_weight)));
-        const double change =
-            std::abs(next_prior - false_prior) +
-            std::abs(next_true_mean - true_mean) +
-            std::abs(next_true_sd - true_sd);
-        false_prior = next_prior;
-        true_mean = std::max(next_true_mean, false_mean + 0.01);
-        true_sd = next_true_sd;
-        if (change < 1e-7) break;
-    }
-    // Equation 5: global transferred-ion FDR is the running mean of local
-    // posterior error probabilities above each score threshold.
     double false_sum = 0.0;
     std::vector<double> raw_fdr(targets.size(), 1.0);
     for (std::size_t index = 0; index < targets.size(); ++index) {
-        const double score = targets[index]->score;
-        const double log_false =
-            std::log(false_prior) +
-            log_normal(score, false_mean, false_sd);
-        const double log_true =
-            std::log(1.0 - false_prior) +
-            log_normal(score, true_mean, true_sd);
-        const double maximum = std::max(log_false, log_true);
-        const double false_density = std::exp(log_false - maximum);
-        const double true_density = std::exp(log_true - maximum);
-        false_sum += false_density / (false_density + true_density);
+        false_sum += 1.0 - targets[index]->probability;
         raw_fdr[index] = false_sum / static_cast<double>(index + 1);
     }
     double minimum = 1.0;
@@ -1559,10 +2117,16 @@ QuantificationResult ChromatographicQuantifier::add(
     const std::size_t file_count = config.spectrum_paths.size();
     std::vector<QuantIonMap> ions(file_count);
     std::vector<std::unordered_set<std::string>> identified(file_count);
+    std::vector<std::unordered_set<std::string>> identified_base(file_count);
     StageTiming load_identified_timing;
     StageTiming select_timing;
     StageTiming trace_identified_timing;
     std::size_t accepted_psms = 0;
+    for (std::size_t row = 0; row < data.rows.size(); ++row) {
+        auto& psm = data.rows[row];
+        psm.sip_abundance_bin = quant_sip_abundance_bin(
+            config, psm.ms2_isotopic_abundance);
+    }
     for (std::size_t file = 0; file < file_count; ++file) {
         auto wall_begin = Clock::now();
         auto cpu_begin = std::clock();
@@ -1616,6 +2180,8 @@ QuantificationResult ChromatographicQuantifier::add(
         }
         const auto key = quant_ion_key(psm);
         identified[psm.file_id].insert(key);
+        identified_base[psm.file_id].insert(
+            quant_base_ion_key(psm));
         if (!psm.has_chromatographic_feature) continue;
         ++chromatographic_features;
         auto [found, inserted] = ions[psm.file_id].emplace(key, row);
@@ -1645,6 +2211,21 @@ QuantificationResult ChromatographicQuantifier::add(
     std::size_t alignment_count = 0;
     std::size_t transfer_jobs = 0;
     std::size_t scored_transfer_candidates = 0;
+    std::size_t calibrated_transfer_candidates = 0;
+    std::size_t training_target_count = 0;
+    std::size_t training_decoy_count = 0;
+    std::size_t transfer_decoy_count = 0;
+    std::vector<double> calibration_false_priors(
+        file_count, std::numeric_limits<double>::quiet_NaN());
+    std::vector<std::size_t> accepted_transfers(file_count, 0);
+    std::vector<QuantTransferFeatures> calibration_lda_weights(file_count);
+    std::vector<bool> calibration_lda_valid(file_count, false);
+    struct QuantPooledEvidence {
+        std::vector<std::size_t> target_indices;
+    };
+    std::vector<QuantTransferCandidate> pooled_candidates;
+    pooled_candidates.reserve(indexed_ions);
+    std::map<int, QuantPooledEvidence> pooled_evidence;
     for (std::size_t acceptor = 0; acceptor < file_count; ++acceptor) {
         auto wall_begin = Clock::now();
         auto cpu_begin = std::clock();
@@ -1653,7 +2234,7 @@ QuantificationResult ChromatographicQuantifier::add(
             if (donor == acceptor) continue;
             auto alignment = build_quant_alignment(
                 donor, ions[acceptor], ions[donor], data);
-            if (alignment.correlation >= config.mbr_min_correlation &&
+            if (alignment.correlation > config.mbr_min_correlation &&
                 alignment.donor_rt_delta.size() >= 5) {
                 alignments.push_back(std::move(alignment));
             }
@@ -1673,24 +2254,41 @@ QuantificationResult ChromatographicQuantifier::add(
         wall_begin = Clock::now();
         cpu_begin = std::clock();
         std::vector<QuantTransferJob> jobs;
-        std::unordered_set<std::string> scheduled;
+        // Trace every eligible donor. A peptide can align differently from
+        // each run, so choose its donor only after scoring acceptor evidence.
         for (const auto& alignment : alignments) {
             for (const auto& [key, donor_row] : ions[alignment.donor]) {
-                if (!scheduled.insert(key).second) continue;
                 const auto& donor_psm = data.rows[donor_row];
                 const auto region = quant_transfer_region(
                     config, alignment,
                     donor_psm.apex_retention / 60.0);
-                QuantTransferJob job;
-                job.key = key;
-                job.donor_row = donor_row;
                 const auto acceptor_ion = ions[acceptor].find(key);
                 if (acceptor_ion != ions[acceptor].end()) {
+                    QuantTransferJob job;
+                    job.key = key;
+                    job.donor_row = donor_row;
                     job.acceptor_row = acceptor_ion->second;
+                    job.predicted_rt = region.first;
+                    job.trace_rt = region.first;
+                    job.rt_window = region.second;
+                    jobs.push_back(std::move(job));
+                    continue;
                 }
-                job.predicted_rt = region.first;
-                job.rt_window = region.second;
-                jobs.push_back(std::move(job));
+                // IonQuant enumerates chromatographic features throughout
+                // the aligned interval before LDA selects the best evidence.
+                // Probe five overlapping local basins to reproduce that
+                // behavior without retracing every MS1 point independently.
+                static constexpr double offsets[] = {
+                    -0.8, -0.4, 0.0, 0.4, 0.8};
+                for (const double offset : offsets) {
+                    QuantTransferJob job;
+                    job.key = key;
+                    job.donor_row = donor_row;
+                    job.predicted_rt = region.first;
+                    job.trace_rt = region.first + offset * region.second;
+                    job.rt_window = std::max(0.025, region.second * 0.5);
+                    jobs.push_back(std::move(job));
+                }
             }
         }
         transfer_jobs += jobs.size();
@@ -1710,9 +2308,14 @@ QuantificationResult ChromatographicQuantifier::add(
             const auto& job = jobs[static_cast<std::size_t>(index)];
             auto& candidate = candidates[static_cast<std::size_t>(index)];
             candidate.key = job.key;
+            candidate.donor_row = job.donor_row;
+            candidate.predicted_rt = job.predicted_rt;
             candidate.identified =
                 identified[acceptor].count(job.key) != 0;
             const auto& donor_psm = data.rows[job.donor_row];
+            candidate.blocked_by_direct =
+                identified_base[acceptor].count(
+                    quant_base_ion_key(donor_psm)) != 0;
             if (job.acceptor_row !=
                 std::numeric_limits<std::size_t>::max()) {
                 candidate.psm = data.rows[job.acceptor_row];
@@ -1720,69 +2323,359 @@ QuantificationResult ChromatographicQuantifier::add(
                 candidate.psm = donor_psm;
                 candidate.psm.file_id = acceptor;
                 candidate.psm.id.clear();
-                candidate.psm.raw_line.clear();
                 candidate.psm.scan = 0;
                 candidate.psm.parent_scan = 0;
-                candidate.psm.retention = job.predicted_rt;
+                candidate.psm.retention = job.trace_rt;
                 quantify_psm(
                     config, ms1, candidate.psm, job.rt_window);
+                candidate.psm.ms1_isotopic_abundance =
+                    quant_sip_bin_center(
+                        config, candidate.psm.sip_abundance_bin);
             }
             if (candidate.psm.has_chromatographic_feature) {
                 candidate.features = quant_transfer_features(
-                    candidate.psm, job.predicted_rt);
+                    candidate.psm, donor_psm, job.predicted_rt);
             }
+        }
+        std::vector<QuantFeatureLocation> acceptor_features;
+        acceptor_features.reserve(
+            ions[acceptor].size() + candidates.size());
+        for (const auto& [key, row] : ions[acceptor]) {
+            (void)key;
+            const auto& feature = data.rows[row];
+            acceptor_features.push_back({
+                feature.calculated_mz, feature.apex_retention,
+                feature.charge});
+        }
+        for (const auto& candidate : candidates) {
+            if (!candidate.psm.has_chromatographic_feature) continue;
+            acceptor_features.push_back({
+                candidate.psm.calculated_mz,
+                candidate.psm.apex_retention,
+                candidate.psm.charge});
+        }
+        std::sort(
+            acceptor_features.begin(), acceptor_features.end(),
+            [](const auto& left, const auto& right) {
+                return left.mz < right.mz;
+            });
+        #pragma omp parallel for schedule(dynamic, 8)
+        for (std::ptrdiff_t index = 0;
+             index < static_cast<std::ptrdiff_t>(jobs.size()); ++index) {
+            const auto& job = jobs[static_cast<std::size_t>(index)];
+            auto& candidate = candidates[static_cast<std::size_t>(index)];
+            if (!candidate.psm.has_chromatographic_feature) continue;
+            const auto& donor_psm = data.rows[job.donor_row];
             Psm decoy;
+            const double decoy_rt =
+                candidate.psm.apex_retention / 60.0;
+            const double decoy_window = std::clamp(
+                candidate.psm.retention_fwhm / 120.0,
+                0.025, job.rt_window);
             candidate.has_decoy = trace_quant_decoy(
-                config, ms1, donor_psm, job.predicted_rt,
-                job.rt_window, decoy);
+                config, ms1, candidate.psm, decoy_rt,
+                decoy_window, acceptor_features, decoy);
             if (candidate.has_decoy) {
                 candidate.decoy_features = quant_transfer_features(
-                    decoy, job.predicted_rt);
+                    decoy, donor_psm, job.predicted_rt);
             }
         }
         add_elapsed(trace_mbr_timing, wall_begin, cpu_begin);
 
         wall_begin = Clock::now();
         cpu_begin = std::clock();
-        std::vector<std::array<double, 4>> training_targets;
-        std::vector<std::array<double, 4>> training_decoys;
+        struct QuantBinEvidence {
+            std::vector<QuantTransferFeatures> training_targets;
+            std::vector<QuantTransferFeatures> training_decoys;
+        };
+        std::map<int, QuantBinEvidence> bin_evidence;
         for (const auto& candidate : candidates) {
-            if (!candidate.identified ||
-                !candidate.psm.has_chromatographic_feature ||
-                !candidate.has_decoy) {
+            if (!candidate.identified) continue;
+            auto& bin = bin_evidence[
+                candidate.psm.sip_abundance_bin];
+            if (candidate.psm.has_chromatographic_feature) {
+                bin.training_targets.push_back(candidate.features);
+            }
+            if (candidate.has_decoy) {
+                bin.training_decoys.push_back(candidate.decoy_features);
+            }
+        }
+        std::map<int, QuantLdaModel> initial_models;
+        for (const auto& [sip_bin, evidence] : bin_evidence) {
+            initial_models.emplace(
+                sip_bin,
+                fit_quant_lda(
+                    evidence.training_targets, evidence.training_decoys));
+        }
+        // IonQuant scores all donor observations once, retains the best
+        // positive and negative evidence at an acceptor ion, and refits the
+        // final LDA. This prevents ions present in several donors from being
+        // over-weighted in training.
+        std::map<int, std::unordered_map<std::string, std::size_t>>
+            best_training_targets;
+        std::map<int, std::unordered_map<std::string, std::size_t>>
+            best_training_decoys;
+        for (std::size_t index = 0; index < candidates.size(); ++index) {
+            const auto& candidate = candidates[index];
+            if (!candidate.identified) continue;
+            const int sip_bin = candidate.psm.sip_abundance_bin;
+            const auto model = initial_models.find(sip_bin);
+            if (model == initial_models.end() || !model->second.valid) {
                 continue;
             }
-            training_targets.push_back(candidate.features);
-            training_decoys.push_back(candidate.decoy_features);
+            if (candidate.psm.has_chromatographic_feature) {
+                const double score = model->second.predict(
+                    candidate.features);
+                auto& best = best_training_targets[sip_bin];
+                const auto found = best.find(candidate.key);
+                if (found == best.end() || score > model->second.predict(
+                        candidates[found->second].features)) {
+                    best[candidate.key] = index;
+                }
+            }
+            if (candidate.has_decoy) {
+                const double score = model->second.predict(
+                    candidate.decoy_features);
+                auto& best = best_training_decoys[sip_bin];
+                const auto found = best.find(candidate.key);
+                if (found == best.end() || score > model->second.predict(
+                        candidates[found->second].decoy_features)) {
+                    best[candidate.key] = index;
+                }
+            }
         }
-        const auto model = fit_quant_lda(
-            training_targets, training_decoys);
-        if (!model.valid) {
-            add_elapsed(score_mbr_timing, wall_begin, cpu_begin);
-            continue;
+        std::map<int, QuantLdaModel> models = initial_models;
+        for (const auto& [sip_bin, target_rows] :
+             best_training_targets) {
+            QuantBinEvidence selected;
+            selected.training_targets.reserve(target_rows.size());
+            for (const auto& [key, index] : target_rows) {
+                (void)key;
+                selected.training_targets.push_back(
+                    candidates[index].features);
+            }
+            const auto decoy_rows = best_training_decoys.find(sip_bin);
+            if (decoy_rows != best_training_decoys.end()) {
+                selected.training_decoys.reserve(decoy_rows->second.size());
+                for (const auto& [key, index] : decoy_rows->second) {
+                    (void)key;
+                    selected.training_decoys.push_back(
+                        candidates[index].decoy_features);
+                }
+            }
+            training_target_count += selected.training_targets.size();
+            training_decoy_count += selected.training_decoys.size();
+            auto final_model = fit_quant_lda(
+                selected.training_targets, selected.training_decoys);
+            if (final_model.valid) models[sip_bin] = final_model;
         }
-
-        std::vector<QuantTransferCandidate*> transfer_targets;
-        std::vector<double> transfer_decoys;
-        for (auto& candidate : candidates) {
-            if (candidate.identified ||
+        const auto natural_model = models.find(
+            config.sip_isotope.empty() ? -1 : 0);
+        if (natural_model != models.end() && natural_model->second.valid) {
+            calibration_lda_weights[acceptor] = natural_model->second.weight;
+            calibration_lda_valid[acceptor] = true;
+        }
+        std::map<int, std::vector<double>> identified_target_scores;
+        std::map<int, std::vector<double>> identified_decoy_scores;
+        for (const auto& [sip_bin, target_rows] : best_training_targets) {
+            const auto model = models.find(sip_bin);
+            if (model == models.end() || !model->second.valid) continue;
+            auto& scores = identified_target_scores[sip_bin];
+            scores.reserve(target_rows.size());
+            for (const auto& [key, index] : target_rows) {
+                (void)key;
+                scores.push_back(model->second.predict(
+                    candidates[index].features));
+            }
+        }
+        for (const auto& [sip_bin, decoy_rows] : best_training_decoys) {
+            const auto model = models.find(sip_bin);
+            if (model == models.end() || !model->second.valid) continue;
+            auto& scores = identified_decoy_scores[sip_bin];
+            scores.reserve(decoy_rows.size());
+            for (const auto& [key, index] : decoy_rows) {
+                (void)key;
+                scores.push_back(model->second.predict(
+                    candidates[index].decoy_features));
+            }
+        }
+        std::unordered_map<std::string, std::size_t> best_donors;
+        for (std::size_t index = 0; index < candidates.size(); ++index) {
+            auto& candidate = candidates[index];
+            if (candidate.identified || candidate.blocked_by_direct ||
                 !candidate.psm.has_chromatographic_feature) {
                 continue;
             }
-            candidate.score = model.predict(candidate.features);
-            transfer_targets.push_back(&candidate);
+            const auto model = models.find(candidate.psm.sip_abundance_bin);
+            if (model == models.end() || !model->second.valid) continue;
+            candidate.score = model->second.predict(candidate.features);
+            const auto ion = quant_ion_key(candidate.psm);
+            const auto found = best_donors.find(ion);
+            if (found == best_donors.end()) {
+                best_donors.emplace(ion, index);
+                continue;
+            }
+            const auto& current = candidates[found->second];
+            if (candidate.score > current.score) found->second = index;
+        }
+        std::unordered_map<std::string, std::size_t> selected_bins;
+        for (const auto& [ion, index] : best_donors) {
+            (void)ion;
+            const auto& candidate = candidates[index];
+            const auto base = quant_base_ion_key(candidate.psm);
+            const auto found = selected_bins.find(base);
+            if (found == selected_bins.end()) {
+                selected_bins.emplace(base, index);
+                continue;
+            }
+            const auto& current = candidates[found->second];
+            const auto quality = std::tuple{
+                candidate.psm.quant_isotope_kl,
+                std::abs(candidate.psm.apex_retention / 60.0 -
+                    candidate.predicted_rt),
+                -candidate.psm.quantified_intensity};
+            const auto current_quality = std::tuple{
+                current.psm.quant_isotope_kl,
+                std::abs(current.psm.apex_retention / 60.0 -
+                    current.predicted_rt),
+                -current.psm.quantified_intensity};
+            if (quality < current_quality) found->second = index;
+        }
+        for (const auto& [base, index] : selected_bins) {
+            (void)base;
+            candidates[index].selected_bin = true;
+        }
+        std::map<int, std::vector<QuantTransferCandidate*>>
+            transfer_targets;
+        std::map<int, std::vector<double>> transfer_decoys;
+        for (auto& candidate : candidates) {
+            if (!candidate.selected_bin) continue;
+            const auto model = models.find(candidate.psm.sip_abundance_bin);
+            if (model == models.end() || !model->second.valid) continue;
+            transfer_targets[candidate.psm.sip_abundance_bin]
+                .push_back(&candidate);
+            ++scored_transfer_candidates;
             if (candidate.has_decoy) {
-                transfer_decoys.push_back(
-                    model.predict(candidate.decoy_features));
+                candidate.decoy_score = model->second.predict(
+                    candidate.decoy_features);
+                transfer_decoys[candidate.psm.sip_abundance_bin].push_back(
+                    candidate.decoy_score);
+                ++transfer_decoy_count;
             }
         }
-        scored_transfer_candidates += transfer_targets.size();
-        assign_quant_transfer_qvalues(
-            transfer_targets, transfer_decoys);
-        for (const auto* candidate : transfer_targets) {
-            if (candidate->qvalue > config.mbr_ion_fdr) continue;
-            data.transferred_ions.push_back({
-                candidate->psm, candidate->score, candidate->qvalue});
+        double false_prior_sum = 0.0;
+        std::size_t false_prior_weight = 0;
+        for (auto& [sip_bin, targets] : transfer_targets) {
+            const auto found = transfer_decoys.find(sip_bin);
+            const std::vector<double> empty;
+            const auto& decoys = found == transfer_decoys.end()
+                ? empty : found->second;
+            const auto found_identified_targets =
+                identified_target_scores.find(sip_bin);
+            const auto& training_targets =
+                found_identified_targets == identified_target_scores.end()
+                ? empty : found_identified_targets->second;
+            const auto found_identified_decoys =
+                identified_decoy_scores.find(sip_bin);
+            const auto& training_decoys =
+                found_identified_decoys == identified_decoy_scores.end()
+                ? empty : found_identified_decoys->second;
+            double false_prior = 1.0;
+            if (!calibrate_quant_transfer_probabilities(
+                    targets, decoys, training_targets, training_decoys,
+                    &false_prior)) {
+                continue;
+            }
+            false_prior_sum += false_prior *
+                static_cast<double>(targets.size());
+            false_prior_weight += targets.size();
+            calibrated_transfer_candidates += targets.size();
+            for (auto* candidate : targets) {
+                candidate->false_prior = false_prior;
+                const auto pooled_index = pooled_candidates.size();
+                pooled_candidates.push_back(*candidate);
+                pooled_evidence[sip_bin].target_indices.push_back(
+                    pooled_index);
+            }
+        }
+        if (false_prior_weight > 0) {
+            calibration_false_priors[acceptor] = false_prior_sum /
+                static_cast<double>(false_prior_weight);
+        }
+        add_elapsed(score_mbr_timing, wall_begin, cpu_begin);
+    }
+    double accepted_expected_false = 0.0;
+    double null_tail_expected_false = 0.0;
+    std::map<int, std::size_t> accepted_by_sip_bin;
+    std::map<int, double> posterior_false_by_sip_bin;
+    std::map<int, double> null_tail_false_by_sip_bin;
+    {
+        const auto wall_begin = Clock::now();
+        const auto cpu_begin = std::clock();
+        // Models remain acceptor/bin specific, but transferred-ion FDR is
+        // estimated over all acceptors within the same SIP-abundance bin.
+        struct NullTailGroup {
+            double false_prior_sum = 0.0;
+            double accepted_score_threshold =
+                std::numeric_limits<double>::infinity();
+            std::size_t accepted = 0;
+            std::size_t decoys = 0;
+            std::size_t decoys_above = 0;
+        };
+        std::map<std::pair<std::size_t, int>, NullTailGroup>
+            null_tail_groups;
+        for (auto& [sip_bin, evidence] : pooled_evidence) {
+            std::vector<QuantTransferCandidate*> targets;
+            targets.reserve(evidence.target_indices.size());
+            for (const auto index : evidence.target_indices) {
+                targets.push_back(&pooled_candidates[index]);
+            }
+            assign_quant_transfer_qvalues(targets);
+            for (const auto* candidate : targets) {
+                auto& group = null_tail_groups[{
+                    candidate->psm.file_id, sip_bin}];
+                group.false_prior_sum += candidate->false_prior;
+                if (candidate->qvalue <= config.mbr_ion_fdr) {
+                    ++group.accepted;
+                    group.accepted_score_threshold = std::min(
+                        group.accepted_score_threshold, candidate->score);
+                    accepted_expected_false +=
+                        1.0 - candidate->probability;
+                    ++accepted_by_sip_bin[sip_bin];
+                    posterior_false_by_sip_bin[sip_bin] +=
+                        1.0 - candidate->probability;
+                }
+            }
+            for (const auto* candidate : targets) {
+                if (!std::isfinite(candidate->decoy_score)) continue;
+                auto& group = null_tail_groups[{
+                    candidate->psm.file_id, sip_bin}];
+                ++group.decoys;
+                if (group.accepted > 0 && candidate->decoy_score >=
+                        group.accepted_score_threshold) {
+                    ++group.decoys_above;
+                }
+            }
+            for (const auto* candidate : targets) {
+                if (candidate->qvalue > config.mbr_ion_fdr) continue;
+                const auto& donor = data.rows[candidate->donor_row];
+                data.transferred_ions.push_back({
+                    candidate->psm, candidate->score,
+                    candidate->qvalue, candidate->donor_row,
+                    donor.id});
+                if (candidate->psm.file_id < accepted_transfers.size()) {
+                    ++accepted_transfers[candidate->psm.file_id];
+                }
+            }
+        }
+        for (const auto& [key, group] : null_tail_groups) {
+            (void)key;
+            if (group.accepted == 0 || group.decoys == 0) continue;
+            const double expected_false = group.false_prior_sum *
+                static_cast<double>(group.decoys_above) /
+                static_cast<double>(group.decoys);
+            null_tail_expected_false += expected_false;
+            null_tail_false_by_sip_bin[key.second] += expected_false;
         }
         add_elapsed(score_mbr_timing, wall_begin, cpu_begin);
     }
@@ -1798,10 +2691,63 @@ QuantificationResult ChromatographicQuantifier::add(
         "Reload acceptor MS1 data for MBR", load_mbr_timing);
     record_stage(
         "Trace MBR target/decoy XICs", trace_mbr_timing, true);
+    std::string calibration_summary;
+    for (std::size_t file = 0; file < file_count; ++file) {
+        calibration_summary += file == 0 ? "; " : ", ";
+        calibration_summary += "run" + std::to_string(file + 1) +
+            " pi0=";
+        if (std::isfinite(calibration_false_priors[file])) {
+            calibration_summary += std::to_string(
+                calibration_false_priors[file]);
+        } else {
+            calibration_summary += "NA";
+        }
+        calibration_summary += " accepted=" +
+            std::to_string(accepted_transfers[file]);
+        if (calibration_lda_valid[file]) {
+            calibration_summary += " lda=";
+            for (std::size_t feature = 0;
+                 feature < calibration_lda_weights[file].size(); ++feature) {
+                if (feature != 0) calibration_summary += "/";
+                calibration_summary += std::to_string(
+                    calibration_lda_weights[file][feature]);
+            }
+        }
+    }
+    if (!config.sip_isotope.empty()) {
+        calibration_summary += "; SIP-bin FDR audit";
+        for (const auto& [sip_bin, accepted] : accepted_by_sip_bin) {
+            const double denominator = static_cast<double>(accepted);
+            calibration_summary += " b" + std::to_string(sip_bin) +
+                "=" + std::to_string(accepted) +
+                "/post:" + std::to_string(
+                    posterior_false_by_sip_bin[sip_bin] / denominator) +
+                "/null:" + std::to_string(
+                    null_tail_false_by_sip_bin[sip_bin] / denominator);
+        }
+    }
     record_stage(
-        "Fit MBR LDA + ion FDR (" +
-            std::to_string(scored_transfer_candidates) + " scored, " +
-            std::to_string(data.transferred_ions.size()) + " accepted)",
+        "Fit covariance MBR LDA + four-population per-run probability/"
+        "global ion FDR (" +
+            std::to_string(training_target_count) + " +2, " +
+            std::to_string(training_decoy_count) + " -2; " +
+            std::to_string(scored_transfer_candidates) + " +1, " +
+            std::to_string(transfer_decoy_count) + " -1; " +
+            std::to_string(calibrated_transfer_candidates) +
+            " calibrated, " +
+            std::to_string(data.transferred_ions.size()) + " accepted" +
+            "; posterior expected false=" +
+            std::to_string(accepted_expected_false) + " (" +
+            std::to_string(data.transferred_ions.empty() ? 0.0 :
+                accepted_expected_false /
+                    static_cast<double>(data.transferred_ions.size())) +
+            "), shifted-decoy null-tail expected false=" +
+            std::to_string(null_tail_expected_false) + " (" +
+            std::to_string(data.transferred_ions.empty() ? 0.0 :
+                null_tail_expected_false /
+                    static_cast<double>(data.transferred_ions.size())) +
+            ")" +
+            calibration_summary + ")",
         score_mbr_timing);
     return result;
 }

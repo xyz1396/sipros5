@@ -9,11 +9,13 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <vector>
 
 int main() {
+    assert(aerith::Config{}.sample_parallelism == 3);
     const auto split_tabs = [](const std::string& line) {
         std::vector<std::string> fields;
         std::size_t begin = 0;
@@ -45,6 +47,12 @@ int main() {
     assert(oxidized_rt_tokens[2] == 26);
     assert(oxidized_rt_tokens[8] == 11);
     assert(oxidized_rt_tokens[9] == 11);
+    const auto sip_entropy =
+        aerith::sip_entropy_abundance_scores_for_testing();
+    assert(sip_entropy[0] > 0.999f);
+    assert(sip_entropy[1] + 0.1f < sip_entropy[0]);
+    assert(sip_entropy[2] > 0.999f);
+    assert(sip_entropy[3] + 0.1f < sip_entropy[2]);
 #endif
     aerith::Psm intensity_psm;
     intensity_psm.log10_precursor_intensity = 3.0;
@@ -58,6 +66,48 @@ int main() {
     assert(std::abs(
         aerith::summed_isotope_apex_intensity(isotope_heights) - 39.0) <
         1e-12);
+
+    std::vector<double> mbr_targets;
+    std::vector<double> mbr_decoys;
+    for (int index = 0; index < 40; ++index) {
+        const double null_score =
+            -0.8 + 1.6 * static_cast<double>(index) / 39.0;
+        mbr_decoys.push_back(null_score);
+        mbr_targets.push_back(null_score);
+    }
+    for (int index = 0; index < 60; ++index) {
+        mbr_targets.push_back(
+            3.2 + 1.6 * static_cast<double>(index) / 59.0);
+    }
+    std::vector<double> mbr_identified_targets;
+    std::vector<double> mbr_identified_decoys;
+    for (int index = 0; index < 40; ++index) {
+        mbr_identified_targets.push_back(
+            3.6 + 1.2 * static_cast<double>(index) / 39.0);
+        mbr_identified_decoys.push_back(
+            -0.9 + 1.8 * static_cast<double>(index) / 39.0);
+    }
+    double mbr_false_prior = 0.0;
+    const auto mbr_probabilities =
+        aerith::mbr_posterior_probabilities(
+            mbr_targets, mbr_decoys, mbr_identified_targets,
+            mbr_identified_decoys, &mbr_false_prior);
+    assert(mbr_probabilities.size() == mbr_targets.size());
+    assert(mbr_false_prior > 0.1 && mbr_false_prior < 0.8);
+    for (const double probability : mbr_probabilities) {
+        assert(probability >= 0.0 && probability <= 1.0);
+    }
+    const double null_probability = std::accumulate(
+        mbr_probabilities.begin(), mbr_probabilities.begin() + 40, 0.0) /
+        40.0;
+    const double signal_probability = std::accumulate(
+        mbr_probabilities.begin() + 40, mbr_probabilities.end(), 0.0) /
+        60.0;
+    assert(signal_probability > null_probability + 0.5);
+    assert(signal_probability > 0.9);
+    assert(aerith::mbr_posterior_probabilities(
+        std::vector<double>(9, 1.0), mbr_decoys,
+        mbr_identified_targets, mbr_identified_decoys).empty());
 
     const std::vector<double> scores{10.0, 9.0, 8.0, 7.0, 6.0};
     const std::vector<int> labels{1, 1, -1, 1, -1};
@@ -160,7 +210,7 @@ int main() {
     }
     assert(sip_rows == 1);
     sip_result.close();
-    const auto check_score_table = [](
+    const auto check_score_table = [&](
         const std::filesystem::path& path, std::size_t expected_rows) {
         std::ifstream table(path);
         std::string header_line;
@@ -190,7 +240,7 @@ int main() {
         fasta << ">sp|P1|ONE Protein one OS=Test GN=one PE=1\n"
               << "MAAAAAAABBBBBBBK\n"
               << ">sp|P2|TWO Protein two OS=Test GN=two PE=4\n"
-              << "MBBBBBBBCCCCCCCK\n";
+              << "MBBBBBBBMMCCCCCCCK\n";
     }
     {
         std::ofstream fasta(decoy_database);
@@ -215,13 +265,17 @@ int main() {
         psm.ms2_isotopic_abundance = 50.0;
         data.rows.push_back(std::move(psm));
     };
-    add_psm("sample.1.1", "K[AAAAAAA]R", "{sp|P1|ONE}");
+    add_psm("sample.1.1", "K[%AAAAAAA]R", "{sp|P1|ONE}");
     add_psm("sample.2.1", "K[BBBBBBB]R", "{sp|P1|ONE,sp|P2|TWO}");
-    add_psm("sample.3.1", "K[CCCCCCC]R", "{sp|P2|TWO}");
+    add_psm(
+        "sample.3.1", "K[M~M~CCCCCCC]R", "{sp|P2|TWO}");
+    data.rows.front().calculated_mass = 777.0;
+    data.rows.front().calculated_mz = 389.5073;
     aerith::TransferredIon transfer;
     transfer.psm = data.rows.front();
     transfer.psm.charge = 3;
     transfer.psm.quantified_intensity = 500.0;
+    transfer.psm.quantification_attempted = true;
     transfer.psm.has_chromatographic_feature = true;
     transfer.psm.apex_retention = 60.0;
     transfer.psm.retention_start = 55.0;
@@ -230,6 +284,7 @@ int main() {
     transfer.psm.apex_scan = 10;
     transfer.psm.traced_scans = 3;
     transfer.qvalue = 0.005;
+    transfer.donor_psm_id = "sample.1.1";
     data.transferred_ions.push_back(std::move(transfer));
     aerith::Config config;
     config.database_path = database.string();
@@ -256,6 +311,8 @@ int main() {
     assert(std::filesystem::exists(root / "combined_protein.tsv"));
     assert(std::filesystem::exists(
         root / "combined_protein_with_PSM.tsv"));
+    assert(std::filesystem::exists(
+        root / "combined_peptide_with_PSM.tsv"));
     assert(std::filesystem::exists(root / "combined_protein.fas"));
     assert(std::filesystem::exists(root / "combined_psm.tsv"));
     assert(std::filesystem::exists(root / "combined_ion.tsv"));
@@ -288,6 +345,12 @@ int main() {
     assert(std::find(
                protein_header.begin(), protein_header.end(),
                "Razor Observed Modifications") == protein_header.end());
+    assert(std::find(
+               protein_header.begin(), protein_header.end(),
+               "Is Decoy") == protein_header.end());
+    assert(std::find(
+               protein_header.begin(), protein_header.end(),
+               "Is Contaminant") == protein_header.end());
     std::ifstream combined_protein_table(root / "combined_protein.tsv");
     const std::string combined_protein_report(
         (std::istreambuf_iterator<char>(combined_protein_table)),
@@ -344,6 +407,8 @@ int main() {
     assert(combined_psm_protein_report.find(
         "sample_SIP_intensity") != std::string::npos);
     assert(combined_psm_protein_report.find(
+        "_SIP_AbundanceBins") == std::string::npos);
+    assert(combined_psm_protein_report.find(
         "_log10_precursorIntensities") == std::string::npos);
     assert(combined_psm_protein_report.find(
         "_ProteinAbundance") == std::string::npos);
@@ -378,10 +443,11 @@ int main() {
         report_row(combined_psm_protein_report, "sp|P1|ONE");
     const auto p2_annotated =
         report_row(combined_psm_protein_report, "sp|P2|TWO");
-    assert(p1_annotated[peptide_index] == "AAAAAAA,BBBBBBB,AAAAAAA");
-    assert(p2_annotated[peptide_index] == "CCCCCCC");
+    assert(p1_annotated[peptide_index] ==
+           "%AAAAAAA,BBBBBBB,%AAAAAAA");
+    assert(p2_annotated[peptide_index] == "M~M~CCCCCCC");
     assert(p1_annotated[psm_id_index] ==
-           "sample.1.1,sample.2.1,AAAAAAA_MBR");
+           "sample.1.1,sample.2.1,%AAAAAAA_49.5_MBR");
     assert(p2_annotated[psm_id_index] == "sample.3.1");
     const auto ms1_column = std::find(
         annotated_header.begin(), annotated_header.end(),
@@ -410,9 +476,7 @@ int main() {
         std::istreambuf_iterator<char>());
     assert(psm_report.find("\tIntensity\tAssigned Modifications") !=
            std::string::npos);
-    assert(psm_report.find("1C(57.0215)") != std::string::npos);
-    assert(psm_report.find("\tTarget\t") !=
-           std::string::npos);
+    assert(psm_report.find("3C(57.0215)") != std::string::npos);
     const auto header_end = psm_report.find('\n');
     const auto row_end = psm_report.find('\n', header_end + 1);
     assert(header_end != std::string::npos);
@@ -425,15 +489,24 @@ int main() {
         psm_header.begin(), psm_header.end(), "Observed Mass");
     const auto observed_mz = std::find(
         psm_header.begin(), psm_header.end(), "Observed M/Z");
+    const auto calculated_mass = std::find(
+        psm_header.begin(), psm_header.end(), "Calculated Peptide Mass");
+    const auto calculated_mz = std::find(
+        psm_header.begin(), psm_header.end(), "Calculated M/Z");
     assert(observed_mass != psm_header.end());
     assert(observed_mz != psm_header.end());
+    assert(calculated_mass != psm_header.end());
+    assert(calculated_mz != psm_header.end());
     assert(psm_row[observed_mass - psm_header.begin()] == "999.5000");
     assert(psm_row[observed_mz - psm_header.begin()] == "500.7573");
+    assert(psm_row[calculated_mass - psm_header.begin()] == "1000.0000");
+    assert(psm_row[calculated_mz - psm_header.begin()] == "501.0073");
     for (const std::string& removed : {
              "Calibrated Observed Mass", "Calibrated Observed M/Z",
              "SpectralSim", "RTScore", "Expectation",
              "Hyperscore", "Nextscore", "Observed Modifications",
-             "Is Decoy", "Is Contaminant", "Purity"}) {
+             "Is Decoy", "Is Contaminant", "Purity",
+             "Number of Enzymatic Termini", "Class"}) {
         assert(std::find(psm_header.begin(), psm_header.end(), removed) ==
                psm_header.end());
     }
@@ -470,8 +543,25 @@ int main() {
     assert(std::find(
                ion_header.begin(), ion_header.end(),
                "Observed Modifications") == ion_header.end());
+    assert(std::find(
+               ion_header.begin(), ion_header.end(),
+               "Compensation Voltage") == ion_header.end());
+    assert(std::find(
+               ion_header.begin(), ion_header.end(),
+               "SIP Abundance (%)") == ion_header.end());
     assert(match_type != ion_header.end());
+    const auto ion_sequence = std::find(
+        ion_header.begin(), ion_header.end(), "Peptide Sequence");
+    const auto ion_localization = std::find(
+        ion_header.begin(), ion_header.end(), "Localization");
+    assert(ion_sequence != ion_header.end());
+    assert(ion_localization != ion_header.end());
+    const std::string expected_localization =
+        "C:57.0215@MMC(1)C(1)C(1)C(1)C(1)C(1)C(1);"
+        "M:15.9949@M(1)M(1)CCCCCCC;";
     bool found_mbr = false;
+    bool found_localized = false;
+    bool found_nterm_only = false;
     std::size_t line_begin = ion_header_end + 1;
     while (line_begin < ion_report.size()) {
         const auto line_end = ion_report.find('\n', line_begin);
@@ -482,10 +572,120 @@ int main() {
             assert(fields[probability - ion_header.begin()].empty());
             found_mbr = true;
         }
+        if (fields[ion_sequence - ion_header.begin()] == "MMCCCCCCC") {
+            assert(fields[ion_localization - ion_header.begin()] ==
+                   expected_localization);
+            found_localized = true;
+        }
+        if (fields[ion_sequence - ion_header.begin()] == "AAAAAAA") {
+            assert(fields[ion_localization - ion_header.begin()].empty());
+            found_nterm_only = true;
+        }
         if (line_end == std::string::npos) break;
         line_begin = line_end + 1;
     }
     assert(found_mbr);
+    assert(found_localized);
+    assert(found_nterm_only);
+    std::ifstream combined_ion_table(root / "combined_ion.tsv");
+    std::string combined_ion_header_line;
+    assert(static_cast<bool>(std::getline(
+        combined_ion_table, combined_ion_header_line)));
+    const auto combined_ion_header = split_tabs(combined_ion_header_line);
+    const auto combined_sequence = std::find(
+        combined_ion_header.begin(), combined_ion_header.end(),
+        "Peptide Sequence");
+    const auto sample_localization = std::find(
+        combined_ion_header.begin(), combined_ion_header.end(),
+        "sample Localization");
+    const auto control_localization = std::find(
+        combined_ion_header.begin(), combined_ion_header.end(),
+        "negative_control Localization");
+    assert(combined_sequence != combined_ion_header.end());
+    assert(sample_localization != combined_ion_header.end());
+    assert(control_localization != combined_ion_header.end());
+    bool found_combined_localized = false;
+    std::string combined_ion_line;
+    while (std::getline(combined_ion_table, combined_ion_line)) {
+        const auto fields = split_tabs(combined_ion_line);
+        assert(fields.size() == combined_ion_header.size());
+        if (fields[combined_sequence - combined_ion_header.begin()] ==
+            "MMCCCCCCC") {
+            assert(fields[
+                sample_localization - combined_ion_header.begin()] ==
+                expected_localization);
+            assert(fields[
+                control_localization - combined_ion_header.begin()].empty());
+            found_combined_localized = true;
+        }
+    }
+    assert(found_combined_localized);
+    std::ifstream combined_modified_table(
+        root / "combined_modified_peptide.tsv");
+    std::string combined_modified_header_line;
+    assert(static_cast<bool>(std::getline(
+        combined_modified_table, combined_modified_header_line)));
+    const auto combined_modified_header =
+        split_tabs(combined_modified_header_line);
+    const auto combined_modified_sequence = std::find(
+        combined_modified_header.begin(), combined_modified_header.end(),
+        "Peptide Sequence");
+    const auto combined_modified_sample_localization = std::find(
+        combined_modified_header.begin(), combined_modified_header.end(),
+        "sample Localization");
+    const auto combined_modified_control_localization = std::find(
+        combined_modified_header.begin(), combined_modified_header.end(),
+        "negative_control Localization");
+    assert(combined_modified_sequence != combined_modified_header.end());
+    assert(combined_modified_sample_localization !=
+           combined_modified_header.end());
+    assert(combined_modified_control_localization !=
+           combined_modified_header.end());
+    bool found_combined_modified_localized = false;
+    std::string combined_modified_line;
+    while (std::getline(combined_modified_table, combined_modified_line)) {
+        const auto fields = split_tabs(combined_modified_line);
+        assert(fields.size() == combined_modified_header.size());
+        if (fields[
+                combined_modified_sequence -
+                combined_modified_header.begin()] == "MMCCCCCCC") {
+            assert(fields[
+                combined_modified_sample_localization -
+                combined_modified_header.begin()] ==
+                expected_localization);
+            assert(fields[
+                combined_modified_control_localization -
+                combined_modified_header.begin()].empty());
+            found_combined_modified_localized = true;
+        }
+    }
+    assert(found_combined_modified_localized);
+    std::ifstream modified_peptide_table(
+        root / "sample" / "modified_peptide.tsv");
+    std::string modified_header_line;
+    assert(static_cast<bool>(std::getline(
+        modified_peptide_table, modified_header_line)));
+    const auto modified_header = split_tabs(modified_header_line);
+    const auto modified_sequence_column = std::find(
+        modified_header.begin(), modified_header.end(), "Peptide Sequence");
+    const auto modified_localization = std::find(
+        modified_header.begin(), modified_header.end(), "Localization");
+    assert(modified_sequence_column != modified_header.end());
+    assert(modified_localization != modified_header.end());
+    bool found_modified_localized = false;
+    std::string modified_line;
+    while (std::getline(modified_peptide_table, modified_line)) {
+        const auto fields = split_tabs(modified_line);
+        assert(fields.size() == modified_header.size());
+        if (fields[modified_sequence_column - modified_header.begin()] ==
+            "MMCCCCCCC") {
+            assert(fields[
+                modified_localization - modified_header.begin()] ==
+                expected_localization);
+            found_modified_localized = true;
+        }
+    }
+    assert(found_modified_localized);
     std::ifstream combined_peptide_table(root / "combined_peptide.tsv");
     const std::string combined_peptide_report(
         (std::istreambuf_iterator<char>(combined_peptide_table)),
@@ -500,6 +700,7 @@ int main() {
     summary.targets = 7;
     summary.decoys = 6;
     summary.threads = 4;
+    summary.sample_parallelism = 2;
     summary.score_model = "test_model";
     summary.reporting_fdr = 0.01;
     summary.target_ids = 3;
@@ -575,6 +776,7 @@ int main() {
     assert_value_column("Decoys", "6");
     assert_value_column("Removed colliding decoy PSMs", "154");
     assert_value_column("OpenMP threads", "4");
+    assert_value_column("Concurrent samples", "2");
     assert_value_column("Score model", "test_model");
     assert_value_column("Reporting FDR", "1%");
     assert_value_column("Target PSMs", "3");
@@ -613,7 +815,12 @@ int main() {
     assert(log_text.find("aerith.log") == std::string::npos);
     aerith::Dataset sip_data;
     sip_data.rows = data.rows;
-    for (auto& psm : sip_data.rows) psm.sample_name = "sample";
+    sip_data.transferred_ions = data.transferred_ions;
+    sip_data.transferred_ions.front().psm.sample_name = "sample";
+    for (auto& psm : sip_data.rows) {
+        psm.sample_name = "sample";
+        psm.sip_abundance_bin = 16;
+    }
     sip_data.rows[0].quantification_attempted = true;
     sip_data.rows[0].has_chromatographic_feature = true;
     sip_data.rows[0].quantified_intensity = 123.0;
@@ -642,6 +849,8 @@ int main() {
         "SIP_sample_PSMids") != std::string::npos);
     assert(sip_mapping_report.find(
         "SIP_sample_PeptideSequences") != std::string::npos);
+    assert(sip_mapping_report.find(
+        "SIP_sample_SIP_AbundanceBins") == std::string::npos);
     assert(sip_mapping_report.find(
         "SIP_sample_MS1IsotopicAbundances") != std::string::npos);
     assert(sip_mapping_report.find(
@@ -687,13 +896,17 @@ int main() {
     assert(sip_p1[sip_column("sample Spectral Count")] == "1");
     assert(sip_p1[sip_column("sample Unique Spectral Count")] == "1");
     assert(sip_p1[sip_column("sample Total Spectral Count")] == "1");
-    assert(sip_p1[sip_column("sample Intensity")] == "123");
-    assert(sip_p1[sip_column("sample MaxLFQ Intensity")] == "123");
-    assert(sip_p1[sip_column("SIP_sample_PSMids")] == "sample.1.1");
-    assert(sip_p1[sip_column("SIP_sample_PeptideSequences")] == "AAAAAAA");
-    assert(sip_p1[sip_column("SIP_sample_MS1IsotopicAbundances")] == "49.5");
-    assert(sip_p1[sip_column("SIP_sample_MS2IsotopicAbundances")] == "50");
-    assert(sip_p1[sip_column("SIP_sample_SIP_intensity")] == "123");
+    assert(sip_p1[sip_column("sample Intensity")] == "623");
+    assert(sip_p1[sip_column("sample MaxLFQ Intensity")] == "500");
+    assert(sip_p1[sip_column("SIP_sample_PSMids")] ==
+           "sample.1.1,%AAAAAAA_49.5_MBR");
+    assert(sip_p1[sip_column("SIP_sample_PeptideSequences")] ==
+           "%AAAAAAA,%AAAAAAA");
+    assert(sip_p1[sip_column("SIP_sample_MS1IsotopicAbundances")] ==
+           "49.5,49.5");
+    assert(sip_p1[sip_column("SIP_sample_MS2IsotopicAbundances")] ==
+           "50,50");
+    assert(sip_p1[sip_column("SIP_sample_SIP_intensity")] == "123,500");
     assert(sip_p2[sip_column("Combined Total Peptides")] == "1");
     assert(sip_p2[sip_column("Combined Spectral Count")] == "1");
     assert(sip_p2[sip_column("Combined Unique Spectral Count")] == "1");
@@ -701,8 +914,11 @@ int main() {
     assert(sip_p2[sip_column("sample Intensity")] == "456");
     assert(sip_p2[sip_column("sample MaxLFQ Intensity")] == "456");
     assert(sip_p2[sip_column("SIP_sample_PSMids")] == "sample.3.1");
-    assert(sip_p2[sip_column("SIP_sample_PeptideSequences")] == "CCCCCCC");
+    assert(sip_p2[sip_column("SIP_sample_PeptideSequences")] ==
+           "M~M~CCCCCCC");
     assert(sip_mapping_report.find("sample.2.1") == std::string::npos);
+    assert(std::filesystem::exists(
+        root / "combined_peptide_with_SIP_filtered_PSM.tsv"));
 
     aerith::Config sip_isotope_config;
     sip_isotope_config.sip_isotope = "C13";
@@ -726,6 +942,9 @@ int main() {
     psm_table.close();
     peptide_table.close();
     ion_table.close();
+    combined_ion_table.close();
+    combined_modified_table.close();
+    modified_peptide_table.close();
     combined_peptide_table.close();
     sip_mapping_table.close();
     std::filesystem::remove_all(root);

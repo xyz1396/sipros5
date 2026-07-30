@@ -41,6 +41,7 @@ struct Config {
     std::string protein_output_dir;
     std::string spectrum_model_path;
     std::string rt_model_path;
+    std::string prediction_cache_path;
     std::string sip_isotope;
     std::vector<std::string> fixed_ptm_selectors;
     std::vector<std::string> ptm_selectors;
@@ -72,10 +73,13 @@ struct Config {
     unsigned int quant_intensity_mode = 2;
     bool quant_normalize = true;
     bool mbr = true;
+    bool stream_samples = true;
+    unsigned int sample_parallelism = 3;
     double mbr_rt_window = 1.0;
     unsigned int mbr_top_runs = 10;
     double mbr_min_correlation = 0.0;
     double mbr_ion_fdr = 0.01;
+    double mbr_sip_bin_width = 10.0;
 };
 
 struct Summary {
@@ -135,6 +139,7 @@ struct Summary {
     double omp_parallel_efficiency = 1.0;
     std::string score_model = "global_rt_samplewise_omp_simd_l2_svm_3fold";
     unsigned int threads = 1;
+    unsigned int sample_parallelism = 1;
     std::vector<std::string> feature_names;
     std::vector<SampleModelSummary> sample_models;
 };

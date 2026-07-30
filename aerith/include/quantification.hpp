@@ -21,6 +21,14 @@ double top_three_intensity(const IonIntensityMap& intensities);
 double summed_intensity(const IonIntensityMap& intensities);
 double summed_isotope_apex_intensity(
     const std::array<double, 3>& isotope_apices);
+double summed_isotope_apex_intensity(
+    const std::vector<double>& isotope_apices);
+std::vector<double> mbr_posterior_probabilities(
+    const std::vector<double>& target_scores,
+    const std::vector<double>& decoy_scores,
+    const std::vector<double>& identified_target_scores,
+    const std::vector<double>& identified_decoy_scores,
+    double* false_prior = nullptr);
 
 struct IntensityNormalizer {
     static constexpr std::size_t bins = 10;

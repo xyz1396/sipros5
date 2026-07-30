@@ -7,9 +7,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace aerith {
@@ -39,6 +42,7 @@ struct Psm {
     double log10_precursor_intensity = 0.0;
     double ms1_isotopic_abundance = 0.0;
     double ms2_isotopic_abundance = 0.0;
+    int sip_abundance_bin = -1;
     std::string sample_name;
     double quantified_intensity = 0.0;
     double apex_retention = 0.0;
@@ -47,6 +51,9 @@ struct Psm {
     double retention_fwhm = 0.0;
     double quant_mass_error_ppm = 0.0;
     double quant_isotope_kl = 0.0;
+    double quant_isotope_correlation = 0.0;
+    double quant_isotope_fraction = 0.0;
+    double quant_isotope_apex_spread = 0.0;
     std::uint64_t parent_scan = 0;
     std::uint64_t apex_scan = 0;
     std::size_t traced_scans = 0;
@@ -54,7 +61,6 @@ struct Psm {
     bool has_chromatographic_feature = false;
     float delta_rt_loess_real = 0.0f;
     float predicted_rt_real_units = 0.0f;
-    std::string raw_line;
     std::vector<float> features;
 };
 
@@ -62,6 +68,8 @@ struct TransferredIon {
     Psm psm;
     double score = 0.0;
     double qvalue = 1.0;
+    std::size_t donor_row = std::numeric_limits<std::size_t>::max();
+    std::string donor_psm_id;
 };
 
 struct Dataset {
@@ -95,7 +103,13 @@ struct SvmFit {
 
 class PinReader {
 public:
-    static Dataset read(const Config& config);
+    static Dataset read(
+        const Config& config,
+        const std::unordered_set<std::string>* global_target_peptides =
+            nullptr);
+    static Dataset discover_predictions(
+        const Config& config,
+        std::unordered_set<std::string>& global_target_peptides);
 
 private:
     static std::vector<std::string_view> split_tabs(const std::string& line);
@@ -104,24 +118,77 @@ private:
     static std::size_t required_column(
         const std::unordered_map<std::string, std::size_t>& columns,
         const std::string& name);
-    static Dataset read_file(const Config& config, const std::string& input_path,
-                             std::size_t file_id, int expected_label);
+    static Dataset read_file(
+        const Config& config, const std::string& input_path,
+        std::size_t file_id, int expected_label,
+        Psm* destination, std::size_t expected_rows);
+};
+
+class SpectrumPredictionLibrary {
+public:
+    struct Impl;
+    SpectrumPredictionLibrary();
+    ~SpectrumPredictionLibrary();
+    SpectrumPredictionLibrary(SpectrumPredictionLibrary&&) noexcept;
+    SpectrumPredictionLibrary& operator=(
+        SpectrumPredictionLibrary&&) noexcept;
+    SpectrumPredictionLibrary(const SpectrumPredictionLibrary&) = delete;
+    SpectrumPredictionLibrary& operator=(
+        const SpectrumPredictionLibrary&) = delete;
+
+    std::string device() const;
+    StageTiming timing() const;
+
+private:
+    std::unique_ptr<Impl> impl_;
+    friend class SpectralEntropyFeature;
 };
 
 class SpectralEntropyFeature {
 public:
     static void add(const Config& config, Dataset& data);
+    static SpectrumPredictionLibrary predict(
+        const Config& config, const Dataset& unique_peptides);
+    static void add(
+        const Config& config, Dataset& data,
+        const SpectrumPredictionLibrary& predictions);
+};
+
+class RtPredictionLibrary {
+public:
+    struct Impl;
+    RtPredictionLibrary();
+    ~RtPredictionLibrary();
+    RtPredictionLibrary(RtPredictionLibrary&&) noexcept;
+    RtPredictionLibrary& operator=(RtPredictionLibrary&&) noexcept;
+    RtPredictionLibrary(const RtPredictionLibrary&) = delete;
+    RtPredictionLibrary& operator=(const RtPredictionLibrary&) = delete;
+
+    std::string device() const;
+    StageTiming timing() const;
+
+private:
+    std::unique_ptr<Impl> impl_;
+    friend class PredictedRetentionTimeFeature;
 };
 
 class PredictedRetentionTimeFeature {
 public:
     static void add(const Config& config, Dataset& data);
+    static RtPredictionLibrary predict(
+        const Config& config, const Dataset& unique_peptides);
+    static void add(
+        const Config& config, Dataset& data,
+        const RtPredictionLibrary& predictions);
 };
 
 #if defined(AERITH_WITH_TORCH) || defined(AERITH_TEST_WITH_TORCH)
 // Exposes the shared DIA-NN tokenizer to the regression test. Regular and SIP
 // searches both call the same encoder through PredictedRetentionTimeFeature.
 std::vector<std::int64_t> diann_rt_tokens_for_testing(const Psm& psm);
+// Scores one synthetic experimental SIP spectrum with the matching and an
+// intentionally wrong abundance envelope through the production entropy path.
+std::array<float, 4> sip_entropy_abundance_scores_for_testing();
 #endif
 
 class RetentionTimeModel {
@@ -156,13 +223,10 @@ public:
         const std::vector<std::size_t>& outer_folds);
 
 private:
-    static std::vector<std::string_view> split_tabs(const std::string& line);
     static std::string formatted_number(double value);
-    static std::vector<std::string_view> row_fields(
-        const Dataset& data, const Psm& psm);
     static void write_original_field(
         std::ostream& stream, const Dataset& data, const Psm& psm,
-        const std::vector<std::string_view>& fields, std::size_t column);
+        std::size_t column);
     static std::vector<std::size_t> selected_rows(
         const Dataset& data, std::size_t file, int label = 0);
     static void write_results(

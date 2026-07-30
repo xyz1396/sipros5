@@ -1,6 +1,7 @@
 #include "pipeline.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <exception>
 #include <filesystem>
@@ -17,19 +18,15 @@
 
 namespace aerith {
 
-std::vector<std::string_view> ResultWriter::split_tabs(const std::string& line) {
-    std::vector<std::string_view> fields;
-    std::size_t begin = 0;
-    while (true) {
-        const auto tab = line.find('\t', begin);
-        if (tab == std::string::npos) {
-            fields.emplace_back(line.data() + begin, line.size() - begin);
-            break;
-        }
-        fields.emplace_back(line.data() + begin, tab - begin);
-        begin = tab + 1;
+template <typename Number>
+std::string compact_number(Number value) {
+    char buffer[64];
+    const auto result = std::to_chars(
+        std::begin(buffer), std::end(buffer), value);
+    if (result.ec != std::errc{}) {
+        throw std::runtime_error("Cannot format stored PIN numeric value");
     }
-    return fields;
+    return std::string(buffer, result.ptr);
 }
 
 std::string ResultWriter::formatted_number(double value) {
@@ -38,21 +35,20 @@ std::string ResultWriter::formatted_number(double value) {
     return stream.str();
 }
 
-std::vector<std::string_view> ResultWriter::row_fields(
-    const Dataset& data, const Psm& psm) {
-    auto fields = split_tabs(psm.raw_line);
-    if (fields.size() != data.headers.size()) {
-        throw std::runtime_error("Stored PIN row no longer matches its header");
-    }
-    return fields;
-}
-
 void ResultWriter::write_original_field(
     std::ostream& stream, const Dataset& data, const Psm& psm,
-    const std::vector<std::string_view>& fields, std::size_t column) {
+    std::size_t column) {
     const auto& name = data.headers[column];
     if (name == "SpecId") stream << psm.id;
     else if (name == "Label") stream << psm.label;
+    else if (name == "ScanNr") stream << psm.scan;
+    else if (name == "retentiontime") {
+        stream << compact_number(psm.retention);
+    } else if (name == "ExpMass") {
+        stream << compact_number(psm.exp_mass);
+    } else if (name == "ObservedMass") {
+        stream << compact_number(psm.observed_mass);
+    }
     else if (name == "ranks") stream << psm.rank;
     else if (name == "diffScores") stream << formatted_number(psm.diff_score);
     else if (name == "MS1IsotopicAbundances") {
@@ -61,8 +57,26 @@ void ResultWriter::write_original_field(
         stream << formatted_number(psm.ms2_isotopic_abundance);
     } else if (name == "SampleName") {
         stream << psm.sample_name;
+    } else if (name == "Peptide") {
+        stream << psm.peptide;
+    } else if (name == "Proteins") {
+        stream << psm.proteins;
+    } else {
+        const auto feature = std::find(
+            data.numeric_columns.begin(),
+            data.numeric_columns.end(), column);
+        if (feature == data.numeric_columns.end()) {
+            throw std::runtime_error(
+                "Cannot reconstruct stored PIN column: " + name);
+        }
+        const auto index = static_cast<std::size_t>(
+            feature - data.numeric_columns.begin());
+        if (index >= psm.features.size()) {
+            throw std::runtime_error(
+                "Stored PSM has no value for PIN column: " + name);
+        }
+        stream << compact_number(psm.features[index]);
     }
-    else stream << fields[column];
 }
 
 std::vector<std::size_t> ResultWriter::selected_rows(
@@ -145,7 +159,6 @@ void ResultWriter::write_filtered_results(
     });
     for (const auto i : rows) {
         const auto& psm = data.rows[i];
-        const auto fields = row_fields(data, psm);
         stream << psm.id << '\t' << scores[i] << '\t' << q[i] << '\t' << pep[i];
         for (std::size_t column = 0; column < data.headers.size(); ++column) {
             if (data.headers[column] == "SpecId" ||
@@ -167,7 +180,7 @@ void ResultWriter::write_filtered_results(
                 }
             }
             stream << '\t';
-            write_original_field(stream, data, psm, fields, column);
+            write_original_field(stream, data, psm, column);
             if (data.headers[column] == "retentiontime" &&
                 data.has_predicted_rt_diagnostics) {
                 stream << '\t' << formatted_number(psm.predicted_rt_real_units)
@@ -260,6 +273,7 @@ void print_summary(std::ostream& output, const Summary& summary) {
         "Removed colliding decoy PSMs",
         summary.removed_decoy_peptide_collisions);
     print_summary_value("OpenMP threads", summary.threads);
+    print_summary_value("Concurrent samples", summary.sample_parallelism);
     print_summary_value("Score model", summary.score_model);
 
     output << "\nResults\n";

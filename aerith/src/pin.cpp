@@ -59,8 +59,10 @@ std::size_t PinReader::required_column(
     return found->second;
 }
 
-Dataset PinReader::read_file(const Config& config, const std::string& input_path,
-                             std::size_t file_id, int expected_label) {
+Dataset PinReader::read_file(
+    const Config& config, const std::string& input_path,
+    std::size_t file_id, int expected_label,
+    Psm* destination, std::size_t expected_rows) {
     std::ifstream input(input_path);
     if (!input) {
         throw std::runtime_error("Cannot open input PIN: " + input_path);
@@ -127,6 +129,7 @@ Dataset PinReader::read_file(const Config& config, const std::string& input_path
     }
 
     std::size_t line_number = 1;
+    std::size_t row_index = 0;
     while (std::getline(input, line)) {
         ++line_number;
         if (!line.empty() && line.back() == '\r') {
@@ -141,8 +144,11 @@ Dataset PinReader::read_file(const Config& config, const std::string& input_path
                                      std::to_string(fields.size()) + " fields; expected " +
                                      std::to_string(headers.size()));
         }
+        if (row_index >= expected_rows) {
+            throw std::runtime_error(
+                "Input PIN changed while it was being read: " + input_path);
+        }
         Psm row;
-        row.raw_line = line;
         row.id = std::string(fields[id_col]);
         row.peptide = std::string(fields[peptide_col]);
         row.proteins = std::string(fields[proteins_col]);
@@ -218,25 +224,32 @@ Dataset PinReader::read_file(const Config& config, const std::string& input_path
             row.features.push_back(static_cast<float>(
                 parse_number(fields[column], headers[column], line_number)));
         }
-        data.rows.push_back(std::move(row));
+        destination[row_index++] = std::move(row);
     }
-    if (data.rows.empty()) {
+    if (row_index == 0) {
         throw std::runtime_error("Input PIN has no PSM rows");
+    }
+    if (row_index != expected_rows) {
+        throw std::runtime_error(
+            "Input PIN changed while it was being read: " + input_path);
     }
     return data;
 }
 
-Dataset PinReader::read(const Config& config) {
+Dataset PinReader::read(
+    const Config& config,
+    const std::unordered_set<std::string>* global_target_peptides) {
     Dataset combined;
     const bool paired = !config.target_pins.empty();
     const std::size_t samples =
         paired ? config.target_pins.size() : config.inputs.size();
     combined.input_paths.resize(samples);
-    std::vector<Dataset> parts(paired ? samples * 2 : samples);
+    const std::size_t task_count = paired ? samples * 2 : samples;
+    std::vector<std::size_t> row_counts(task_count, 0);
     std::exception_ptr failure;
     #pragma omp parallel for schedule(dynamic)
     for (std::ptrdiff_t task = 0;
-         task < static_cast<std::ptrdiff_t>(parts.size()); ++task) {
+         task < static_cast<std::ptrdiff_t>(task_count); ++task) {
         try {
             const auto index = static_cast<std::size_t>(task);
             const auto file = paired ? index / 2 : index;
@@ -244,49 +257,87 @@ Dataset PinReader::read(const Config& config) {
             const auto& path = paired
                 ? (label == 1 ? config.target_pins[file] : config.decoy_pins[file])
                 : config.inputs[file];
-            parts[index] = read_file(config, path, file, label);
+            std::ifstream input(path);
+            if (!input) {
+                throw std::runtime_error("Cannot open input PIN: " + path);
+            }
+            std::string line;
+            if (!std::getline(input, line)) {
+                throw std::runtime_error("Input PIN is empty: " + path);
+            }
+            std::size_t rows = 0;
+            while (std::getline(input, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (!line.empty()) ++rows;
+            }
+            if (rows == 0) {
+                throw std::runtime_error("Input PIN has no PSM rows");
+            }
+            row_counts[index] = rows;
         } catch (...) {
             #pragma omp critical(aerith_read_failure)
             if (!failure) failure = std::current_exception();
         }
     }
     if (failure) std::rethrow_exception(failure);
-    std::size_t combined_rows = 0;
-    for (const auto& part : parts) combined_rows += part.rows.size();
-    combined.rows.reserve(combined_rows);
+    std::vector<std::size_t> row_offsets(task_count + 1, 0);
+    std::partial_sum(
+        row_counts.begin(), row_counts.end(), row_offsets.begin() + 1);
+    combined.rows.resize(row_offsets.back());
+    std::vector<Dataset> schemas(task_count);
+    failure = nullptr;
+    #pragma omp parallel for schedule(dynamic)
+    for (std::ptrdiff_t task = 0;
+         task < static_cast<std::ptrdiff_t>(task_count); ++task) {
+        try {
+            const auto index = static_cast<std::size_t>(task);
+            const auto file = paired ? index / 2 : index;
+            const int label = paired ? (index % 2 == 0 ? 1 : -1) : 0;
+            const auto& path = paired
+                ? (label == 1
+                       ? config.target_pins[file]
+                       : config.decoy_pins[file])
+                : config.inputs[file];
+            schemas[index] = read_file(
+                config, path, file, label,
+                combined.rows.data() + row_offsets[index],
+                row_counts[index]);
+        } catch (...) {
+            #pragma omp critical(aerith_read_failure)
+            if (!failure) failure = std::current_exception();
+        }
+    }
+    if (failure) std::rethrow_exception(failure);
     for (std::size_t file_id = 0; file_id < samples; ++file_id) {
         combined.input_paths[file_id] = paired
             ? config.target_pins[file_id] + " + " + config.decoy_pins[file_id]
             : config.inputs[file_id];
     }
-    for (auto& part : parts) {
+    for (const auto& schema : schemas) {
         if (combined.feature_names.empty()) {
-            combined.feature_names = part.feature_names;
-            combined.headers = part.headers;
-            combined.columns = part.columns;
-            combined.numeric_columns = part.numeric_columns;
-        } else if (combined.feature_names != part.feature_names) {
+            combined.feature_names = schema.feature_names;
+            combined.headers = schema.headers;
+            combined.columns = schema.columns;
+            combined.numeric_columns = schema.numeric_columns;
+        } else if (combined.feature_names != schema.feature_names) {
             throw std::runtime_error("PIN numeric feature schemas differ between inputs");
-        } else if (combined.headers != part.headers) {
+        } else if (combined.headers != schema.headers) {
             throw std::runtime_error("PIN column schemas differ between inputs");
         }
-        for (auto& row : part.rows) {
-            combined.rows.push_back(std::move(row));
-        }
-        // A moved-from Psm still occupies the full, relatively large Psm
-        // object in the part vector. Release each part as soon as it has been
-        // merged instead of retaining a second row-object array until return.
-        std::vector<Psm>().swap(part.rows);
     }
     // A decoy whose naked peptide is also observed as a target is not valid
     // null evidence.  Remove these collisions before joint scan ranking, SVM
     // training, and target-decoy FDR estimation.  The target set is global
     // across the inputs because all samples use the same search database.
-    std::unordered_set<std::string> target_peptides;
-    for (const auto& row : combined.rows) {
-        if (row.label != 1) continue;
-        const auto peptide = stripped_peptide(row.peptide);
-        if (!peptide.empty()) target_peptides.insert(peptide);
+    std::unordered_set<std::string> local_target_peptides;
+    const auto* target_peptides = global_target_peptides;
+    if (target_peptides == nullptr) {
+        for (const auto& row : combined.rows) {
+            if (row.label != 1) continue;
+            const auto peptide = stripped_peptide(row.peptide);
+            if (!peptide.empty()) local_target_peptides.insert(peptide);
+        }
+        target_peptides = &local_target_peptides;
     }
     const auto rows_before_collision_filter = combined.rows.size();
     combined.rows.erase(
@@ -296,7 +347,7 @@ Dataset PinReader::read(const Config& config) {
                 if (row.label != -1) return false;
                 const auto peptide = stripped_peptide(row.peptide);
                 return !peptide.empty() &&
-                    target_peptides.count(peptide) != 0;
+                    target_peptides->count(peptide) != 0;
             }),
         combined.rows.end());
     combined.removed_decoy_peptide_collisions =
@@ -368,6 +419,106 @@ Dataset PinReader::read(const Config& config) {
         }
     }
     return combined;
+}
+
+Dataset PinReader::discover_predictions(
+    const Config& config,
+    std::unordered_set<std::string>& global_target_peptides) {
+    const bool paired = !config.target_pins.empty();
+    const std::size_t samples = paired
+        ? config.target_pins.size() : config.inputs.size();
+    const std::size_t task_count = paired ? samples * 2 : samples;
+    struct TaskDiscovery {
+        std::vector<Psm> peptides;
+        std::unordered_set<std::string> targets;
+    };
+    std::vector<TaskDiscovery> tasks(task_count);
+    std::exception_ptr failure;
+    #pragma omp parallel for schedule(dynamic)
+    for (std::ptrdiff_t task = 0;
+         task < static_cast<std::ptrdiff_t>(task_count); ++task) {
+        try {
+            const auto index = static_cast<std::size_t>(task);
+            const auto file = paired ? index / 2 : index;
+            const bool target = !paired || index % 2 == 0;
+            const auto& path = paired
+                ? (target ? config.target_pins[file]
+                          : config.decoy_pins[file])
+                : config.inputs[file];
+            std::ifstream input(path);
+            if (!input) {
+                throw std::runtime_error(
+                    "Cannot open input PIN: " + path);
+            }
+            std::string line;
+            if (!std::getline(input, line)) {
+                throw std::runtime_error("Input PIN is empty: " + path);
+            }
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const auto headers = split_tabs(line);
+            std::size_t peptide_column = headers.size();
+            std::size_t charge_column = headers.size();
+            for (std::size_t column = 0; column < headers.size(); ++column) {
+                if (headers[column] == "Peptide") peptide_column = column;
+                if (headers[column] == "parentCharges") {
+                    charge_column = column;
+                }
+            }
+            if (peptide_column == headers.size() ||
+                charge_column == headers.size()) {
+                throw std::runtime_error(
+                    "PIN discovery requires Peptide and parentCharges: " +
+                    path);
+            }
+            std::unordered_set<std::string> unique;
+            std::size_t line_number = 1;
+            while (std::getline(input, line)) {
+                ++line_number;
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.empty()) continue;
+                const auto fields = split_tabs(line);
+                if (fields.size() != headers.size()) {
+                    throw std::runtime_error(
+                        "PIN discovery found an inconsistent row in " +
+                        path);
+                }
+                const std::string peptide(fields[peptide_column]);
+                const int charge = static_cast<int>(parse_number(
+                    fields[charge_column], "parentCharges", line_number));
+                const auto key = peptide + '\x1f' +
+                    std::to_string(charge);
+                if (unique.insert(key).second) {
+                    Psm exemplar;
+                    exemplar.peptide = peptide;
+                    exemplar.charge = charge;
+                    tasks[index].peptides.push_back(std::move(exemplar));
+                }
+                if (target) {
+                    const auto naked = stripped_peptide(peptide);
+                    if (!naked.empty()) tasks[index].targets.insert(naked);
+                }
+            }
+        } catch (...) {
+            #pragma omp critical(aerith_prediction_discovery_failure)
+            if (!failure) failure = std::current_exception();
+        }
+    }
+    if (failure) std::rethrow_exception(failure);
+
+    Dataset result;
+    std::unordered_set<std::string> unique;
+    for (auto& task : tasks) {
+        global_target_peptides.insert(
+            task.targets.begin(), task.targets.end());
+        for (auto& psm : task.peptides) {
+            const auto key = psm.peptide + '\x1f' +
+                std::to_string(psm.charge);
+            if (unique.insert(key).second) {
+                result.rows.push_back(std::move(psm));
+            }
+        }
+    }
+    return result;
 }
 
 } // namespace aerith

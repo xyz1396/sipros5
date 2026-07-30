@@ -70,6 +70,7 @@ struct ModificationInfo {
     std::string sequence;
     std::string modified_peptide;
     std::vector<std::string> assigned;
+    std::string localization;
 };
 
 struct PeptideAggregate {
@@ -81,11 +82,14 @@ struct PeptideAggregate {
     std::set<std::string> mapped_genes;
     std::set<std::string> mapped_proteins;
     std::set<std::string> assigned_modifications;
+    std::set<std::string> localizations;
     std::set<int> charges;
     std::size_t start = 0;
     std::size_t end = 0;
     std::size_t spectral_count = 0;
     int charge = 0;
+    int sip_abundance_bin = -1;
+    double sip_abundance_pct = -1.0;
     double mz = 0.0;
     double observed_mass = 0.0;
     double probability = 0.0;
@@ -173,6 +177,8 @@ ModificationInfo modification_info(
     }
 
     ModificationInfo result;
+    std::map<std::pair<char, std::string>, std::set<std::size_t>>
+        localized_sites;
     for (const auto token : nterm_tokens) {
         double mass = 0.0;
         if (!ptm_mass(token, mass)) continue;
@@ -190,18 +196,31 @@ ModificationInfo modification_info(
                 residue.tokens.end();
         if (fixed_cam && residue.amino_acid == 'C' && !replaces_cam) {
             constexpr double cam = 57.021464;
-            result.modified_peptide += "[+" + mass_text(cam) + "]";
+            const auto text = mass_text(cam);
+            result.modified_peptide += "[+" + text + "]";
             result.assigned.push_back(
-                std::to_string(index + 1) + "C(" + mass_text(cam) + ")");
+                std::to_string(index + 1) + "C(" + text + ")");
+            localized_sites[{residue.amino_acid, text}].insert(index);
         }
         for (const auto token : residue.tokens) {
             double mass = 0.0;
             if (!ptm_mass(token, mass)) continue;
-            result.modified_peptide += "[+" + mass_text(mass) + "]";
+            const auto text = mass_text(mass);
+            result.modified_peptide += "[+" + text + "]";
             result.assigned.push_back(
                 std::to_string(index + 1) + residue.amino_acid +
-                "(" + mass_text(mass) + ")");
+                "(" + text + ")");
+            localized_sites[{residue.amino_acid, text}].insert(index);
         }
+    }
+    for (const auto& [modification, sites] : localized_sites) {
+        result.localization.push_back(modification.first);
+        result.localization += ":" + modification.second + "@";
+        for (std::size_t index = 0; index < result.sequence.size(); ++index) {
+            result.localization.push_back(result.sequence[index]);
+            if (sites.count(index) != 0) result.localization += "(1)";
+        }
+        result.localization.push_back(';');
     }
     if (result.assigned.empty()) result.modified_peptide.clear();
     return result;
@@ -475,6 +494,9 @@ std::string aggregate_ion_key(const std::string& modified_sequence,
         ? psm.calculated_mass : psm.exp_mass;
     stream << modified_sequence << '#' << psm.charge << '#'
            << std::fixed << std::setprecision(4) << mass;
+    if (psm.sip_abundance_bin >= 0) {
+        stream << "#sipbin" << psm.sip_abundance_bin;
+    }
     return stream.str();
 }
 
@@ -498,6 +520,9 @@ void update_peptide_aggregate(
     value.charges.insert(psm.charge);
     value.assigned_modifications.insert(
         modifications.assigned.begin(), modifications.assigned.end());
+    if (!modifications.localization.empty()) {
+        value.localizations.insert(modifications.localization);
+    }
     update_ion_intensity(
         value.ion_intensities, aggregate_ion_key(modified, psm),
         psm_intensity(psm));
@@ -527,6 +552,9 @@ void update_peptide_aggregate(
         value.probability = probability;
         value.protein = razor_protein;
         value.charge = psm.charge;
+        value.sip_abundance_bin = psm.sip_abundance_bin;
+        value.sip_abundance_pct =
+            std::clamp(psm.ms2_isotopic_abundance, 0.0, 100.0);
         const double report_mass = psm.calculated_mass > 0.0
             ? psm.calculated_mass : psm.exp_mass;
         value.observed_mass =
@@ -733,9 +761,8 @@ void write_psm_report(
         << "\tCalculated Peptide Mass\tCalculated M/Z"
         << "\tDelta Mass\tSVMscore"
         << "\tProbability"
-        << "\tQvalue\tNumber of Enzymatic Termini\tNumber of Missed Cleavages"
+        << "\tQvalue\tNumber of Missed Cleavages"
         << "\tProtein Start\tProtein End\tIntensity\tAssigned Modifications"
-        << "\tClass"
         << "\tIs Unique\tProtein\tProtein ID\tEntry Name\tGene"
         << "\tProtein Description\tMapped Genes\tMapped Proteins"
         << "\tParent Scan Number\tApex Retention Time\tApex Scan Number"
@@ -785,13 +812,17 @@ void write_psm_report(
             (psm.observed_mass +
              static_cast<double>(psm.charge) * proton) /
             static_cast<double>(psm.charge);
+        // exp_mass retains the precursor isotope-window shift selected by
+        // the search.  Report the monoisotopic mass reconstructed during
+        // quantification so downstream tools such as IonQuant do not trace
+        // an M+1/M+2 envelope as though it were the peptide monoisotope.
         const double calculated_mass = psm.calculated_mass > 0.0
             ? psm.calculated_mass : psm.exp_mass;
         const double calculated_mz = psm.calculated_mz > 0.0
             ? psm.calculated_mz
             : (calculated_mass +
                static_cast<double>(psm.charge) * proton) /
-                static_cast<double>(psm.charge);
+                  static_cast<double>(psm.charge);
         std::vector<std::string> mapped_proteins;
         std::set<std::string> mapped_genes;
         for (const auto& protein : protein_ids(psm, config.decoy_prefix)) {
@@ -827,11 +858,11 @@ void write_psm_report(
                << psm.observed_mass - calculated_mass << '\t'
                << scores[row] << '\t'
                << 1.0 - pep[row] << '\t' << std::setprecision(14) << q[row]
-               << "\t2\t" << psm.missed_cleavages << '\t'
+               << '\t' << psm.missed_cleavages << '\t'
                << protein_start << '\t' << protein_end << '\t'
                << std::setprecision(2) << psm_intensity(psm) << '\t'
                << join_values(modifications.assigned)
-               << "\tTarget\t"
+               << '\t'
                << (evidence->second.proteins.size() == 1 ? "true" : "false")
                << '\t' << razor->second << '\t' << entry.protein_id << '\t'
                << entry.entry_name << '\t' << entry.gene << '\t'
@@ -875,8 +906,12 @@ void write_sample_peptide_reports(
         throw std::runtime_error("Cannot create output: " + ion_path.string());
     }
     ions << "Peptide Sequence\tModified Sequence\tPrev AA\tNext AA\tStart\tEnd"
-         << "\tPeptide Length\tM/Z\tCharge\tObserved Mass"
-         << "\tCompensation Voltage\tProbability\tSpectral Count"
+         << "\tPeptide Length\tM/Z\tCharge";
+    if (!config.sip_isotope.empty()) {
+        ions << "\tSIP Abundance (%)";
+    }
+    ions << "\tObserved Mass"
+         << "\tProbability\tSpectral Count"
          << "\tApex Retention Time\tApex Scan Number\tRetention Time Start"
          << "\tRetention Time End\tRetention Time FWHM\tTraced Scans"
          << "\tIntensity\tMatch Type\tAssigned Modifications"
@@ -888,8 +923,14 @@ void write_sample_peptide_reports(
         ions << value.sequence << '\t' << value.modified_sequence << '\t'
              << value.previous << '\t' << value.next << '\t' << value.start
              << '\t' << value.end << '\t' << value.sequence.size() << '\t'
-             << std::setprecision(4) << value.mz << '\t' << value.charge
-             << '\t' << value.observed_mass << "\t0\t";
+             << std::setprecision(4) << value.mz << '\t' << value.charge;
+        if (!config.sip_isotope.empty()) {
+            ions << '\t';
+            if (value.sip_abundance_pct >= 0.0) {
+                ions << std::setprecision(4) << value.sip_abundance_pct;
+            }
+        }
+        ions << '\t' << value.observed_mass << '\t';
         if (!(value.match_type == "MBR" && value.spectral_count == 0)) {
             ions << value.probability;
         }
@@ -907,7 +948,7 @@ void write_sample_peptide_reports(
              << '\t' << value.match_type << '\t'
              << join_values(value.assigned_modifications) << '\t';
         write_protein_fields(ions, value);
-        ions << "\t\n";
+        ions << '\t' << join_values(value.localizations) << '\n';
     }
 
     const auto peptide_path = directory / "peptide.tsv";
@@ -972,7 +1013,7 @@ void write_sample_peptide_reports(
                  << value.match_type << '\t'
                  << join_values(value.assigned_modifications) << '\t';
         write_protein_fields(modified, value);
-        modified << "\t\n";
+        modified << '\t' << join_values(value.localizations) << '\n';
     }
 }
 
@@ -1031,7 +1072,7 @@ void write_report(
     const auto table_path = directory / "protein.tsv";
     std::ofstream table(table_path);
     if (!table) throw std::runtime_error("Cannot create output: " + table_path.string());
-    table << "Protein\tProtein ID\tEntry Name\tGene\tLength\tIs Decoy\tIs Contaminant"
+    table << "Protein\tProtein ID\tEntry Name\tGene\tLength"
           << "\tOrganism\tProtein Description\tProtein Existence\tCoverage"
           << "\tProtein Probability\tTop Peptide Probability\tProtein Qvalue"
           << "\tTotal Peptides\tUnique Peptides\tRazor Peptides\tTotal Spectral Count"
@@ -1054,7 +1095,7 @@ void write_report(
         }
         table << protein << '\t' << entry.protein_id << '\t' << entry.entry_name
               << '\t' << entry.gene << '\t' << entry.sequence.size()
-              << "\tfalse\tfalse\t" << entry.organism << '\t' << entry.description
+              << '\t' << entry.organism << '\t' << entry.description
               << '\t' << entry.existence << '\t' << std::setprecision(2)
               << coverage(entry, value.total_peptides) << '\t' << std::setprecision(4)
               << score.probability << '\t' << score.score << '\t'
@@ -1193,9 +1234,16 @@ void write_combined_peptide_reports(
                     ? "unmatched" : found->second.match_type);
         }
     };
-    const auto write_empty_sample_fields = [&](std::ostream& stream) {
-        for (std::size_t file = 0; file < samples.size(); ++file) {
+    const auto write_sample_localizations = [&](
+        std::ostream& stream, const std::string& key,
+        const std::map<std::string, PeptideAggregate> ReportData::*member) {
+        for (const auto& sample : samples) {
+            const auto& values = sample.*member;
+            const auto found = values.find(key);
             stream << '\t';
+            if (found != values.end()) {
+                stream << join_values(found->second.localizations);
+            }
         }
     };
 
@@ -1205,8 +1253,11 @@ void write_combined_peptide_reports(
         throw std::runtime_error("Cannot create output: " + ion_path.string());
     }
     ions << "Peptide Sequence\tModified Sequence\tPrev AA\tNext AA\tStart\tEnd"
-         << "\tPeptide Length\tM/Z\tCharge\tCompensation Voltage"
-         << "\tAssigned Modifications\tProtein\tProtein ID\tEntry Name\tGene"
+         << "\tPeptide Length\tM/Z\tCharge";
+    if (!config.sip_isotope.empty()) {
+        ions << "\tSIP Abundance (%)";
+    }
+    ions << "\tAssigned Modifications\tProtein\tProtein ID\tEntry Name\tGene"
          << "\tProtein Description\tMapped Genes\tMapped Proteins";
     for (const auto& name : names) ions << '\t' << name << " Spectral Count";
     for (const auto& label : {"Apex Retention Time", "Apex Scan Number",
@@ -1226,7 +1277,14 @@ void write_combined_peptide_reports(
              << value->previous << '\t' << value->next << '\t'
              << value->start << '\t' << value->end << '\t'
              << value->sequence.size() << '\t' << std::setprecision(4)
-             << value->mz << '\t' << value->charge << "\t0\t"
+             << value->mz << '\t' << value->charge;
+        if (!config.sip_isotope.empty()) {
+            ions << '\t';
+            if (value->sip_abundance_pct >= 0.0) {
+                ions << std::setprecision(4) << value->sip_abundance_pct;
+            }
+        }
+        ions << '\t'
              << join_values(value->assigned_modifications) << '\t';
         write_protein_fields(ions, *value);
         write_sample_counts(ions, key, &ReportData::ions);
@@ -1281,7 +1339,7 @@ void write_combined_peptide_reports(
         }
         write_sample_intensities(ions, key, &ReportData::ions);
         write_match_types(ions, key, &ReportData::ions);
-        write_empty_sample_fields(ions);
+        write_sample_localizations(ions, key, &ReportData::ions);
         ions << '\n';
     }
 
@@ -1337,7 +1395,8 @@ void write_combined_peptide_reports(
         }
         write_match_types(
             modified, key, &ReportData::modified_peptides);
-        write_empty_sample_fields(modified);
+        write_sample_localizations(
+            modified, key, &ReportData::modified_peptides);
         modified << '\n';
     }
 
@@ -1540,15 +1599,17 @@ void write_combined_protein_report(
     }
     table.close();
 
-    struct ProteinPsmAggregate {
+    struct PsmAggregate {
         std::vector<std::string> psm_ids;
         std::vector<std::string> peptides;
         std::vector<std::string> ms1_abundances;
         std::vector<std::string> ms2_abundances;
         std::vector<std::string> sip_intensities;
     };
-    std::vector<std::unordered_map<std::string, ProteinPsmAggregate>>
+    std::vector<std::unordered_map<std::string, PsmAggregate>>
         psm_aggregates(samples.size());
+    std::vector<std::unordered_map<std::string, PsmAggregate>>
+        peptide_psm_aggregates(samples.size());
     const auto peptide_sequence = [](const std::string& peptide) {
         const auto open = peptide.find('[');
         const auto close = peptide.find(']', open == std::string::npos
@@ -1577,13 +1638,24 @@ void write_combined_protein_report(
         auto& aggregate =
             psm_aggregates[psm.file_id][razor->second];
         aggregate.psm_ids.push_back(psm.id);
-        aggregate.peptides.push_back(
-            peptide_sequence(psm.peptide));
+        const auto sequence = peptide_sequence(psm.peptide);
+        aggregate.peptides.push_back(sequence);
         aggregate.ms1_abundances.push_back(
             number_text(psm.ms1_isotopic_abundance));
         aggregate.ms2_abundances.push_back(
             number_text(psm.ms2_isotopic_abundance));
         aggregate.sip_intensities.push_back(
+            number_text(psm.has_chromatographic_feature
+                ? psm.quantified_intensity : 0.0));
+        auto& peptide_aggregate =
+            peptide_psm_aggregates[psm.file_id][sequence];
+        peptide_aggregate.psm_ids.push_back(psm.id);
+        peptide_aggregate.peptides.push_back(sequence);
+        peptide_aggregate.ms1_abundances.push_back(
+            number_text(psm.ms1_isotopic_abundance));
+        peptide_aggregate.ms2_abundances.push_back(
+            number_text(psm.ms2_isotopic_abundance));
+        peptide_aggregate.sip_intensities.push_back(
             number_text(psm.has_chromatographic_feature
                 ? psm.quantified_intensity : 0.0));
     }
@@ -1598,17 +1670,28 @@ void write_combined_protein_report(
         }
         auto& aggregate =
             psm_aggregates[psm.file_id][razor->second];
-        aggregate.psm_ids.push_back(sequence + "_MBR");
+        const auto mbr_id = sequence + "_" +
+            number_text(psm.ms1_isotopic_abundance) + "_MBR";
+        aggregate.psm_ids.push_back(mbr_id);
         aggregate.peptides.push_back(sequence);
-        // The transferred PSM is copied from the donor before its file_id is
-        // changed to the acceptor, so these abundance values remain the
-        // donor's SIP estimates while the intensity is quantified in the
-        // acceptor run.
+        // MS1 abundance is the acceptor envelope's selected SIP-bin center;
+        // MS2 abundance is the matched donor PSM's measured value.
         aggregate.ms1_abundances.push_back(
             number_text(psm.ms1_isotopic_abundance));
         aggregate.ms2_abundances.push_back(
             number_text(psm.ms2_isotopic_abundance));
         aggregate.sip_intensities.push_back(
+            number_text(psm.has_chromatographic_feature
+                ? psm.quantified_intensity : 0.0));
+        auto& peptide_aggregate =
+            peptide_psm_aggregates[psm.file_id][sequence];
+        peptide_aggregate.psm_ids.push_back(mbr_id);
+        peptide_aggregate.peptides.push_back(sequence);
+        peptide_aggregate.ms1_abundances.push_back(
+            number_text(psm.ms1_isotopic_abundance));
+        peptide_aggregate.ms2_abundances.push_back(
+            number_text(psm.ms2_isotopic_abundance));
+        peptide_aggregate.sip_intensities.push_back(
             number_text(psm.has_chromatographic_feature
                 ? psm.quantified_intensity : 0.0));
     }
@@ -1670,6 +1753,52 @@ void write_combined_protein_report(
             }
         }
         annotated << '\n';
+    }
+    annotated.close();
+
+    const auto peptide_base_path = directory / "combined_peptide.tsv";
+    const auto peptide_annotated_path =
+        directory / "combined_peptide_with_PSM.tsv";
+    std::ifstream peptide_base(peptide_base_path);
+    std::ofstream peptide_annotated(peptide_annotated_path);
+    if (!peptide_base || !peptide_annotated ||
+        !std::getline(peptide_base, line)) {
+        throw std::runtime_error(
+            "Cannot create peptide PSM annotation report");
+    }
+    peptide_annotated << line;
+    for (const auto& name : names) {
+        peptide_annotated
+            << '\t' << name << "_PSMids"
+            << '\t' << name << "_PeptideSequences"
+            << '\t' << name << "_MS1IsotopicAbundances"
+            << '\t' << name << "_MS2IsotopicAbundances"
+            << '\t' << name << "_SIP_intensity";
+    }
+    peptide_annotated << '\n';
+    while (std::getline(peptide_base, line)) {
+        const auto tab = line.find('\t');
+        const std::string peptide =
+            line.substr(0, tab == std::string::npos ? line.size() : tab);
+        peptide_annotated << line;
+        for (std::size_t sample = 0; sample < samples.size(); ++sample) {
+            const auto aggregate =
+                peptide_psm_aggregates[sample].find(peptide);
+            if (aggregate == peptide_psm_aggregates[sample].end()) {
+                peptide_annotated << "\t\t\t\t\t";
+            } else {
+                peptide_annotated
+                    << '\t' << join(aggregate->second.psm_ids)
+                    << '\t' << join(aggregate->second.peptides)
+                    << '\t' << join(
+                        aggregate->second.ms1_abundances)
+                    << '\t' << join(
+                        aggregate->second.ms2_abundances)
+                    << '\t' << join(
+                        aggregate->second.sip_intensities);
+            }
+        }
+        peptide_annotated << '\n';
     }
 
     const auto fasta_path = directory / "combined_protein.fas";
@@ -1980,6 +2109,8 @@ void ProteinAssembler::write_sip_psm_mapping(
     };
     std::vector<std::unordered_map<std::string, Aggregate>> aggregates(
         samples.size());
+    std::vector<std::unordered_map<std::string, Aggregate>>
+        peptide_aggregates(samples.size());
     std::vector<ReportData> report_samples(samples.size());
     std::unordered_map<std::string, std::set<std::string>>
         peptide_proteins;
@@ -2043,10 +2174,17 @@ void ProteinAssembler::write_sip_psm_mapping(
         ion_aggregate.mz = psm.calculated_mz;
         update_ion_intensity(
             ion_aggregate.ion_intensities, ion, intensity);
+        auto& peptide_value =
+            report_samples[sample].peptides[peptide];
+        peptide_value.sequence = peptide;
+        peptide_value.match_type = "MS/MS";
+        ++peptide_value.spectral_count;
+        update_ion_intensity(
+            peptide_value.ion_intensities, ion, intensity);
         auto& aggregate = aggregates[sample][razor->second];
         aggregate.psm_ids.push_back(psm.id);
-        aggregate.peptides.push_back(
-            peptide_sequence(psm.peptide));
+        const auto sequence = peptide_sequence(psm.peptide);
+        aggregate.peptides.push_back(sequence);
         aggregate.ms1.push_back(
             number_text(psm.ms1_isotopic_abundance));
         aggregate.ms2.push_back(
@@ -2054,6 +2192,83 @@ void ProteinAssembler::write_sip_psm_mapping(
         aggregate.sip_intensity.push_back(
             number_text(psm.has_chromatographic_feature
                 ? psm.quantified_intensity : 0.0));
+        auto& peptide_aggregate =
+            peptide_aggregates[sample][sequence];
+        peptide_aggregate.psm_ids.push_back(psm.id);
+        peptide_aggregate.peptides.push_back(sequence);
+        peptide_aggregate.ms1.push_back(
+            number_text(psm.ms1_isotopic_abundance));
+        peptide_aggregate.ms2.push_back(
+            number_text(psm.ms2_isotopic_abundance));
+        peptide_aggregate.sip_intensity.push_back(
+            number_text(psm.has_chromatographic_feature
+                ? psm.quantified_intensity : 0.0));
+    }
+    for (const auto& transfer : data.transferred_ions) {
+        const auto& psm = transfer.psm;
+        if (psm.sample_name.empty() ||
+            sample_indices.count(psm.sample_name) == 0) {
+            continue;
+        }
+        const auto sample = sample_indices.at(psm.sample_name);
+        const auto razor =
+            psm_razor_proteins.find(transfer.donor_psm_id);
+        if (razor == psm_razor_proteins.end() ||
+            protein_set.count(razor->second) == 0) {
+            continue;
+        }
+        const auto peptide = stripped_peptide(psm.peptide);
+        const bool unique =
+            peptide_proteins.count(peptide) != 0 &&
+            peptide_proteins.at(peptide).size() == 1;
+        const auto ion = ion_form(psm);
+        const double intensity = psm_intensity(psm);
+        for (const auto& protein :
+             protein_ids(psm, config.decoy_prefix)) {
+            if (protein_set.count(protein) == 0) continue;
+            auto& stats = report_samples[sample].proteins[protein];
+            stats.total_peptides.insert(peptide);
+            update_ion_intensity(
+                stats.total_ion_intensities, ion, intensity);
+            if (unique) {
+                stats.unique_peptides.insert(peptide);
+                update_ion_intensity(
+                    stats.unique_ion_intensities, ion, intensity);
+            }
+            if (protein == razor->second) {
+                stats.razor_peptides.insert(peptide);
+                update_ion_intensity(
+                    stats.razor_ion_intensities, ion, intensity);
+            }
+        }
+        auto& ion_aggregate = report_samples[sample].ions[ion];
+        ion_aggregate.mz = psm.calculated_mz;
+        update_ion_intensity(
+            ion_aggregate.ion_intensities, ion, intensity);
+        auto& peptide_value =
+            report_samples[sample].peptides[peptide];
+        peptide_value.sequence = peptide;
+        if (peptide_value.match_type != "MS/MS") {
+            peptide_value.match_type = "MBR";
+        }
+        update_ion_intensity(
+            peptide_value.ion_intensities, ion, intensity);
+        const auto sequence = peptide_sequence(psm.peptide);
+        const auto mbr_id = sequence + "_" +
+            number_text(psm.ms1_isotopic_abundance) + "_MBR";
+        auto append_transfer = [&](Aggregate& aggregate) {
+            aggregate.psm_ids.push_back(mbr_id);
+            aggregate.peptides.push_back(sequence);
+            aggregate.ms1.push_back(
+                number_text(psm.ms1_isotopic_abundance));
+            aggregate.ms2.push_back(
+                number_text(psm.ms2_isotopic_abundance));
+            aggregate.sip_intensity.push_back(
+                number_text(psm.has_chromatographic_feature
+                    ? psm.quantified_intensity : 0.0));
+        };
+        append_transfer(aggregates[sample][razor->second]);
+        append_transfer(peptide_aggregates[sample][sequence]);
     }
     const auto normalizer =
         build_report_intensity_normalizer(
@@ -2181,6 +2396,137 @@ void ProteinAssembler::write_sip_psm_mapping(
                 << '\t' << join(found->second.sip_intensity);
         }
         report << '\n';
+    }
+
+    const auto peptide_reference_path =
+        std::filesystem::path(config.protein_reference_path).parent_path() /
+        "combined_peptide.tsv";
+    std::ifstream peptide_reference(peptide_reference_path);
+    if (!peptide_reference || !std::getline(peptide_reference, line)) {
+        throw std::runtime_error(
+            "Cannot read combined peptide reference: " +
+            peptide_reference_path.string());
+    }
+    const auto peptide_header = split_tabs(line);
+    std::size_t peptide_metadata_columns = peptide_header.size();
+    for (std::size_t column = 0;
+         column < peptide_header.size(); ++column) {
+        if (peptide_header[column].size() > spectral_suffix.size() &&
+            peptide_header[column].compare(
+                peptide_header[column].size() - spectral_suffix.size(),
+                spectral_suffix.size(), spectral_suffix) == 0) {
+            peptide_metadata_columns = column;
+            break;
+        }
+    }
+    const auto peptide_output_path =
+        std::filesystem::path(config.sip_protein_output_path).parent_path() /
+        "combined_peptide_with_SIP_filtered_PSM.tsv";
+    std::ofstream peptide_report(peptide_output_path);
+    if (!peptide_report) {
+        throw std::runtime_error(
+            "Cannot create SIP-filtered peptide report: " +
+            peptide_output_path.string());
+    }
+    for (std::size_t column = 0;
+         column < peptide_metadata_columns; ++column) {
+        if (column) peptide_report << '\t';
+        peptide_report << peptide_header[column];
+    }
+    for (const auto& sample : samples) {
+        peptide_report << '\t' << sample << " Spectral Count";
+    }
+    for (const auto& sample : samples) {
+        peptide_report << '\t' << sample << " Intensity";
+    }
+    for (const auto& sample : samples) {
+        peptide_report << '\t' << sample << " MaxLFQ Intensity";
+    }
+    for (const auto& sample : samples) {
+        peptide_report << '\t' << sample << " Match Type";
+    }
+    for (const auto& sample : samples) {
+        peptide_report
+            << "\tSIP_" << sample << "_PSMids"
+            << "\tSIP_" << sample << "_PeptideSequences"
+            << "\tSIP_" << sample << "_MS1IsotopicAbundances"
+            << "\tSIP_" << sample << "_MS2IsotopicAbundances"
+            << "\tSIP_" << sample << "_SIP_intensity";
+    }
+    peptide_report << '\n';
+    while (std::getline(peptide_reference, line)) {
+        const auto fields = split_tabs(line);
+        if (fields.size() != peptide_header.size() || fields.empty()) {
+            throw std::runtime_error(
+                "Combined peptide reference contains a misaligned row");
+        }
+        const auto& peptide = fields.front();
+        bool observed = false;
+        for (const auto& sample : report_samples) {
+            if (sample.peptides.count(peptide) != 0) {
+                observed = true;
+                break;
+            }
+        }
+        if (!observed) continue;
+        for (std::size_t column = 0;
+             column < peptide_metadata_columns; ++column) {
+            if (column) peptide_report << '\t';
+            peptide_report << fields[column];
+        }
+        for (const auto& sample : report_samples) {
+            const auto found = sample.peptides.find(peptide);
+            peptide_report << '\t'
+                << (found == sample.peptides.end()
+                    ? 0 : found->second.spectral_count);
+        }
+        for (std::size_t sample = 0;
+             sample < report_samples.size(); ++sample) {
+            const auto found =
+                report_samples[sample].peptides.find(peptide);
+            peptide_report << '\t'
+                << integer_intensity_text(
+                    found == report_samples[sample].peptides.end()
+                        ? 0.0
+                        : normalized_intensity(
+                            found->second.ion_intensities,
+                            sample, normalizer));
+        }
+        std::vector<IonIntensityMap> peptide_ions(samples.size());
+        for (std::size_t sample = 0;
+             sample < report_samples.size(); ++sample) {
+            const auto found =
+                report_samples[sample].peptides.find(peptide);
+            if (found != report_samples[sample].peptides.end()) {
+                peptide_ions[sample] = found->second.ion_intensities;
+            }
+        }
+        const auto peptide_lfq = maxlfq(peptide_ions, normalizer);
+        for (const auto intensity : peptide_lfq) {
+            peptide_report << '\t'
+                           << integer_intensity_text(intensity);
+        }
+        for (const auto& sample : report_samples) {
+            const auto found = sample.peptides.find(peptide);
+            peptide_report << '\t'
+                << (found == sample.peptides.end()
+                    ? "unmatched" : found->second.match_type);
+        }
+        for (std::size_t sample = 0; sample < samples.size(); ++sample) {
+            const auto found =
+                peptide_aggregates[sample].find(peptide);
+            if (found == peptide_aggregates[sample].end()) {
+                peptide_report << "\t\t\t\t\t";
+                continue;
+            }
+            peptide_report
+                << '\t' << join(found->second.psm_ids)
+                << '\t' << join(found->second.peptides)
+                << '\t' << join(found->second.ms1)
+                << '\t' << join(found->second.ms2)
+                << '\t' << join(found->second.sip_intensity);
+        }
+        peptide_report << '\n';
     }
 }
 
