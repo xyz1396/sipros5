@@ -25,7 +25,11 @@ class search:
                  unlabeledInput: str | None = None, spectraDir: str | None = None,
                  topPsmsPerScan: int = 20, ptms: list[str] | None = None,
                  fixedPtms: list[str] | None = None,
-                 maxPtmCount: int | None = None) -> None:
+                 maxPtmCount: int | None = None,
+                 rtTolerance: float = 5.0,
+                 sfiEnvelopeTopN: int = 3,
+                 mvhCascadeTopN: int = 150,
+                 stageHdf5Copies: bool = True) -> None:
         self.core_count = available_cpu_count()
         self.element = element
         self.toleranceMS1 = toleranceMS1
@@ -56,6 +60,10 @@ class search:
         self.ptms = None if ptms is None else list(ptms)
         self.fixedPtms = None if fixedPtms is None else list(fixedPtms)
         self.maxPtmCount = maxPtmCount
+        self.rtTolerance = rtTolerance
+        self.sfiEnvelopeTopN = sfiEnvelopeTopN
+        self.mvhCascadeTopN = mvhCascadeTopN
+        self.stageHdf5Copies = stageHdf5Copies
         self.generatedSpectraDir = f'{outputPath}/spectra'
         self.decoyPrefix = 'DECOY_' if (self.psmTsv or self.unlabeledInput or self.spectraDir) else 'Decoy_'
 
@@ -218,6 +226,14 @@ class search:
         for hdf5_file, base in zip(self.hdf5_input_files, self.base_names_of_hdf5):
             expected = self.expected_hdf5_path(base)
             os.makedirs(os.path.dirname(expected), exist_ok=True)
+            if not self.stageHdf5Copies:
+                if not os.path.lexists(expected) and not self.dryrun:
+                    os.symlink(os.path.realpath(hdf5_file), expected)
+                self.hdf5_paths[base] = expected
+                self.logger.info(
+                    f'Reusing HDF5 input through lightweight link: {expected}'
+                )
+                continue
             if os.path.realpath(hdf5_file) != os.path.realpath(expected):
                 if not os.path.exists(expected):
                     self.logger.info(f'Staging HDF5 input {hdf5_file} to {expected}')
@@ -374,7 +390,11 @@ class search:
                 max_workers=search_allocation.worker_count) as executor:
             for commands in search_pairs:
                 futures = [
-                    executor.submit(self.run_command_sipros, command, threads)
+                    executor.submit(
+                        self.run_command_sipros,
+                        command,
+                        threads,
+                    )
                     for command, threads in zip(
                         commands, search_allocation.task_threads
                     )
@@ -437,6 +457,24 @@ class search:
         if self.unlabeledInput is None or self.unlabeledInput == '':
             self.logger.error('--unlabeled-input is required when --spectra-dir is not provided')
             raise SystemExit(1)
+        unlabeled_path = Path(self.unlabeledInput)
+        if unlabeled_path.is_dir():
+            real_directory = os.path.realpath(unlabeled_path)
+            hdf5_files = [
+                path for path in Path(real_directory).rglob('*')
+                if path.is_file() and self.is_hdf5_input(str(path))
+            ]
+            if not hdf5_files:
+                self.logger.error(
+                    f'No HDF5 files found under unlabeled input directory: '
+                    f'{real_directory}'
+                )
+                raise SystemExit(1)
+            self.logger.info(
+                f'Using {len(hdf5_files)} HDF5 files under {real_directory} '
+                'to match filtered regular-search PSMs'
+            )
+            return real_directory
         entry = self.input_entries(self.unlabeledInput)[0]
         real_entry = os.path.realpath(entry)
         if not os.path.exists(real_entry):
@@ -457,6 +495,19 @@ class search:
         return expected
 
     def generate_or_reuse_spectra_library(self) -> str:
+        def require_target_decoy_pair(directory: str) -> list[Path]:
+            files = list(Path(directory).glob('*.sfi'))
+            decoys = [path for path in files if 'decoy' in path.name.lower()]
+            targets = [path for path in files if 'decoy' not in path.name.lower()]
+            if len(targets) != 1 or len(decoys) != 1:
+                self.logger.error(
+                    f'SFI spectra library must contain exactly one target and '
+                    f'one generated-decoy index; found {len(targets)} target '
+                    f'and {len(decoys)} decoy files in {directory}'
+                )
+                raise SystemExit(1)
+            return files
+
         if self.spectraDir:
             if self.fixedPtms:
                 self.logger.error(
@@ -468,11 +519,8 @@ class search:
             if not os.path.isdir(spectra_dir):
                 self.logger.error(f'--spectra-dir does not exist or is not a directory: {spectra_dir}')
                 raise SystemExit(1)
-            h5_files = list(Path(spectra_dir).glob('*.h5')) + list(Path(spectra_dir).glob('*.hdf5'))
-            if not h5_files:
-                self.logger.error(f'No HDF5 spectra library files found in --spectra-dir: {spectra_dir}')
-                raise SystemExit(1)
-            self.logger.info(f'Reusing HDF5 spectra library from {spectra_dir}')
+            require_target_decoy_pair(spectra_dir)
+            self.logger.info(f'Reusing SFI spectra library from {spectra_dir}')
             return spectra_dir
         if not self.psmTsv:
             self.logger.error('--psm-tsv is required to generate a spectra library')
@@ -484,52 +532,62 @@ class search:
         cmd = (f'{self.q(self.siprosPath)} experimental-spectra '
                f'-i {self.q(self.psmTsv)} -f {self.q(unlabeled_hdf5)} '
                f'-o {self.q(self.generatedSpectraDir)} -a {self.element} '
-               f'-b {sip_range} -s {sip_step} --decoy -t {self.threadNumber}'
+               f'-b {self.q(sip_range)} -s {self.q(sip_step)} '
+               f'--decoy -t {self.threadNumber}'
+               f' --envelope-top-n {getattr(self, "sfiEnvelopeTopN", 3)}'
                f'{self.fixed_ptm_args()}')
         if not self.dryrun:
             self.run_command(cmd, threads=self.threadNumber)
-            spectra_files = list(Path(self.generatedSpectraDir).glob('*.h5')) + list(Path(self.generatedSpectraDir).glob('*.hdf5'))
-            if not spectra_files:
-                self.logger.error(f'experimental-spectra did not create HDF5 spectra files in {self.generatedSpectraDir}')
-                raise SystemExit(1)
-            non_hdf5 = [path for path in Path(self.generatedSpectraDir).iterdir()
-                        if path.is_file() and path.suffix.lower() not in {'.h5', '.hdf5'}]
-            if non_hdf5:
-                self.logger.error(f'Unexpected non-HDF5 spectra intermediates generated: {non_hdf5}')
+            require_target_decoy_pair(self.generatedSpectraDir)
+            non_sfi = [path for path in Path(self.generatedSpectraDir).iterdir()
+                       if path.is_file() and path.suffix.lower() != '.sfi']
+            if non_sfi:
+                self.logger.error(f'Unexpected non-SFI spectra intermediates generated: {non_sfi}')
                 raise SystemExit(1)
         return self.generatedSpectraDir
 
     def search_spectra_samples(self, spectra_dir: str):
-        commands: list[tuple[str, int]] = []
-        samples: list[tuple[str, str, str]] = []
+        search_pairs: list[tuple[str, str]] = []
         for base_name in self.base_names:
             hdf5_path = self.hdf5_paths[base_name]
             sample_dir = f'{self.outPutPath}/{base_name}'
             os.makedirs(sample_dir, exist_ok=True)
-            samples.append((base_name, hdf5_path, sample_dir))
-        allocation = allocate_threads(
-            self.threadNumber,
-            len(samples),
-            minimum_threads_per_task=MIN_SIPROS_THREADS,
+            common = (
+                f'{self.q(self.siprosPath)} search-spectra '
+                f'-f {self.q(hdf5_path)} --sfi {self.q(spectra_dir)} '
+                f'-o {self.q(sample_dir)} '
+                f'--tolerance-ms1 {self.toleranceMS1} --tolerance-ms1-unit da '
+                f'--tolerance-ms2 {self.toleranceMS2} --tolerance-ms2-unit da '
+                f'--rt-tolerance {getattr(self, "rtTolerance", 5.0)} '
+                f'--score-envelope-top-n {getattr(self, "sfiEnvelopeTopN", 3)} '
+                f'--mvh-cascade-top-n {getattr(self, "mvhCascadeTopN", 150)} '
+                f'--top-psms-per-scan {self.topPsmsPerScan}'
+            )
+            search_pairs.append((
+                f'{common} --sfi-label target',
+                f'{common} --sfi-label decoy',
+            ))
+        allocation = allocate_threads(self.threadNumber, 2)
+        self.log_thread_allocation(
+            'Sipros spectra paired target/decoy SFI-H5 search', allocation
         )
-        self.log_thread_allocation('Sipros spectra search', allocation)
         if allocation.worker_count == 0:
             return
-        for (_, hdf5_path, sample_dir), threads in zip(
-                samples, allocation.task_threads):
-            cmd = (f'{self.q(self.siprosPath)} search-spectra -f {self.q(hdf5_path)} '
-                   f'-h5 {self.q(spectra_dir)} -o {self.q(sample_dir)} '
-                   f'-t {threads} --tolerance-ms1 {self.toleranceMS1} --tolerance-ms1-unit da '
-                   f'--tolerance-ms2 {self.toleranceMS2} --tolerance-ms2-unit da --top-psms-per-scan {self.topPsmsPerScan}')
-            commands.append((cmd, threads))
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=allocation.worker_count) as executor:
-            futures = [
-                executor.submit(self.run_command_sipros, cmd, threads)
-                for cmd, threads in commands
-            ]
-            for future in concurrent.futures.as_completed(futures):
-                future.result()
+            for commands in search_pairs:
+                futures = [
+                    executor.submit(
+                        self.run_command_sipros,
+                        f'{command} -t {threads}',
+                        threads,
+                    )
+                    for command, threads in zip(
+                        commands, allocation.task_threads
+                    )
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
 
     def run_search_spectra(self) -> None:
         if self.element == 'R':

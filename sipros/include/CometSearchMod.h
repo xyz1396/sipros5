@@ -13,9 +13,9 @@ class MS2Scan;
 
 #include "proNovoConfig.h"
 #include "ms2scan.h"
+#include <algorithm>
 #include <ctype.h>
 #include <cstring>
-#include <set>
 
 // Redefined how the bin offset is interpreted and applied.  The valid range for the offset is
 // now between 0.0 and 1.0 and scales to the binWidth.
@@ -178,8 +178,8 @@ public:
 
 	static bool ScorePeptides(string * currentPeptide, bool *pbDuplFragment, double* _pdAAforward, double * _pdAAreverse, MS2Scan * mstSpectrum,
 			int precursorCharge, unsigned int *** _uiBinnedIonMasses, double & dXcorr);
-	static bool ScorePeptidesSIPNoCancelOut(vector<vector<double> > & vvdYionMass, vector<vector<double> > & vvdYionProb, vector<vector<double> > & vvdBionMass,
-				vector<vector<double> > & vvdBionProb, MS2Scan * mstSpectrum, vector<bool> & pbDuplFragment, vector<double> & vdBinnedIonMasses,
+	static bool ScorePeptidesSIPNoCancelOut(const vector<vector<double> > & vvdYionMass, const vector<vector<double> > & vvdYionProb, const vector<vector<double> > & vvdBionMass,
+				const vector<vector<double> > & vvdBionProb, MS2Scan * mstSpectrum, vector<unsigned char> & pbDuplFragment, vector<double> & vdBinnedIonMasses,
 				vector<int> & vdBin, double & dXcorr);
 	static double GetFragmentIonMass(int iWhichIonSeries, int i, int ctCharge, double *_pdAAforward, double *_pdAAreverse);
 

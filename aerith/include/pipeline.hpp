@@ -64,6 +64,19 @@ struct Psm {
     std::vector<float> features;
 };
 
+// Canonical, human-readable rendering of Sipros' compact peptide PTM tokens.
+// Protein assembly and the flat Aerith score tables share this conversion so
+// a peptide is annotated identically in every output.
+struct ModificationInfo {
+    std::string sequence;
+    std::string modified_peptide;
+    std::vector<std::string> assigned;
+    std::string localization;
+};
+
+ModificationInfo modification_info(
+    const std::string& decorated, bool fixed_cam);
+
 struct TransferredIon {
     Psm psm;
     double score = 0.0;
@@ -99,6 +112,8 @@ struct SvmFit {
     std::vector<double> scores;
     std::vector<std::array<unsigned int, kRtFolds>> iterations;
     std::vector<std::array<std::vector<double>, kRtFolds>> calibrated_weights;
+    std::vector<char> sample_valid;
+    std::vector<std::string> sample_warnings;
 };
 
 class PinReader {
@@ -232,13 +247,14 @@ private:
     static void write_results(
         const std::string& path, int label, std::size_t file,
         const Dataset& data, const std::vector<double>& scores,
-        const std::vector<double>& q, const std::vector<double>& pep);
+        const std::vector<double>& q, const std::vector<double>& pep,
+        bool fixed_cam);
     static void write_filtered_results(
         const std::string& path, std::size_t file, const Dataset& data,
         const std::vector<double>& scores, const std::vector<double>& q,
         const std::vector<double>& pep,
         const std::vector<double>& rt_residual, double threshold,
-        bool sip_output);
+        bool sip_output, bool fixed_cam);
 };
 
 struct QuantificationResult {

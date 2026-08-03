@@ -285,6 +285,28 @@ double fixtureMzAt(const Fixture &fixture,
                fixture.charge;
 }
 
+std::pair<std::vector<double>, std::vector<double>>
+fixturePrecursorEnvelope(const Fixture &fixture)
+{
+    std::vector<double> masses;
+    std::vector<double> probabilities;
+    for (size_t nominalIndex = 0;
+         nominalIndex < fixture.distribution.probability.size();
+         ++nominalIndex)
+    {
+        const double probability =
+            fixture.distribution.probability[nominalIndex];
+        if (!(probability > 0.0))
+            continue;
+        masses.push_back(
+            fixture.baseMass + centroidMassDelta(
+                fixture.distribution,
+                static_cast<int>(nominalIndex)));
+        probabilities.push_back(probability);
+    }
+    return {std::move(masses), std::move(probabilities)};
+}
+
 PSMfeatureExtractor::Ms1AbundanceResult fitFixture(
     Fixture &fixture,
     std::vector<isotopicPeak> *found = nullptr,
@@ -1105,6 +1127,45 @@ void checkFollowingScanNeighborhood()
           "MS1 feature extraction did not find a following-scan candidate");
 }
 
+void checkProductConvolvedPrecursorLookup()
+{
+    Fixture fixture = makeFixture(targetCases()[0], 0.5, 2);
+    auto envelope = fixturePrecursorEnvelope(fixture);
+    int scanNumber = 100;
+    const double matchedMz = fixtureMzAt(fixture, fixture.modeIndex);
+    const auto tolerance = [&](double)
+    { return 0.01 / fixture.charge; };
+    const std::vector<isotopicPeak> peaks =
+        PSMfeatureExtractor::findMs1IsotopicPeaksFromEnvelope(
+            &fixture.ms1,
+            scanNumber,
+            fixture.charge,
+            fixture.baseMass,
+            matchedMz,
+            envelope.first,
+            envelope.second,
+            tolerance);
+    check(!peaks.empty(),
+          "product-convolved precursor envelope found no MS1 peaks");
+    check(std::any_of(
+              peaks.begin(), peaks.end(), [&](const isotopicPeak &peak)
+              { return peak.isotopeIndex == fixture.modeIndex; }),
+          "product-convolved precursor envelope lost its matched apex");
+    const auto result =
+        PSMfeatureExtractor::getSIPelementAbundanceFromMS1PeaksWithEnvelope(
+            peaks,
+            fixture.baseMass,
+            fixture.peptide,
+            fixture.charge,
+            fixture.target->label,
+            fixture.expectedPct,
+            envelope.first,
+            envelope.second);
+    check(result.valid &&
+              std::fabs(result.abundancePct - fixture.expectedPct) <= 0.35,
+          "product-convolved precursor envelope produced the wrong MS1 abundance");
+}
+
 
 void checkEndpointStateIndependence()
 {
@@ -1171,6 +1232,7 @@ int main(int argc, char **argv)
         checkInvalidEvidenceAndUnsupportedTarget();
         checkRawCountAndFitScoreFeatures();
         checkFollowingScanNeighborhood();
+        checkProductConvolvedPrecursorLookup();
         checkEndpointStateIndependence();
 
         std::cout

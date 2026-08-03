@@ -66,13 +66,6 @@ struct ReportStats {
     std::set<std::string> razor_assigned_modifications;
 };
 
-struct ModificationInfo {
-    std::string sequence;
-    std::string modified_peptide;
-    std::vector<std::string> assigned;
-    std::string localization;
-};
-
 struct PeptideAggregate {
     std::string sequence;
     std::string modified_sequence;
@@ -2709,7 +2702,8 @@ ProteinAssemblyResult ProteinAssembler::write(
             {std::chrono::duration<double>(wall_end - wall_begin).count(),
              static_cast<double>(cpu_end - cpu_begin) / CLOCKS_PER_SEC},
             uses_omp,
-            uses_simd});
+            uses_simd,
+            {}});
     };
 
     auto wall_begin = Clock::now();

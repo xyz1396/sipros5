@@ -54,7 +54,7 @@ public:
 	map<string, IsotopeDistribution> vResidueIsotopicDistribution;
 
 	// emass functions for IsotopeDistribution's arithmetic
-	IsotopeDistribution sum(const IsotopeDistribution &distribution0, const IsotopeDistribution &distribution1);
+	IsotopeDistribution sum(const IsotopeDistribution &distribution0, const IsotopeDistribution &distribution1) const;
 
 	// compute isotoptic distributions for all product ions of a sequence
 	// this isotopologue class is modified by only adding this function
@@ -62,7 +62,7 @@ public:
 	// The first dimension of vvdBionMass and vvdBionProb is from b1, b2, ...
 	// the mass is calculated assuming cleavage of the peptide bond
 	bool computeProductIon(string sSequence, vector<vector<double>> &vvdYionMass, vector<vector<double>> &vvdYionProb,
-						   vector<vector<double>> &vvdBionMass, vector<vector<double>> &vvdBionProb);
+						   vector<vector<double>> &vvdBionMass, vector<vector<double>> &vvdBionProb) const;
 
 	// compute isotoptic distribution for an amino acid sequence
 	bool computeIsotopicDistribution(string sSequence, IsotopeDistribution &myIsotopeDistribution);
@@ -98,7 +98,7 @@ private:
 
 	bool parseProductIonSequence(
 		const string &sequence,
-		ProductIonState &state);
+		ProductIonState &state) const;
 
 	IsotopeDistribution multiply(const IsotopeDistribution &distribution0, int count);
 

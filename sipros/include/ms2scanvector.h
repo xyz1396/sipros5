@@ -159,7 +159,7 @@ public:
 	vector<double *> v_pdAAforwardGlobal;
 	vector<double *> v_pdAAreverseGlobal;
 	vector<unsigned int ***> v_uiBinnedIonMassesGlobal;
-	vector<vector<bool> > vvpbDuplFragmentGlobal;
+	vector<vector<unsigned char> > vvpbDuplFragmentGlobal;
 	vector<vector<double> > vvdBinnedIonMassesGlobal;
 	vector<vector<int> > vvdBinGlobal;
 	void preXcorr();

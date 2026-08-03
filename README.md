@@ -111,6 +111,58 @@ Elemental formulas also retain isotope-source provenance. Amino-acid atoms are
 sources always use the natural isotope distribution of the real CHONPS element.
 Generated spectra libraries record this contract in `chemistry_profile_id`, and
 `search-spectra` rejects libraries made with a different or legacy chemistry.
+Experimental spectra generation defaults to SIP abundances `0-100` at one
+percentage-point intervals. It writes one memory-mapped `spectra.sfi` target
+index and, with `--decoy`, one `spectra_Decoy.sfi` generated-decoy index; each
+record stores its own abundance and retention time. SFI v5 stores only the top
+three peaks by default in every precursor and product-ion isotope envelope
+(`--envelope-top-n` / workflow `--sfi-envelope-top-n`), and stores fragment m/z
+at 0.001-Da fixed-point resolution in a 16-byte fragment record and uses a
+sorted 4-byte packed product-ion index partitioned into sparse five-minute RT
+segments. Candidate gating reads only segments overlapping the configured RT
+window. Spectrum generation, precursor ordering, compact-array flattening,
+product-index blocks, payload validation, and SFI publication are parallel;
+generation logs report the worker count, fragment/posting counts, index-build
+time, checksum/layout time, parallel-write time, and final GiB. HDF5
+theoretical-spectrum libraries are not supported. Spectra search runs the target and decoy indexes
+in parallel, applies RT plus Raxport isolation-window precursor matching and a
+sparse product-ion gate, then scores survivors in MVH, Xcorr, and WDP order. It
+collects gate survivors in per-thread record bitsets and performs the final
+unique-record reduction in parallel, avoiding a serial candidate-ID sort; the
+regular-search-style timing table reports lookup and reduction CPU/wall
+parallelism separately. It
+precomputes each surviving SFI record's compact MVH ion list once, retains the
+best 150 MVH candidates per scan by default for the Xcorr/WDP cascade
+(`--mvh-cascade-top-n` changes this limit), and
+materializes compact spectra only for that bounded cascade. Final WDP scoring
+regenerates the full high-resolution b/y isotope envelopes from the peptide,
+per-record SIP abundance, and SFI chemistry metadata just as regular search
+does; it does not rank from the truncated SFI envelope. Matched-ion and
+spectrum-shape features consume those same full WDP envelopes. The precursor
+feature envelope is reconstructed with the legacy `b_(n-1) * y1` convolution
+and retained after the much larger product envelopes are released. It writes one
+`_target.pin` and one `_decoy.pin` per sample.
+
+The workflow's fast SIP mode performs the complete two-stage search in one
+command. It first runs the regular target/decoy FASTA cache search and Aerith
+PSM filtering for every sample. It then uses only accepted target rows from
+the resulting `*_filtered_psms.tsv` files to build one target and one generated
+decoy SFI covering the requested SIP range, searches both indexes, and runs a
+final cross-sample Aerith report. Existing HDF5 inputs are linked into the
+regular stage instead of copied, and the same scan files are reused by spectra
+generation, spectra search, and final feature calculation.
+
+```bash
+siproswf -i 'T01.h5,T02.h5,T03.h5,X1.h5,X2.h5,X3.h5' \
+  -f yeast.fasta --fast-sip-search -e C13 -r 0-100 -p 1 -t 48 \
+  --negative_control X1,X2,X3 -o fast_sip_output
+```
+
+Outputs are separated into `regular/`, `spectra_library/`, and
+`spectra_search/` below the requested output directory. The workflow logs the
+accepted regular-search target PSM count for each sample and emits a warning
+when a sample has zero accepted target PSMs.
+
 FASTA precursor estimates sum the expected exact isotope-mass shifts from all
 source-aware CHONPS atoms, divide by the expected nominal-neutron shift to get
 a peptide-specific spacing, and round the combined nominal shift once. The
@@ -124,14 +176,14 @@ precursor when the candidate list is empty.
 
 ### 5. Output Files
 
-- `SIP_filtered_psms.tsv`: target PSMs from all non-control samples that pass the unlabeled negative-control filter (1% FDR). It reports the final `SVMscore` and SIP element labeling percentages (`MS1IsotopicAbundances`, `MS2IsotopicAbundances`); training-only `Label` and `diffScores` fields are not exported. `isotopicPeakNumbers` is the raw number of extracted MS1 isotope peaks. `MS1IsotopeFitScore` is the theoretical-envelope coverage from `0` to `1`, set to `0` unless at least two compatible peaks are present; scores of at least `0.02` pass the MS1 abundance-fit validity threshold. MS1IsotopicAbundances are more sensitive; MS2IsotopicAbundances are more accurate.
-- `SIP_target_psms.tsv`, `SIP_decoy_psms.tsv`: all target and negative-control candidates used by the secondary SIP SVM, written in the same `PSMId`, `SVMscore`, `q-value`, `posterior_error_prob`, `peptide`, and `proteinIds` format as the corresponding sample-subdirectory score tables.
+- `SIP_filtered_psms.tsv`: target PSMs from all non-control samples that pass the unlabeled negative-control filter (1% FDR). It reports the final `SVMscore`, the compact search `Peptide`, a human-readable `ModifiedPeptide`, `AssignedModifications`, and SIP element labeling percentages (`MS1IsotopicAbundances`, `MS2IsotopicAbundances`); training-only `Label` and `diffScores` fields are not exported. `isotopicPeakNumbers` is the raw number of extracted MS1 isotope peaks. `MS1IsotopeFitScore` is the theoretical-envelope coverage from `0` to `1`, set to `0` unless at least two compatible peaks are present; scores of at least `0.02` pass the MS1 abundance-fit validity threshold. MS1IsotopicAbundances are more sensitive; MS2IsotopicAbundances are more accurate.
+- `SIP_target_psms.tsv`, `SIP_decoy_psms.tsv`: all target and negative-control candidates used by the secondary SIP SVM, written in the same `PSMId`, `SVMscore`, `q-value`, `posterior_error_prob`, `peptide`, `modifiedPeptide`, `assignedModifications`, and `proteinIds` format as the corresponding sample-subdirectory score tables.
 - `combined_protein_with_SIP_filtered_PSM.tsv`: maps unlabeled negative-control filtered PSMs to the proteins identified in each sample.
 - For each raw-file subdirectory:
   - `<sample>.h5`: Raxport scan data.
   - `<sample>_target.pin`, `<sample>_decoy.pin`: target and decoy search intermediates.
-  - `<sample>_target_psms.tsv`, `<sample>_decoy_psms.tsv`: Aerith reranked `SVMscore` tables.
-  - `<sample>_filtered_psms.tsv`: Aerith 1% FDR PSMs with original search and RT features.
+  - `<sample>_target_psms.tsv`, `<sample>_decoy_psms.tsv`: Aerith reranked `SVMscore` tables with compact and human-readable modified peptide forms and explicit assigned modifications.
+  - `<sample>_filtered_psms.tsv`: Aerith 1% FDR PSMs with original search and RT features, `ModifiedPeptide`, and `AssignedModifications`.
   - `psm.tsv`: FragPipe/Philosopher-style accepted PSM report with precursor
     intensity, assigned modifications, search class, protein coordinates, and
     FASTA annotations.
@@ -176,6 +228,9 @@ Aerith writes its timing and result summary to the workflow's existing
 directory. Every stage reports wall time, CPU time, and observed speedup. The
 results section reports distinct naked peptide sequences, distinct modified
 peptide forms, PTM peptide forms, and PTM-bearing PSMs at the configured FDR.
+If one sample has no confident target PSMs with which to initialize its
+sample-specific SVM, Aerith warns, writes zero accepted PSMs for that sample,
+and continues filtering the remaining samples.
 
 Aerith converts `log10_precursorIntensities` back to linear PSM intensity and
 uses Philosopher's top-three peptide-ion rule for total, unique, and razor

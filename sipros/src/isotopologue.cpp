@@ -378,7 +378,7 @@ bool Isotopologue::computePeptideIsotopicDistribution(
 
 bool Isotopologue::parseProductIonSequence(
 	const string &sequence,
-	ProductIonState &state)
+	ProductIonState &state) const
 {
 	state = ProductIonState{};
 	if (sequence.empty() || sequence.front() != '[')
@@ -534,7 +534,7 @@ bool Isotopologue::computeProductIon(
 	vector<vector<double>> &yIonMass,
 	vector<vector<double>> &yIonProb,
 	vector<vector<double>> &bIonMass,
-	vector<vector<double>> &bIonProb)
+	vector<vector<double>> &bIonProb) const
 {
 	yIonMass.clear();
 	yIonProb.clear();
@@ -656,7 +656,7 @@ bool Isotopologue::computeSourcedComposition(
 	return true;
 }
 
-IsotopeDistribution Isotopologue::sum(const IsotopeDistribution &distribution0, const IsotopeDistribution &distribution1)
+IsotopeDistribution Isotopologue::sum(const IsotopeDistribution &distribution0, const IsotopeDistribution &distribution1) const
 {
 	double ProbabilityCutoff_local = 0.000001;
 

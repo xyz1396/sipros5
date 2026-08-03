@@ -32,6 +32,13 @@ int main() {
     assert(aerith::stripped_peptide("[%M~PEPTIDE]R") == "MPEPTIDE");
     assert(aerith::stripped_peptide("K[PEPN!IDE]") == "PEPNIDE");
     assert(aerith::stripped_peptide("[PEPTIDE]R") == "PEPTIDE");
+    const auto rendered_modifications =
+        aerith::modification_info("K[PEPTM~IDC]R", true);
+    assert(rendered_modifications.sequence == "PEPTMIDC");
+    assert(rendered_modifications.modified_peptide ==
+           "PEPTM[+15.9949]IDC[+57.0215]");
+    assert(rendered_modifications.assigned ==
+           (std::vector<std::string>{"5M(15.9949)", "8C(57.0215)"}));
 #ifdef AERITH_TEST_WITH_TORCH
     aerith::Psm rt_psm;
     rt_psm.peptide = "R[QMDVVEQMMPGLK]D";
@@ -199,6 +206,10 @@ int main() {
     const auto sip_header = split_tabs(sip_header_line);
     assert(std::find(sip_header.begin(), sip_header.end(), "SVMscore") !=
            sip_header.end());
+    assert(std::find(sip_header.begin(), sip_header.end(),
+                     "ModifiedPeptide") != sip_header.end());
+    assert(std::find(sip_header.begin(), sip_header.end(),
+                     "AssignedModifications") != sip_header.end());
     for (const std::string& removed : {"score", "Label", "diffScores"}) {
         assert(std::find(sip_header.begin(), sip_header.end(), removed) ==
                sip_header.end());
@@ -217,11 +228,19 @@ int main() {
         assert(static_cast<bool>(std::getline(table, header_line)));
         assert(split_tabs(header_line) == std::vector<std::string>({
             "PSMId", "SVMscore", "q-value", "posterior_error_prob",
-            "peptide", "proteinIds"}));
+            "peptide", "modifiedPeptide", "assignedModifications",
+            "proteinIds"}));
         std::size_t rows = 0;
         std::string line;
         while (std::getline(table, line)) {
-            if (!line.empty()) ++rows;
+            if (line.empty()) continue;
+            const auto fields = split_tabs(line);
+            assert(fields.size() == 8);
+            if (fields[4] == "K[PEPTM~IDE]R") {
+                assert(fields[5] == "PEPTM[+15.9949]IDE");
+                assert(fields[6] == "5M(15.9949)");
+            }
+            ++rows;
         }
         assert(rows == expected_rows);
     };
@@ -499,8 +518,8 @@ int main() {
     assert(calculated_mz != psm_header.end());
     assert(psm_row[observed_mass - psm_header.begin()] == "999.5000");
     assert(psm_row[observed_mz - psm_header.begin()] == "500.7573");
-    assert(psm_row[calculated_mass - psm_header.begin()] == "1000.0000");
-    assert(psm_row[calculated_mz - psm_header.begin()] == "501.0073");
+    assert(psm_row[calculated_mass - psm_header.begin()] == "777.0000");
+    assert(psm_row[calculated_mz - psm_header.begin()] == "389.5073");
     for (const std::string& removed : {
              "Calibrated Observed Mass", "Calibrated Observed M/Z",
              "SpectralSim", "RTScore", "Expectation",
@@ -735,6 +754,11 @@ int main() {
     summary.quantification_stages.push_back({
         "Trace identified XICs + detect peaks/intensity",
         {2.0, 8.0}, true, false});
+    summary.quantification_stages.push_back({
+        "Fit covariance MBR LDA + probability/global ion FDR",
+        {1.0, 4.0}, true, false,
+        "four-population per-run calibration: 10 +2, 5 -2; "
+        "SIP-bin FDR audit b0=2/post:0.01/null:0.00"});
     summary.protein_assembly_stages = assembly.stages;
     std::ostringstream log;
     aerith::print_summary(log, summary);
@@ -808,6 +832,13 @@ int main() {
            std::string::npos);
     assert(log_text.find("Trace identified XICs + detect peaks/intensity") !=
            std::string::npos);
+    assert(log_text.find("four-population per-run calibration") !=
+           std::string::npos);
+    assert(log_line(
+        "Fit covariance MBR LDA + probability/global ion FDR").find(
+            "1.000000") == 70);
+    assert(log_line("four-population per-run calibration").find(
+        "1.000000") == std::string::npos);
     assert(log_text.find("Protein assembly: Read and annotate") !=
            std::string::npos);
     assert(log_text.find("Protein assembly optimization detail") ==

@@ -278,7 +278,7 @@ class WorkflowAllocationTests(unittest.TestCase):
                 ">Decoy_protein\nKEDCBAM\n",
             )
 
-    def test_spectra_search_divides_cli_threads_between_samples(self) -> None:
+    def test_spectra_search_pairs_target_and_decoy_like_regular(self) -> None:
         with tempfile.TemporaryDirectory() as output:
             workflow = self.make_search(output)
             workflow.base_names = ["one", "two", "three"]
@@ -292,12 +292,33 @@ class WorkflowAllocationTests(unittest.TestCase):
 
             workflow.search_spectra_samples("spectra")
 
-            self.assertEqual(sorted(threads for _, threads in captured), [8, 8, 8])
+            self.assertEqual(
+                sorted(threads for _, threads in captured),
+                [8, 8, 8, 8, 8, 8],
+            )
+            labels = [
+                shlex.split(command)[shlex.split(command).index("--sfi-label") + 1]
+                for command, _ in captured
+            ]
+            self.assertEqual(labels.count("target"), 3)
+            self.assertEqual(labels.count("decoy"), 3)
             for command, threads in captured:
                 match = re.search(r"(?:^| )-t (\d+)(?: |$)", command)
                 self.assertIsNotNone(match)
                 self.assertEqual(int(match.group(1)), threads)
                 self.assertNotIn(" -c ", command)
+                self.assertIn(" --sfi ", command)
+                self.assertNotIn(" -h5 ", command)
+                arguments = shlex.split(command)
+                self.assertEqual(
+                    arguments[arguments.index("--rt-tolerance") + 1], "5.0"
+                )
+                self.assertEqual(
+                    arguments[arguments.index("--score-envelope-top-n") + 1], "3"
+                )
+                self.assertEqual(
+                    arguments[arguments.index("--mvh-cascade-top-n") + 1], "150"
+                )
 
     def test_spectra_search_overwrites_existing_pin(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -316,7 +337,7 @@ class WorkflowAllocationTests(unittest.TestCase):
 
             workflow.search_spectra_samples("spectra")
 
-            self.assertEqual(sorted(captured), [8, 8, 8])
+            self.assertEqual(sorted(captured), [8, 8, 8, 8, 8, 8])
 
     def test_fasta_target_and_decoy_share_one_budget(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -361,6 +382,7 @@ class WorkflowAllocationTests(unittest.TestCase):
                 )
             for command, _ in search_calls:
                 self.assertNotIn(" -c ", command)
+                self.assertNotRegex(command, r"(?:^| )-t \d+(?: |$)")
                 self.assertIn("--tolerance-ms1 0.01", command)
                 self.assertIn("--tolerance-ms2 0.02", command)
                 arguments = shlex.split(command)
@@ -564,7 +586,8 @@ class WorkflowAllocationTests(unittest.TestCase):
 
             def fake_run(command: str, threads: int) -> None:
                 captured.append(command)
-                Path(workflow.generatedSpectraDir, "library.h5").touch()
+                Path(workflow.generatedSpectraDir, "spectra.sfi").touch()
+                Path(workflow.generatedSpectraDir, "spectra_Decoy.sfi").touch()
 
             workflow.run_command = fake_run
 
@@ -580,12 +603,49 @@ class WorkflowAllocationTests(unittest.TestCase):
                 if argument == "--fixed-ptm"
             ]
             self.assertEqual(fixed_ptms, ["default", "carbamidomethyl"])
+            self.assertEqual(
+                arguments[arguments.index("--envelope-top-n") + 1], "3"
+            )
+
+    def test_spectra_generation_accepts_recursive_hdf5_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as output:
+            hdf5_root = Path(output, "regular")
+            sample = hdf5_root / "sample"
+            sample.mkdir(parents=True)
+            (sample / "sample.h5").touch()
+            workflow = self.make_search(output)
+            workflow.unlabeledInput = str(hdf5_root)
+
+            self.assertEqual(
+                workflow.resolve_or_convert_unlabeled_hdf5(),
+                str(hdf5_root.resolve()),
+            )
+
+    def test_fast_mode_stages_hdf5_as_link_instead_of_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as output:
+            source = Path(output, "source.h5")
+            source.write_bytes(b"scan data")
+            stage = Path(output, "stage")
+            workflow = self.make_search(str(stage))
+            workflow.hdf5_input_files = [str(source)]
+            workflow.base_names_of_hdf5 = ["sample"]
+            workflow.raw_files = []
+            workflow.hdf5_paths = {}
+            workflow.stageHdf5Copies = False
+            workflow.dryrun = False
+
+            workflow.prepare_hdf5_inputs()
+
+            staged = stage / "sample" / "sample.h5"
+            self.assertTrue(staged.is_symlink())
+            self.assertEqual(staged.resolve(), source.resolve())
+            self.assertEqual(workflow.hdf5_paths["sample"], str(staged))
 
     def test_reused_spectra_library_rejects_fixed_ptms(self) -> None:
         with tempfile.TemporaryDirectory() as output:
             spectra_dir = Path(output, "spectra")
             spectra_dir.mkdir()
-            Path(spectra_dir, "library.h5").touch()
+            Path(spectra_dir, "library.sfi").touch()
             workflow = self.make_search(output)
             workflow.spectraDir = str(spectra_dir)
             workflow.fixedPtms = ["none"]
@@ -734,6 +794,34 @@ class WorkflowAllocationTests(unittest.TestCase):
             "automatic CPU fallback when CUDA is unavailable or fails; "
             "legacy Aerith RT modeling is skipped"
         )
+
+    def test_spectra_filter_reads_paired_pin_outputs(self) -> None:
+        workflow = object.__new__(filter_module.filter)
+        workflow.baseNames = ["one", "two"]
+        workflow.outputPath = "/output"
+        workflow.aerithPath = "aerith"
+        workflow.decoyPrefix = "DECOY_"
+        workflow.assembleProteins = False
+        workflow.ignorePCT = False
+        workflow.fixedCam = True
+        workflow.sipIsotope = "C13"
+        workflow.fixedPtms = []
+        workflow.ptms = []
+        workflow.maxPtmCount = None
+        workflow.productTopIsotopes = 5
+        workflow.quantTopIsotopes = 6
+        workflow.negative_control = ""
+        workflow.spectraPaths = []
+
+        arguments = shlex.split(workflow.command())
+        self.assertEqual(arguments.count("--input"), 0)
+        self.assertEqual(arguments.count("--target-pin"), 2)
+        self.assertEqual(arguments.count("--decoy-pin"), 2)
+        self.assertIn("/output/one/one_target.pin", arguments)
+        self.assertIn("/output/one/one_decoy.pin", arguments)
+        self.assertIn("/output/two/two_target.pin", arguments)
+        self.assertIn("/output/two/two_decoy.pin", arguments)
+        self.assertIn("--filtered-only", arguments)
 
     def test_negative_control_is_passed_to_native_aerith(self) -> None:
         workflow = object.__new__(filter_module.filter)

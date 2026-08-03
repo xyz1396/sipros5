@@ -396,9 +396,11 @@ public:
 					  vector<double> *pvdYionMass, vector<double> *pvdBionMass);
 	// void scoreRankSum_test(Peptide * currentPeptide);
 	// for adding features after first time scoring
-	double scoreWeightSumHighMS2(string *currentPeptide, const int measuredCharge, vector<vector<double>> *vvdYionMass,
-								 vector<vector<double>> *vvdYionProb, vector<vector<double>> *vvdBionMass,
-								 vector<vector<double>> *vvdBionProb);
+	double scoreWeightSumHighMS2(const string *currentPeptide, const int measuredCharge,
+								 const vector<vector<double>> *vvdYionMass,
+								 const vector<vector<double>> *vvdYionProb,
+								 const vector<vector<double>> *vvdBionMass,
+								 const vector<vector<double>> *vvdBionProb);
 	//-----------WDP End---------------------
 };
 

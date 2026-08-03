@@ -104,6 +104,10 @@ public:
 	static bool ScoreSequenceVsSpectrumSIP(string & currentPeptide, int precursorCharge, MS2Scan * Spectrum, vector<double>* sequenceIonMasses,
 			vector<vector<double> > & vvdYionMass, vector<vector<double> > & vvdYionProb, vector<vector<double> > & vvdBionMass,
 			vector<vector<double> > & vvdBionProb, double & dMvh, vector<char> * seq);
+	// Score a precomputed SIP ion list.  Spectra-library search caches this
+	// record/charge-dependent list once and reuses it across nearby scans.
+	static bool ScoreIonsVsSpectrum(const vector<double> &sequenceIonMasses,
+			MS2Scan *Spectrum, double &dMvh);
 };
 
 #endif /* SCORES_MVH_H_ */

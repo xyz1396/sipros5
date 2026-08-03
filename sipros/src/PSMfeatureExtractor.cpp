@@ -506,6 +506,136 @@ std::vector<isotopicPeak> PSMfeatureExtractor::findMs1IsotopicPeaks(
     return peaks;
 }
 
+std::vector<isotopicPeak>
+PSMfeatureExtractor::findMs1IsotopicPeaksFromEnvelope(
+    const sipros::RaxportMs1Data *ms1Data,
+    int &ms1ScanNumber,
+    int precursorCharge,
+    double baseNeutralMass,
+    double matchedPrecursorMz,
+    const std::vector<double> &precursorNeutralMasses,
+    const std::vector<double> &precursorProbabilities,
+    const std::function<double(double)> &mzToleranceDaAt)
+{
+    std::vector<isotopicPeak> peaks;
+    const size_t envelopeSize = std::min(
+        precursorNeutralMasses.size(), precursorProbabilities.size());
+    if (!ms1Data || precursorCharge <= 0 || envelopeSize == 0 ||
+        !std::isfinite(baseNeutralMass) ||
+        !std::isfinite(matchedPrecursorMz))
+        return peaks;
+
+    const auto scanIt = ms1Data->scanNumberToIndex.find(ms1ScanNumber);
+    if (scanIt == ms1Data->scanNumberToIndex.end())
+        return peaks;
+
+    const double maximumProbability = *std::max_element(
+        precursorProbabilities.begin(),
+        precursorProbabilities.begin() +
+            static_cast<std::ptrdiff_t>(envelopeSize));
+    if (!(maximumProbability > 0.0))
+        return peaks;
+    const double probabilityFloor = maximumProbability * 1e-12;
+    const double proton = ProNovoConfig::getProtonMass();
+
+    size_t modelAnchor = envelopeSize;
+    double closestAnchor = std::numeric_limits<double>::infinity();
+    for (size_t index = 0; index < envelopeSize; ++index)
+    {
+        if (precursorProbabilities[index] < probabilityFloor ||
+            !std::isfinite(precursorNeutralMasses[index]))
+            continue;
+        const double expectedMz =
+            precursorNeutralMasses[index] / precursorCharge + proton;
+        const double delta = std::fabs(expectedMz - matchedPrecursorMz);
+        if (delta < closestAnchor)
+        {
+            closestAnchor = delta;
+            modelAnchor = index;
+        }
+    }
+    if (modelAnchor == envelopeSize)
+        return peaks;
+
+    const size_t parentScanIndex = scanIt->second;
+    size_t observedAnchor = std::numeric_limits<size_t>::max();
+    const sipros::RaxportMs1Scan *anchorScan = nullptr;
+    for (const int offset : {0, -1, 1, -2, 2})
+    {
+        const int64_t candidateIndex =
+            static_cast<int64_t>(parentScanIndex) + offset;
+        if (candidateIndex < 0 ||
+            candidateIndex >= static_cast<int64_t>(ms1Data->scans.size()))
+            continue;
+        const sipros::RaxportMs1Scan &scan =
+            ms1Data->scans[static_cast<size_t>(candidateIndex)];
+        observedAnchor = findEnvelopePeak(
+            scan, matchedPrecursorMz, mzToleranceDaAt, precursorCharge);
+        if (observedAnchor != std::numeric_limits<size_t>::max())
+        {
+            ms1ScanNumber = scan.scanNumber;
+            anchorScan = &scan;
+            break;
+        }
+    }
+    if (!anchorScan)
+        return peaks;
+
+    const double modelAnchorMz =
+        precursorNeutralMasses[modelAnchor] / precursorCharge + proton;
+    const double anchorResidual =
+        anchorScan->mz[observedAnchor] - modelAnchorMz;
+    peaks.reserve(envelopeSize);
+    for (size_t index = 0; index < envelopeSize; ++index)
+    {
+        if (precursorProbabilities[index] < probabilityFloor ||
+            !std::isfinite(precursorNeutralMasses[index]))
+            continue;
+        const int isotopeIndex = static_cast<int>(std::lround(
+            precursorNeutralMasses[index] - baseNeutralMass));
+        if (isotopeIndex < 0)
+            continue;
+        const double expectedMz =
+            precursorNeutralMasses[index] / precursorCharge + proton +
+            anchorResidual;
+        const size_t observed = findEnvelopePeak(
+            *anchorScan, expectedMz, mzToleranceDaAt, precursorCharge);
+        if (observed == std::numeric_limits<size_t>::max())
+            continue;
+        peaks.push_back({anchorScan->mz[observed],
+                         ms1PeakCharge(*anchorScan, observed),
+                         anchorScan->intensity[observed],
+                         isotopeIndex});
+    }
+
+    const int anchorIsotopeIndex = static_cast<int>(std::lround(
+        precursorNeutralMasses[modelAnchor] - baseNeutralMass));
+    const bool hasAnchor = std::any_of(
+        peaks.begin(), peaks.end(), [&](const isotopicPeak &peak)
+        { return peak.isotopeIndex == anchorIsotopeIndex; });
+    if (!hasAnchor && anchorIsotopeIndex >= 0)
+    {
+        peaks.push_back({anchorScan->mz[observedAnchor],
+                         ms1PeakCharge(*anchorScan, observedAnchor),
+                         anchorScan->intensity[observedAnchor],
+                         anchorIsotopeIndex});
+    }
+
+    std::sort(peaks.begin(), peaks.end(),
+              [](const isotopicPeak &left, const isotopicPeak &right)
+              {
+                  if (left.isotopeIndex != right.isotopeIndex)
+                      return left.isotopeIndex < right.isotopeIndex;
+                  return left.intensity > right.intensity;
+              });
+    peaks.erase(
+        std::unique(peaks.begin(), peaks.end(),
+                    [](const isotopicPeak &left, const isotopicPeak &right)
+                    { return left.isotopeIndex == right.isotopeIndex; }),
+        peaks.end());
+    return peaks;
+}
+
 static std::vector<double> binomialProbabilities(int atomCount,
                                                     double targetFraction)
 {
@@ -1105,6 +1235,170 @@ PSMfeatureExtractor::getSIPelementAbundanceFromMS1Peaks(
     result.abundancePct = fittedPct;
     result.isotopicPeakCount = compatiblePeakCount;
     result.valid = true;
+    return result;
+}
+
+PSMfeatureExtractor::Ms1AbundanceResult
+PSMfeatureExtractor::getSIPelementAbundanceFromMS1PeaksWithEnvelope(
+    const std::vector<isotopicPeak> &peaks,
+    double baseMass,
+    const std::string &peptide,
+    int precursorCharge,
+    const std::string &sipAtom,
+    double expectedEnrichmentPct,
+    const std::vector<double> &precursorNeutralMasses,
+    const std::vector<double> &precursorProbabilities)
+{
+    Ms1AbundanceResult result;
+    result.rawIsotopicPeakCount = static_cast<int>(peaks.size());
+    SupportedSipIsotope spec;
+    const size_t envelopeSize = std::min(
+        precursorNeutralMasses.size(), precursorProbabilities.size());
+    if (peaks.empty() || precursorCharge <= 0 || envelopeSize == 0 ||
+        !resolveSupportedSipIsotope(sipAtom, spec) ||
+        !std::isfinite(expectedEnrichmentPct))
+        return result;
+
+    PeptideIsotopeCalculator calculator;
+    calculator.calPepAtomCounts(peptideBodyWithPtms(peptide));
+    const double atomNumber =
+        calculator.pepComposition[sipros::IsotopeSource::Biosynthetic]
+                                 [static_cast<size_t>(spec.atomIndex)];
+    if (!(atomNumber > 0.0))
+        return result;
+
+    int maximumIndex = -1;
+    for (size_t index = 0; index < envelopeSize; ++index)
+    {
+        if (!(precursorProbabilities[index] > 0.0) ||
+            !std::isfinite(precursorNeutralMasses[index]))
+            continue;
+        maximumIndex = std::max(maximumIndex, static_cast<int>(std::lround(
+            precursorNeutralMasses[index] - baseMass)));
+    }
+    if (maximumIndex < 0)
+        return result;
+    std::vector<double> modelProbability(
+        static_cast<size_t>(maximumIndex + 1), 0.0);
+    for (size_t index = 0; index < envelopeSize; ++index)
+    {
+        if (!(precursorProbabilities[index] > 0.0) ||
+            !std::isfinite(precursorNeutralMasses[index]))
+            continue;
+        const int isotopeIndex = static_cast<int>(std::lround(
+            precursorNeutralMasses[index] - baseMass));
+        if (isotopeIndex >= 0)
+            modelProbability[static_cast<size_t>(isotopeIndex)] +=
+                precursorProbabilities[index];
+    }
+    const double modelTotal = std::accumulate(
+        modelProbability.begin(), modelProbability.end(), 0.0);
+    if (!(modelTotal > 0.0))
+        return result;
+    for (double &probability : modelProbability)
+        probability /= modelTotal;
+
+    const double baseMz =
+        baseMass / precursorCharge + ProNovoConfig::getProtonMass();
+    const double mzThreshold = baseMz - 0.5 / precursorCharge;
+    std::vector<const isotopicPeak *> observed;
+    double rawIntensity = 0.0;
+    double rawWeightedShift = 0.0;
+    for (const isotopicPeak &peak : peaks)
+    {
+        if (!(peak.intensity > 0.0) || peak.mz <= mzThreshold ||
+            peak.isotopeIndex < 0)
+            continue;
+        observed.push_back(&peak);
+        rawIntensity += peak.intensity;
+        rawWeightedShift += peak.intensity * peak.isotopeIndex;
+    }
+    if (observed.empty() || !(rawIntensity > 0.0))
+        return result;
+
+    const double expectedFraction = std::max(
+        0.0, std::min(1.0, expectedEnrichmentPct / 100.0));
+    const auto shiftToPct = [&](double meanNominalShift)
+    {
+        const double naturalOtherShift =
+            expectedNaturalNominalShiftExceptTarget(
+                calculator.pepComposition, spec.atomIndex,
+                spec.isotopeIndex, expectedFraction);
+        if (!std::isfinite(naturalOtherShift))
+            return std::numeric_limits<double>::quiet_NaN();
+        return (meanNominalShift - naturalOtherShift) /
+               (atomNumber * spec.nominalShift) * 100.0;
+    };
+
+    double rawPct = shiftToPct(rawWeightedShift / rawIntensity);
+    if (!std::isfinite(rawPct))
+        return result;
+    result.abundancePct = std::max(0.0, std::min(100.0, rawPct));
+    result.isotopicPeakCount = static_cast<int>(observed.size());
+
+    const double modelMaximum = *std::max_element(
+        modelProbability.begin(), modelProbability.end());
+    const double probabilityFloor = modelMaximum * 1e-8;
+    std::vector<std::pair<double, double>> ratios;
+    for (const isotopicPeak *peak : observed)
+    {
+        const size_t index = static_cast<size_t>(peak->isotopeIndex);
+        if (index >= modelProbability.size() ||
+            modelProbability[index] < probabilityFloor)
+            continue;
+        ratios.emplace_back(
+            peak->intensity / modelProbability[index],
+            modelProbability[index]);
+    }
+    const double scale = weightedMedian(std::move(ratios));
+    if (!(scale > 0.0) || !std::isfinite(scale))
+        return result;
+
+    const double variance =
+        atomNumber * expectedFraction * (1.0 - expectedFraction);
+    const double interferenceCapFactor = variance >= 2.0 ? 4.0 : 2.0;
+    double cappedIntensity = 0.0;
+    double cappedWeightedShift = 0.0;
+    double observedModelProbability = 0.0;
+    double observedModelWeightedShift = 0.0;
+    int compatiblePeakCount = 0;
+    for (const isotopicPeak *peak : observed)
+    {
+        const size_t index = static_cast<size_t>(peak->isotopeIndex);
+        if (index >= modelProbability.size() ||
+            modelProbability[index] < probabilityFloor)
+            continue;
+        const double capped = std::min(
+            peak->intensity,
+            interferenceCapFactor * scale * modelProbability[index]);
+        cappedIntensity += capped;
+        cappedWeightedShift += capped * peak->isotopeIndex;
+        observedModelProbability += modelProbability[index];
+        observedModelWeightedShift +=
+            modelProbability[index] * peak->isotopeIndex;
+        ++compatiblePeakCount;
+    }
+    if (!(cappedIntensity > 0.0) ||
+        !(observedModelProbability > 0.0))
+        return result;
+
+    double fullModelMean = 0.0;
+    for (size_t index = 0; index < modelProbability.size(); ++index)
+        fullModelMean += modelProbability[index] * index;
+    const double correctedMean =
+        cappedWeightedShift / cappedIntensity + fullModelMean -
+        observedModelWeightedShift / observedModelProbability;
+    const double fittedPct = shiftToPct(correctedMean);
+    if (!std::isfinite(fittedPct))
+        return result;
+    result.abundancePct = std::max(0.0, std::min(100.0, fittedPct));
+    result.isotopicPeakCount = compatiblePeakCount;
+    if (compatiblePeakCount >= 2)
+    {
+        result.fitScore = std::max(
+            0.0, std::min(1.0, observedModelProbability));
+    }
+    result.valid = result.fitScore >= MinMs1IsotopeFitScore;
     return result;
 }
 

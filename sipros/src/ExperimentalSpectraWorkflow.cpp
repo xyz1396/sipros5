@@ -20,6 +20,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -31,6 +32,7 @@
 #include "isotopologue.h"
 #include "proNovoConfig.h"
 #include "RaxportHdf5Reader.h"
+#include "spectraindex.h"
 #include "ms2scan.h"
 
 #if !defined(_WIN32)
@@ -196,7 +198,7 @@ struct TimingLogger
 				  << "  PSM rows read:              " << inputRows << '\n'
 				  << "  Retained peptide/charge:    " << retainedRows << '\n'
 				  << "  Baseline matched spectra:   " << baselineMatchedRows << '\n'
-				  << "  HDF5 output files written:  " << outputFilesWritten << '\n';
+				  << "  SFI output files written:   " << outputFilesWritten << '\n';
 		if (totalWallSeconds > 0.0)
 		{
 			std::cout << "  Retained rows/sec:          "
@@ -214,14 +216,15 @@ struct Args
 	std::string outputPath;
 	char sipAtom = '\0';
 	int sipIsotopeMassNumber = -1;
-	double fixedSipAbundancePct = 1.0;
-	bool sipAbundanceRange = false;
-	double sipAbundanceStartPct = 1.0;
-	double sipAbundanceEndPct = 1.0;
+	double fixedSipAbundancePct = 0.0;
+	bool sipAbundanceRange = true;
+	double sipAbundanceStartPct = 0.0;
+	double sipAbundanceEndPct = 100.0;
 	double sipAbundanceStepPct = 1.0;
 	double probCutoff = 0.01;
 	double ppmTolerance = 10.0;
 	size_t minMatchedEnvelopes = 3;
+	size_t envelopeTopN = 3;
 	int threads = 0;
 	bool writeDecoy = false;
 	unsigned int decoySeed = 1;
@@ -248,6 +251,7 @@ struct ReadStats
 	size_t shortRows = 0;
 	size_t invalidRows = 0;
 	size_t unsupportedMods = 0;
+	size_t decoyRows = 0;
 };
 
 struct ObservedPeak
@@ -284,6 +288,7 @@ struct SpectrumOutputRecord
 	int charge = 1;
 	std::string peptide;
 	std::string proteins;
+	double sipAbundancePct = 0.0;
 	std::vector<double> precursorMz;
 	std::vector<double> precursorIntensity;
 	std::vector<double> fragmentMz;
@@ -341,6 +346,7 @@ struct Hdf5OutputMetadata
 	double probCutoff = 0.0;
 	double ppmTolerance = 0.0;
 	uint64_t minMatchedEnvelopes = 0;
+	uint32_t envelopeTopN = 3;
 };
 
 struct Hdf5SampleTask
@@ -356,7 +362,11 @@ struct OutputFileJob
 	fs::path path;
 	Hdf5OutputMetadata metadata;
 	bool decoy = false;
+	std::vector<double> targetAbundancesPct;
 	size_t written = 0;
+	sipros::SpectraIndexBuildStats buildStats;
+	double generationSeconds = 0.0;
+	double combineSeconds = 0.0;
 	bool success = false;
 	std::string error;
 };
@@ -399,16 +409,16 @@ std::string peptideMassClassKey(const std::string &peptide);
 void printUsage(const char *prog)
 {
 	std::cerr << "Usage: " << prog
-			  << " -i <psm.tsv|frag_dir> -f <h5_file|h5_dir> -o <output.h5|output_dir/>"
+			  << " -i <psm.tsv|frag_dir> -f <h5_file|h5_dir> -o <output.sfi|output_dir/>"
 			  << " -a <SIP atom/isotope, e.g. C13,H2,O18,N15,S34>"
-			  << " [-b <fixed SIP pct|lower-upper, default 1.0>] [-s|--step <pct, default 1.0>]"
+			  << " [-b <fixed SIP pct|lower-upper, default 0-100>] [-s|--step <pct, default 1.0>]"
 			  << " [-p <prob cutoff, default 0.01>]"
 			  << " [--ppm <match tolerance, default 10>] [--min-matched-envelopes <N, default 3>]"
+			  << " [--envelope-top-n <N, default 3>]"
 			  << " [--decoy] [--decoy-seed <N, default 1>]"
 			  << " [--fixed-ptm <name|default|none|all>] [-t <threads>]\n";
 	std::cerr << "HDF5 MS2 matching is always performed at the natural-abundance C13 baseline; -b controls shifted output abundance(s).\n";
-	std::cerr << "When one file is produced, -o is used as the output file and .h5 is appended if needed.\n";
-	std::cerr << "When multiple files are produced, -o is used as an output directory unless it already names one.\n";
+	std::cerr << "The output is one target SFI plus, with --decoy, one generated-decoy SFI; each contains every requested SIP percentage.\n";
 	std::cerr << "--fixed-ptm is repeatable; omit it to use the compiled default (carbamidomethyl C).\n";
 }
 
@@ -594,6 +604,22 @@ bool parseArgs(int argc, char **argv, Args &args)
 				return false;
 			}
 		}
+		else if (opt == "--envelope-top-n")
+		{
+			if (!requireValue(opt))
+			{
+				return false;
+			}
+			try
+			{
+				args.envelopeTopN = static_cast<size_t>(std::stoul(argv[++i]));
+			}
+			catch (const std::exception &)
+			{
+				std::cerr << "Invalid SFI envelope top-N peak count.\n";
+				return false;
+			}
+		}
 		else if (opt == "--fixed-ptm")
 		{
 			if (!requireValue(opt))
@@ -702,6 +728,11 @@ bool parseArgs(int argc, char **argv, Args &args)
 		std::cerr << "Minimum matched envelope count must be > 0.\n";
 		return false;
 	}
+	if (args.envelopeTopN == 0)
+	{
+		std::cerr << "SFI envelope top-N peak count must be > 0.\n";
+		return false;
+	}
 	if (args.threads < 0)
 	{
 		std::cerr << "Thread count must be >= 0.\n";
@@ -785,19 +816,33 @@ bool parseSpectrumId(const std::string &spectrum, std::string &sample, int &scan
 		return false;
 	}
 	sample = parts[0];
-	if (sample.empty() || !parseIntField(parts[1], scanNumber))
+	if (sample.empty())
 	{
 		return false;
 	}
-	if (parts.size() >= 4)
+
+	// Standard IDs end in .scan.charge (or .scan.scan.charge), while SIP
+	// FASTA-search IDs may insert an abundance token before those numeric
+	// fields: sample.SIP_C13_050_000Pct.scan.charge. Parse from the end so both
+	// forms feed spectra generation without rewriting Aerith output.
+	int parsedCharge = 0;
+	if (!parseIntField(parts.back(), parsedCharge) || parsedCharge <= 0)
+		return false;
+	charge = parsedCharge;
+	bool foundScan = false;
+	for (size_t reverseIndex = parts.size() - 1;
+		 reverseIndex > 0; --reverseIndex)
 	{
-		int parsedCharge = 0;
-		if (parseIntField(parts.back(), parsedCharge) && parsedCharge > 0)
+		int parsedScan = 0;
+		if (parseIntField(parts[reverseIndex - 1], parsedScan) &&
+			parsedScan > 0)
 		{
-			charge = parsedCharge;
+			scanNumber = parsedScan;
+			foundScan = true;
+			break;
 		}
 	}
-	return scanNumber > 0;
+	return foundScan;
 }
 
 std::vector<fs::path> collectPsmFiles(const std::string &inputPath)
@@ -815,22 +860,39 @@ std::vector<fs::path> collectPsmFiles(const std::string &inputPath)
 	}
 	else if (fs::is_directory(path))
 	{
+		std::vector<fs::path> filteredFiles;
+		std::vector<fs::path> legacyFiles;
+		const std::string filteredSuffix = "_filtered_psms.tsv";
 		for (const auto &entry : fs::recursive_directory_iterator(path))
 		{
 			if (!entry.is_regular_file())
 			{
 				continue;
 			}
-			if (entry.path().filename() == "psm.tsv")
+			const std::string filename = entry.path().filename().string();
+			if (filename.size() >= filteredSuffix.size() &&
+				filename.compare(filename.size() - filteredSuffix.size(),
+					filteredSuffix.size(), filteredSuffix) == 0 &&
+				filename != "SIP_filtered_psms.tsv")
 			{
-				files.push_back(entry.path());
+				filteredFiles.push_back(entry.path());
+			}
+			else if (filename == "psm.tsv")
+			{
+				legacyFiles.push_back(entry.path());
 			}
 		}
+		// Aerith-filtered PSMs are the authoritative fast-SIP input.  Do not
+		// combine them with legacy protein-report psm.tsv files from the same
+		// workflow tree, which would duplicate accepted PSMs.
+		files = filteredFiles.empty()
+			? std::move(legacyFiles) : std::move(filteredFiles);
 	}
 	std::sort(files.begin(), files.end());
 	if (files.empty())
 	{
-		throw std::runtime_error("No PSM TSV files found under: " + inputPath);
+		throw std::runtime_error(
+			"No *_filtered_psms.tsv or psm.tsv files found under: " + inputPath);
 	}
 	return files;
 }
@@ -862,7 +924,7 @@ size_t getRequiredColumnAny(const std::unordered_map<std::string, size_t> &colum
 			return idx;
 		}
 	}
-	std::string msg = "Missing required protein-name column; expected one of:";
+	std::string msg = "Missing required PSM TSV column; expected one of:";
 	for (const std::string &name : names)
 	{
 		msg += " ";
@@ -1023,22 +1085,43 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 		columns[sipros::TextUtils::trim(headers[i])] = i;
 	}
 
-	const size_t idxSpectrum = getRequiredColumn(columns, "Spectrum");
+	const size_t idxSpectrum = getRequiredColumnAny(
+		columns, {"Spectrum", "PSMId", "SpecId"});
 	const size_t idxPeptide = getRequiredColumn(columns, "Peptide");
-	const size_t idxCharge = getRequiredColumn(columns, "Charge");
-	const size_t idxRetention = getRequiredColumn(columns, "Retention");
-	const size_t idxProbability = getRequiredColumn(columns, "Probability");
-	const size_t idxModifiedPeptide = getOptionalColumn(columns, "Modified Peptide");
-	const size_t idxAssignedModifications =
-		getOptionalColumn(columns, "Assigned Modifications");
+	const size_t idxCharge = getRequiredColumnAny(
+		columns, {"Charge", "parentCharges"});
+	const size_t idxRetention = getRequiredColumnAny(
+		columns, {"Retention", "retentiontime"});
+	const size_t idxProbability = getOptionalColumn(columns, "Probability");
+	const size_t idxPosteriorError =
+		getOptionalColumn(columns, "posterior_error_prob");
+	if (idxProbability == std::string::npos &&
+		idxPosteriorError == std::string::npos)
+	{
+		throw std::runtime_error(
+			"Missing required confidence column: Probability or posterior_error_prob");
+	}
+	const size_t idxModifiedPeptide = getOptionalColumn(columns, "Modified Peptide") != std::string::npos
+		? getOptionalColumn(columns, "Modified Peptide")
+		: getOptionalColumn(columns, "ModifiedPeptide");
+	const size_t idxAssignedModifications = getOptionalColumn(columns, "Assigned Modifications") != std::string::npos
+		? getOptionalColumn(columns, "Assigned Modifications")
+		: getOptionalColumn(columns, "AssignedModifications");
 	const size_t idxSvmScore = getRequiredColumn(columns, "SVMscore");
+	const size_t idxLabel = getOptionalColumn(columns, "Label");
 	const size_t idxMappedProteins = getOptionalColumn(columns, "Mapped Proteins");
 	const size_t idxProteins = getRequiredColumnAny(columns, {"Proteins", "ProteinNames", "proteinNames",
 															  "ProteinName", "proteinName", "Protein", "protein"});
 
 	size_t requiredMax = std::max({
 		idxSpectrum, idxPeptide, idxCharge, idxRetention,
-		idxProbability, idxSvmScore, idxProteins});
+		idxSvmScore, idxProteins});
+	if (idxProbability != std::string::npos)
+		requiredMax = std::max(requiredMax, idxProbability);
+	if (idxPosteriorError != std::string::npos)
+		requiredMax = std::max(requiredMax, idxPosteriorError);
+	if (idxLabel != std::string::npos)
+		requiredMax = std::max(requiredMax, idxLabel);
 	if (idxModifiedPeptide != std::string::npos)
 	{
 		requiredMax = std::max(requiredMax, idxModifiedPeptide);
@@ -1064,6 +1147,20 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 		}
 
 		PsmRow row;
+		if (idxLabel != std::string::npos)
+		{
+			int label = 0;
+			if (!parseIntField(fields[idxLabel], label))
+			{
+				++stats.invalidRows;
+				continue;
+			}
+			if (label != 1)
+			{
+				++stats.decoyRows;
+				continue;
+			}
+		}
 		row.psmId = sipros::TextUtils::trim(fields[idxSpectrum]);
 		if (row.psmId.empty())
 		{
@@ -1083,18 +1180,48 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 			row.precursorCharge = charge;
 		}
 		row.precursorCharge = std::max(1, row.precursorCharge);
-		row.retentionText = requireRetentionSeconds(fields[idxRetention],
-													path.string() + " PSM " + row.psmId);
+		if (sipros::TextUtils::trim(headers[idxRetention]) == "retentiontime")
+		{
+			double retentionMinutes = 0.0;
+			if (!parseDoubleField(fields[idxRetention], retentionMinutes) ||
+				!std::isfinite(retentionMinutes))
+			{
+				++stats.invalidRows;
+				continue;
+			}
+			std::ostringstream retentionSeconds;
+			retentionSeconds << std::setprecision(17)
+				<< retentionMinutes * 60.0;
+			row.retentionText = retentionSeconds.str();
+		}
+		else
+		{
+			row.retentionText = requireRetentionSeconds(fields[idxRetention],
+				path.string() + " PSM " + row.psmId);
+		}
 		const std::string mappedProteins =
 			(idxMappedProteins != std::string::npos && fields.size() > idxMappedProteins)
 				? fields[idxMappedProteins]
 				: std::string();
 		row.proteins = combineProteinColumns(fields[idxProteins], mappedProteins,
 											 path.string() + " PSM " + row.psmId);
-		if (!parseDoubleField(fields[idxProbability], row.probability))
+		if (idxProbability != std::string::npos)
 		{
-			++stats.invalidRows;
-			continue;
+			if (!parseDoubleField(fields[idxProbability], row.probability))
+			{
+				++stats.invalidRows;
+				continue;
+			}
+		}
+		else
+		{
+			double posteriorError = 0.0;
+			if (!parseDoubleField(fields[idxPosteriorError], posteriorError))
+			{
+				++stats.invalidRows;
+				continue;
+			}
+			row.probability = 1.0 - std::clamp(posteriorError, 0.0, 1.0);
 		}
 		if (!parseDoubleField(fields[idxSvmScore], row.svmScore))
 		{
@@ -1332,22 +1459,10 @@ std::vector<Hdf5SampleTask> buildHdf5SampleTasks(const std::vector<PsmRow> &rows
 	return tasks;
 }
 
-double effectiveTargetSipAbundancePct(const Isotopologue &iso,
-									  char sipAtom,
-									  int isotopeIndex,
-									  double requestedPct)
-{
-	const char atom = static_cast<char>(std::toupper(static_cast<unsigned char>(sipAtom)));
-	if (atom == 'C' && isotopeIndex == 1 && std::abs(requestedPct - 1.0) <= 1e-9)
-	{
-		return ProNovoConfig::getIsotopeAbundancePct(iso, atom, isotopeIndex);
-	}
-	return requestedPct;
-}
-
 void buildPrecursorChargePeaks(const IsotopeDistribution &dist,
 							   int charge,
 							   double probCutoff,
+							   size_t envelopeTopN,
 							   std::vector<double> &mzs,
 							   std::vector<double> &intensities)
 {
@@ -1362,6 +1477,18 @@ void buildPrecursorChargePeaks(const IsotopeDistribution &dist,
 		}
 		const double mz = (dist.vMass[i] + static_cast<double>(charge) * proton) / static_cast<double>(charge);
 		peaks.emplace_back(mz, dist.vProb[i]);
+	}
+	if (peaks.size() > envelopeTopN)
+	{
+		std::stable_sort(peaks.begin(), peaks.end(),
+			[](const std::pair<double, double> &a,
+			   const std::pair<double, double> &b)
+			{
+				if (a.second != b.second)
+					return a.second > b.second;
+				return a.first < b.first;
+			});
+		peaks.resize(envelopeTopN);
 	}
 	std::sort(peaks.begin(), peaks.end(),
 			  [](const std::pair<double, double> &a, const std::pair<double, double> &b)
@@ -1384,15 +1511,21 @@ void buildPrecursorChargePeaks(const IsotopeDistribution &dist,
 	}
 }
 
-bool buildPrecursorDistribution(Isotopologue &iso,
-								const std::string &decoratedPeptide,
-								IsotopeDistribution &precursorDist)
+bool buildPrecursorDistributionFromProductIons(
+	const Isotopologue &iso,
+	const std::vector<std::vector<double>> &yMass,
+	const std::vector<std::vector<double>> &yProb,
+	const std::vector<std::vector<double>> &bMass,
+	const std::vector<std::vector<double>> &bProb,
+	IsotopeDistribution &precursorDist)
 {
-	// Convolve the complete decorated composition directly. Reconstructing
-	// from independently pruned b_(n-1) and y1 envelopes can introduce small
-	// order-dependent probability and centroid differences.
-	return iso.computePeptideIsotopicDistribution(
-		decoratedPeptide, precursorDist);
+	if (bMass.empty() || bProb.empty() || yMass.empty() || yProb.empty())
+		return false;
+	precursorDist = iso.sum(
+		IsotopeDistribution(bMass.back(), bProb.back()),
+		IsotopeDistribution(yMass.front(), yProb.front()));
+	return !precursorDist.vMass.empty() &&
+		precursorDist.vMass.size() == precursorDist.vProb.size();
 }
 
 bool findMatchedPeak(const std::vector<ObservedPeak> &peaks,
@@ -1632,6 +1765,7 @@ bool buildShiftedChargeOneFragmentEntries(const std::vector<std::vector<double>>
 										  const std::vector<std::vector<double>> &yProb,
 										  const MatchedEnvelopeSet &matchedSet,
 										  double probCutoff,
+										  size_t envelopeTopN,
 										  std::vector<FragmentEntry> &entries)
 {
 	const double proton = ProNovoConfig::getProtonMass();
@@ -1660,6 +1794,20 @@ bool buildShiftedChargeOneFragmentEntries(const std::vector<std::vector<double>>
 			if (envelope.empty())
 			{
 				continue;
+			}
+			if (envelope.size() > envelopeTopN)
+			{
+				std::stable_sort(envelope.begin(), envelope.end(),
+					[](const TheoreticalPeak &a, const TheoreticalPeak &b)
+					{
+						if (a.probability != b.probability)
+							return a.probability > b.probability;
+						return a.mz < b.mz;
+					});
+				envelope.resize(envelopeTopN);
+				std::sort(envelope.begin(), envelope.end(),
+					[](const TheoreticalPeak &a, const TheoreticalPeak &b)
+					{ return a.mz < b.mz; });
 			}
 
 			size_t apexIndex = 0;
@@ -1914,6 +2062,7 @@ bool buildDecoyChargeOneFragmentEntries(const std::vector<std::vector<double>> &
 										double meanApexIntensity,
 										bool useOneMeanApex,
 										double probCutoff,
+										size_t envelopeTopN,
 										std::vector<FragmentEntry> &entries)
 {
 	if (shuffledApexIntensities.empty() && (!useOneMeanApex || meanApexIntensity <= 0.0))
@@ -1949,6 +2098,20 @@ bool buildDecoyChargeOneFragmentEntries(const std::vector<std::vector<double>> &
 			if (envelope.empty())
 			{
 				continue;
+			}
+			if (envelope.size() > envelopeTopN)
+			{
+				std::stable_sort(envelope.begin(), envelope.end(),
+					[](const TheoreticalPeak &a, const TheoreticalPeak &b)
+					{
+						if (a.probability != b.probability)
+							return a.probability > b.probability;
+						return a.mz < b.mz;
+					});
+				envelope.resize(envelopeTopN);
+				std::sort(envelope.begin(), envelope.end(),
+					[](const TheoreticalPeak &a, const TheoreticalPeak &b)
+					{ return a.mz < b.mz; });
 			}
 
 			size_t apexIndex = 0;
@@ -2056,15 +2219,15 @@ bool hasTrailingPathSeparator(const std::string &path)
 	return !path.empty() && (path.back() == '/' || path.back() == '\\');
 }
 
-fs::path appendHdf5ExtensionIfNeeded(const fs::path &path)
+fs::path appendSfiExtensionIfNeeded(const fs::path &path)
 {
-	if (sipros::TextUtils::toLower(path.extension().string()) == ".h5")
+	if (sipros::TextUtils::toLower(path.extension().string()) == ".sfi")
 	{
 		return path;
 	}
-	fs::path hdf5Path = path;
-	hdf5Path += ".h5";
-	return hdf5Path;
+	fs::path sfiPath = path;
+	sfiPath += ".sfi";
+	return sfiPath;
 }
 
 fs::path resolveOutputBasePath(const std::string &outputPath, bool multipleOutputFiles)
@@ -2073,21 +2236,21 @@ fs::path resolveOutputBasePath(const std::string &outputPath, bool multipleOutpu
 	if (hasTrailingPathSeparator(outputPath) ||
 		(fs::exists(path) && fs::is_directory(path)))
 	{
-		return path / "spectra.h5";
+		return path / "spectra.sfi";
 	}
 
-	const fs::path hdf5Path = appendHdf5ExtensionIfNeeded(path);
+	const fs::path sfiPath = appendSfiExtensionIfNeeded(path);
 	if (!multipleOutputFiles)
 	{
-		return hdf5Path;
+		return sfiPath;
 	}
 
-	if (sipros::TextUtils::toLower(path.extension().string()) == ".h5")
+	if (sipros::TextUtils::toLower(path.extension().string()) == ".sfi")
 	{
-		throw std::runtime_error("Multiple output files requested, but -o names a single .h5 file. Use an output directory path, for example -o out or -o out/.");
+		throw std::runtime_error("Multiple output files requested, but -o names a single .sfi file. Use an output directory path, for example -o out or -o out/.");
 	}
 
-	return path / "spectra.h5";
+	return path / "spectra.sfi";
 }
 
 std::string sipLabelForPath(char sipAtom, int sipIsotopeMassNumber)
@@ -2116,6 +2279,14 @@ fs::path decoyOutputPathForAbundance(const fs::path &basePath, const std::string
 								 sipLabel + "_" +
 								 formatAbundancePctForPath(pct) + "Pct" +
 								 basePath.extension().string();
+	const fs::path parent = basePath.parent_path();
+	return parent.empty() ? fs::path(filename) : parent / filename;
+}
+
+fs::path decoyOutputPath(const fs::path &basePath)
+{
+	const std::string filename = basePath.stem().string() + "_Decoy" +
+		basePath.extension().string();
 	const fs::path parent = basePath.parent_path();
 	return parent.empty() ? fs::path(filename) : parent / filename;
 }
@@ -2413,15 +2584,78 @@ bool writeSpectraHdf5File(const fs::path &path,
 	}
 }
 
-bool writeGeneratedSpectraFile(const fs::path &path,
-							   const std::vector<SpectrumOutputRecord> &records,
-							   const std::vector<char> &ok,
-							   const Hdf5OutputMetadata &metadata,
-							   size_t &written)
+void appendSpectraIndexRecord(
+	SpectrumOutputRecord &&source,
+	std::vector<sipros::SpectraIndexRecordInput> &records)
 {
-	Hdf5OutputData data = buildOutputDataFromRecords(records, ok);
-	written = data.recordCount();
-	return writeSpectraHdf5File(path, data, metadata);
+	double retentionSeconds = 0.0;
+	if (!parseDoubleField(source.retention, retentionSeconds))
+		throw std::runtime_error(
+			"Invalid retention time in SFI record " + source.psmId);
+	sipros::SpectraIndexRecordInput record;
+	record.psmId = std::move(source.psmId);
+	record.peptide = std::move(source.peptide);
+	record.proteins = requireProteinNames(
+		source.proteins, "SFI record " + record.psmId);
+	record.charge = source.charge;
+	// PSM input retention is validated as numeric seconds by
+	// requireRetentionSeconds(); SFI stores one canonical unit (minutes).
+	record.retentionMinutes = retentionSeconds / 60.0;
+	record.sipAbundancePct = source.sipAbundancePct;
+	const size_t precursorCount = std::min(
+		source.precursorMz.size(), source.precursorIntensity.size());
+	record.precursors.reserve(precursorCount);
+	for (size_t k = 0; k < precursorCount; ++k)
+		record.precursors.push_back(
+			{source.precursorMz[k], source.precursorIntensity[k]});
+	const size_t fragmentCount = std::min({source.fragmentMz.size(),
+		source.theoreticalIntensity.size(), source.experimentalIntensity.size(),
+		source.ionKinds.size(), source.ionPositions.size()});
+	record.fragments.reserve(fragmentCount);
+	for (size_t k = 0; k < fragmentCount; ++k)
+	{
+		sipros::SpectraIndexFragmentPeakInput fragment;
+		fragment.mz = source.fragmentMz[k];
+		fragment.theoreticalIntensity =
+			static_cast<float>(source.theoreticalIntensity[k]);
+		fragment.experimentalIntensity =
+			static_cast<float>(source.experimentalIntensity[k]);
+		fragment.ionKind = static_cast<uint8_t>(source.ionKinds[k]);
+		fragment.ionPosition = static_cast<uint32_t>(source.ionPositions[k]);
+		record.fragments.push_back(fragment);
+	}
+	records.push_back(std::move(record));
+}
+
+bool writeGeneratedSpectraFile(
+	const fs::path &path,
+	std::vector<sipros::SpectraIndexRecordInput> &indexRecords,
+	const Hdf5OutputMetadata &metadata,
+	size_t &written,
+	int threads,
+	sipros::SpectraIndexBuildStats &buildStats)
+{
+	sipros::SpectraIndexMetadata indexMetadata;
+	indexMetadata.chemistryProfileId = metadata.chemistryProfileId;
+	indexMetadata.recordKind = metadata.recordKind;
+	indexMetadata.targetSipAbundancePct = metadata.targetSipAbundancePct;
+	indexMetadata.sipAtom = metadata.sipAtom;
+	indexMetadata.sipIsotopeMassNumber = metadata.sipIsotopeMassNumber;
+	indexMetadata.probabilityCutoff = metadata.probCutoff;
+	indexMetadata.generationPpmTolerance = metadata.ppmTolerance;
+	indexMetadata.minimumMatchedEnvelopes = metadata.minMatchedEnvelopes;
+	indexMetadata.envelopeTopN = metadata.envelopeTopN;
+	indexMetadata.label = metadata.recordKind == "decoy" ? -1 : 1;
+	std::string error;
+	written = indexRecords.size();
+	if (!sipros::SpectraIndex::write(
+			path.string(), indexMetadata, indexRecords, error, threads, &buildStats,
+			true))
+	{
+		std::cerr << error << "\n";
+		return false;
+	}
+	return true;
 }
 
 void addOutputJobStats(ProcessingStats &processingStats, const OutputJobStats &jobStats)
@@ -2440,122 +2674,227 @@ bool generateAndWriteOutputFileJob(OutputFileJob &job,
 								   const Args &args,
 								   char sipAtom,
 								   int targetSipIsotopeIndex,
+								   int workerThreads,
 								   OutputJobStats &jobStats)
 {
 	try
 	{
-		Isotopologue localIso = pristineIso;
-		ProNovoConfig::setSipAbundance(localIso, sipAtom, targetSipIsotopeIndex, job.metadata.targetSipAbundancePct);
+		const size_t abundanceCount = job.targetAbundancesPct.size();
+		const std::vector<double> &targetAbundances =
+			job.targetAbundancesPct;
 
-		std::vector<SpectrumOutputRecord> records(rows.size());
-		std::vector<char> ok(rows.size(), 0);
-
-		for (size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
+		// Abundance-only scheduling leaves nearly every core idle for a fixed
+		// abundance. Split each abundance into deterministic row chunks so both
+		// fixed and ranged generation use all threads without sharing mutable
+		// Isotopologue state or output vectors.
+		constexpr size_t GenerationRowsPerTask = 256;
+		const size_t chunksPerAbundance =
+			(rows.size() + GenerationRowsPerTask - 1) /
+			GenerationRowsPerTask;
+		const size_t taskCount = abundanceCount * chunksPerAbundance;
+		std::vector<std::vector<sipros::SpectraIndexRecordInput>>
+			recordsByTask(taskCount);
+		std::vector<OutputJobStats> statsByTask(taskCount);
+		std::vector<std::string> errorsByTask(taskCount);
+		std::atomic<size_t> nextTask{0};
+		const size_t parallelism = std::min(
+			taskCount,
+			static_cast<size_t>(std::max(1, workerThreads)));
+		const double generationStart = omp_get_wtime();
+		std::vector<std::thread> workers;
+		workers.reserve(parallelism);
+		for (size_t worker = 0; worker < parallelism; ++worker)
 		{
-			if (!baselineOk[rowIndex])
+			workers.emplace_back([&]()
 			{
-				continue;
-			}
-
-			const PsmRow &row = rows[rowIndex];
-			if (!job.decoy)
-			{
-				std::vector<std::vector<double>> yMass, yProb, bMass, bProb;
-				if (!localIso.computeProductIon(row.peptide, yMass, yProb, bMass, bProb))
+				Isotopologue localIso = pristineIso;
+				size_t activeAbundance = abundanceCount;
+				while (true)
 				{
-					++jobStats.targetFailed;
-					continue;
+					const size_t taskIndex =
+						nextTask.fetch_add(1, std::memory_order_relaxed);
+					if (taskIndex >= taskCount)
+						break;
+					const size_t abundanceIndex =
+						taskIndex / chunksPerAbundance;
+					const size_t chunkIndex = taskIndex % chunksPerAbundance;
+					const size_t rowBegin = chunkIndex * GenerationRowsPerTask;
+					const size_t rowEnd = std::min(
+						rows.size(), rowBegin + GenerationRowsPerTask);
+					auto &records = recordsByTask[taskIndex];
+					auto &localStats = statsByTask[taskIndex];
+					records.reserve(rowEnd - rowBegin);
+					try
+					{
+						if (activeAbundance != abundanceIndex)
+						{
+							localIso = pristineIso;
+							ProNovoConfig::setSipAbundance(
+								localIso, sipAtom, targetSipIsotopeIndex,
+								targetAbundances[abundanceIndex]);
+							activeAbundance = abundanceIndex;
+						}
+						const double abundancePct =
+							targetAbundances[abundanceIndex];
+						for (size_t rowIndex = rowBegin;
+							 rowIndex < rowEnd; ++rowIndex)
+						{
+							if (!baselineOk[rowIndex])
+								continue;
+							const PsmRow &row = rows[rowIndex];
+							if (!job.decoy)
+							{
+								std::vector<std::vector<double>> yMass, yProb, bMass, bProb;
+								if (!localIso.computeProductIon(
+										row.peptide, yMass, yProb, bMass, bProb))
+								{
+									++localStats.targetFailed;
+									continue;
+								}
+								IsotopeDistribution precursorDist;
+								if (!buildPrecursorDistributionFromProductIons(
+										localIso, yMass, yProb, bMass, bProb,
+										precursorDist))
+								{
+									++localStats.targetFailed;
+									continue;
+								}
+								SpectrumOutputRecord record;
+								record.psmId = spectraHeaderId(
+									row.psmId, abundancePct, false);
+								record.retention = row.retentionText;
+								record.charge = row.precursorCharge;
+								record.peptide = row.peptide;
+								record.proteins = row.proteins;
+								record.sipAbundancePct = abundancePct;
+								buildPrecursorChargePeaks(
+									precursorDist, row.precursorCharge,
+									args.probCutoff, args.envelopeTopN,
+									record.precursorMz, record.precursorIntensity);
+								std::vector<FragmentEntry> entries;
+								if (!buildShiftedChargeOneFragmentEntries(
+										bMass, bProb, yMass, yProb,
+										matchedEnvelopeSets[rowIndex], args.probCutoff,
+										args.envelopeTopN, entries))
+								{
+									++localStats.targetFailed;
+									continue;
+								}
+								copyFragmentEntriesToRecord(entries, record);
+								appendSpectraIndexRecord(std::move(record), records);
+								continue;
+							}
+
+							if (decoyPeptides[rowIndex].empty())
+								continue;
+							const std::vector<double> apexPool =
+								shuffledApexIntensityPool(
+									matchedEnvelopeSets[rowIndex],
+									args.decoySeed, rowIndex);
+							const double meanApex = meanIntensity(apexPool);
+							if (apexPool.empty() || meanApex <= 0.0)
+							{
+								++localStats.decoyComputeFailed;
+								continue;
+							}
+							std::vector<std::vector<double>> decoyYMass, decoyYProb;
+							std::vector<std::vector<double>> decoyBMass, decoyBProb;
+							if (!localIso.computeProductIon(
+									decoyPeptides[rowIndex], decoyYMass, decoyYProb,
+									decoyBMass, decoyBProb))
+							{
+								++localStats.decoyComputeFailed;
+								continue;
+							}
+							IsotopeDistribution decoyPrecursorDist;
+							if (!buildPrecursorDistributionFromProductIons(
+									localIso, decoyYMass, decoyYProb,
+									decoyBMass, decoyBProb, decoyPrecursorDist))
+							{
+								++localStats.decoyComputeFailed;
+								continue;
+							}
+							SpectrumOutputRecord decoyRecord;
+							decoyRecord.psmId = spectraHeaderId(
+								row.psmId, abundancePct, true);
+							decoyRecord.retention = adjustedDecoyRetention(
+								row.retentionText, args.decoySeed, rowIndex,
+								decoyAddedResidues[rowIndex] != 0);
+							decoyRecord.charge = row.precursorCharge;
+							decoyRecord.peptide = decoyPeptides[rowIndex];
+							decoyRecord.proteins = decoyProteinNames(row.proteins);
+							decoyRecord.sipAbundancePct = abundancePct;
+							buildPrecursorChargePeaks(
+								decoyPrecursorDist, row.precursorCharge,
+								args.probCutoff, args.envelopeTopN,
+								decoyRecord.precursorMz,
+								decoyRecord.precursorIntensity);
+							std::vector<FragmentEntry> decoyEntries;
+							if (!buildDecoyChargeOneFragmentEntries(
+									decoyBMass, decoyBProb, decoyYMass, decoyYProb,
+									apexPool, meanApex,
+									decoyAddedResidues[rowIndex] != 0,
+									args.probCutoff, args.envelopeTopN, decoyEntries))
+							{
+								++localStats.decoyComputeFailed;
+								continue;
+							}
+							copyFragmentEntriesToRecord(decoyEntries, decoyRecord);
+							appendSpectraIndexRecord(std::move(decoyRecord), records);
+						}
+					}
+					catch (const std::exception &ex)
+					{
+						errorsByTask[taskIndex] = ex.what();
+					}
+					catch (...)
+					{
+						errorsByTask[taskIndex] = "unknown generation error";
+					}
 				}
+			});
+		}
+		for (std::thread &worker : workers)
+			worker.join();
+		job.generationSeconds = omp_get_wtime() - generationStart;
 
-				IsotopeDistribution precursorDist;
-				if (!buildPrecursorDistribution(
-						localIso, row.peptide, precursorDist))
-				{
-					++jobStats.targetFailed;
-					continue;
-				}
-
-				SpectrumOutputRecord record;
-				record.psmId = spectraHeaderId(row.psmId, job.metadata.targetSipAbundancePct, false);
-				record.retention = row.retentionText;
-				record.charge = row.precursorCharge;
-				record.peptide = row.peptide;
-				record.proteins = row.proteins;
-				buildPrecursorChargePeaks(precursorDist, row.precursorCharge, args.probCutoff,
-										  record.precursorMz, record.precursorIntensity);
-
-				std::vector<FragmentEntry> entries;
-				if (!buildShiftedChargeOneFragmentEntries(bMass, bProb, yMass, yProb,
-														  matchedEnvelopeSets[rowIndex], args.probCutoff,
-														  entries))
-				{
-					++jobStats.targetFailed;
-					continue;
-				}
-
-				copyFragmentEntriesToRecord(entries, record);
-				records[rowIndex] = std::move(record);
-				ok[rowIndex] = 1;
-				continue;
-			}
-
-			if (decoyPeptides[rowIndex].empty())
+		const double combineStart = omp_get_wtime();
+		size_t totalRecordCount = 0;
+		for (size_t taskIndex = 0; taskIndex < taskCount; ++taskIndex)
+		{
+			if (!errorsByTask[taskIndex].empty())
 			{
-				continue;
+				const size_t abundanceIndex = taskIndex / chunksPerAbundance;
+				throw std::runtime_error(
+					"SIP abundance " +
+					std::to_string(job.targetAbundancesPct[abundanceIndex]) +
+					" failed: " + errorsByTask[taskIndex]);
 			}
-
-			const std::vector<double> apexPool =
-				shuffledApexIntensityPool(matchedEnvelopeSets[rowIndex], args.decoySeed, rowIndex);
-			const double meanApex = meanIntensity(apexPool);
-			if (apexPool.empty() || meanApex <= 0.0)
-			{
-				++jobStats.decoyComputeFailed;
-				continue;
-			}
-
-			std::vector<std::vector<double>> decoyYMass, decoyYProb, decoyBMass, decoyBProb;
-			if (!localIso.computeProductIon(decoyPeptides[rowIndex], decoyYMass, decoyYProb, decoyBMass, decoyBProb))
-			{
-				++jobStats.decoyComputeFailed;
-				continue;
-			}
-
-			IsotopeDistribution decoyPrecursorDist;
-			if (!buildPrecursorDistribution(
-					localIso, decoyPeptides[rowIndex], decoyPrecursorDist))
-			{
-				++jobStats.decoyComputeFailed;
-				continue;
-			}
-
-			SpectrumOutputRecord decoyRecord;
-			decoyRecord.psmId = spectraHeaderId(row.psmId, job.metadata.targetSipAbundancePct, true);
-			decoyRecord.retention = adjustedDecoyRetention(row.retentionText, args.decoySeed,
-														   rowIndex, decoyAddedResidues[rowIndex] != 0);
-			decoyRecord.charge = row.precursorCharge;
-			decoyRecord.peptide = decoyPeptides[rowIndex];
-			decoyRecord.proteins = decoyProteinNames(row.proteins);
-			buildPrecursorChargePeaks(decoyPrecursorDist, row.precursorCharge, args.probCutoff,
-									  decoyRecord.precursorMz, decoyRecord.precursorIntensity);
-
-			std::vector<FragmentEntry> decoyEntries;
-			if (!buildDecoyChargeOneFragmentEntries(decoyBMass, decoyBProb,
-													decoyYMass, decoyYProb,
-													apexPool, meanApex,
-													decoyAddedResidues[rowIndex] != 0,
-													args.probCutoff,
-													decoyEntries))
-			{
-				++jobStats.decoyComputeFailed;
-				continue;
-			}
-
-			copyFragmentEntriesToRecord(decoyEntries, decoyRecord);
-			records[rowIndex] = std::move(decoyRecord);
-			ok[rowIndex] = 1;
+			jobStats.targetFailed += statsByTask[taskIndex].targetFailed;
+			jobStats.decoyComputeFailed +=
+				statsByTask[taskIndex].decoyComputeFailed;
+			totalRecordCount += recordsByTask[taskIndex].size();
 		}
 
-		job.success = writeGeneratedSpectraFile(job.path, records, ok, job.metadata, job.written);
+		std::vector<sipros::SpectraIndexRecordInput> combinedRecords;
+		combinedRecords.reserve(totalRecordCount);
+		for (size_t taskIndex = 0; taskIndex < taskCount; ++taskIndex)
+		{
+			auto &records = recordsByTask[taskIndex];
+			combinedRecords.insert(combinedRecords.end(),
+				std::make_move_iterator(records.begin()),
+				std::make_move_iterator(records.end()));
+			std::vector<sipros::SpectraIndexRecordInput>().swap(records);
+		}
+		job.combineSeconds = omp_get_wtime() - combineStart;
+
+		job.metadata.targetSipAbundancePct =
+			job.targetAbundancesPct.size() == 1
+				? job.targetAbundancesPct.front()
+				: sipros::SpectraIndexMetadata::MixedSipAbundancePct;
+		job.success = writeGeneratedSpectraFile(
+			job.path, combinedRecords, job.metadata, job.written,
+			workerThreads, job.buildStats);
 		return job.success;
 	}
 	catch (const std::exception &ex)
@@ -2572,6 +2911,9 @@ struct OutputJobChildMessage
 	uint64_t written = 0;
 	uint64_t targetFailed = 0;
 	uint64_t decoyComputeFailed = 0;
+	sipros::SpectraIndexBuildStats buildStats;
+	double generationSeconds = 0.0;
+	double combineSeconds = 0.0;
 	uint8_t success = 0;
 	char error[512] = {0};
 };
@@ -2649,6 +2991,9 @@ OutputJobChildMessage makeOutputJobChildMessage(const OutputFileJob &job,
 	message.written = static_cast<uint64_t>(job.written);
 	message.targetFailed = jobStats.targetFailed;
 	message.decoyComputeFailed = jobStats.decoyComputeFailed;
+	message.buildStats = job.buildStats;
+	message.generationSeconds = job.generationSeconds;
+	message.combineSeconds = job.combineSeconds;
 	message.success = job.success ? 1 : 0;
 	const std::string error = job.error.empty() && !job.success ? "child writer failed" : job.error;
 	if (!error.empty())
@@ -2670,6 +3015,9 @@ void applyOutputJobChildMessage(OutputFileJob &job,
 		job.written = static_cast<size_t>(message.written);
 		job.success = message.success != 0 && WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0;
 		job.error = message.error;
+		job.buildStats = message.buildStats;
+		job.generationSeconds = message.generationSeconds;
+		job.combineSeconds = message.combineSeconds;
 		OutputJobStats jobStats;
 		jobStats.targetFailed = message.targetFailed;
 		jobStats.decoyComputeFailed = message.decoyComputeFailed;
@@ -2780,9 +3128,14 @@ bool runOutputJobsWithFork(std::vector<OutputFileJob> &outputJobs,
 			closeFdIfOpen(pipeFd[0]);
 			omp_set_num_threads(1);
 			OutputJobStats childStats;
+			const int threadsPerJob = std::max(
+				1, effectiveThreads /
+					static_cast<int>(std::min(
+						outputJobs.size(), static_cast<size_t>(effectiveThreads))));
 			generateAndWriteOutputFileJob(outputJobs[jobIndex], rows, baselineOk, matchedEnvelopeSets,
 										  decoyPeptides, decoyAddedResidues, pristineIso,
-										  args, sipAtom, targetSipIsotopeIndex, childStats);
+										  args, sipAtom, targetSipIsotopeIndex,
+										  threadsPerJob, childStats);
 			const OutputJobChildMessage message =
 				makeOutputJobChildMessage(outputJobs[jobIndex], childStats);
 			const bool wroteMessage = writeAllToFd(pipeFd[1], &message, sizeof(message));
@@ -2830,7 +3183,7 @@ bool runOutputJobs(std::vector<OutputFileJob> &outputJobs,
 		generateAndWriteOutputFileJob(outputJobs[static_cast<size_t>(i)], rows, baselineOk,
 									  matchedEnvelopeSets, decoyPeptides, decoyAddedResidues,
 									  pristineIso, args, sipAtom, targetSipIsotopeIndex,
-									  jobStats[static_cast<size_t>(i)]);
+									  1, jobStats[static_cast<size_t>(i)]);
 	}
 	for (const OutputJobStats &stats : jobStats)
 	{
@@ -2964,11 +3317,13 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 	std::cout << "PSM: " << args.inputPath << "  ("
 			  << readStats.totalRows << " rows; " << rows.size()
 			  << " retained peptide/charge rows)\n";
-	if (readStats.shortRows > 0 || readStats.invalidRows > 0 || readStats.unsupportedMods > 0)
+	if (readStats.shortRows > 0 || readStats.invalidRows > 0 ||
+		readStats.unsupportedMods > 0 || readStats.decoyRows > 0)
 	{
 		std::cerr << "PSM skipped rows: short=" << readStats.shortRows
 				  << ", invalid=" << readStats.invalidRows
-				  << ", unsupported_mods=" << readStats.unsupportedMods << "\n";
+				  << ", unsupported_mods=" << readStats.unsupportedMods
+				  << ", decoy=" << readStats.decoyRows << "\n";
 	}
 
 	std::unordered_map<std::string, fs::path> hdf5FilesBySample;
@@ -3009,8 +3364,8 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 					  << requestedScans << " requested scans)\n";
 		}
 	}
-	std::cout << targetAbundances.size() * (args.writeDecoy ? 2 : 1)
-			  << " HDF5 output files planned\n";
+	std::cout << (args.writeDecoy ? 2 : 1)
+			  << " SFI output files planned\n";
 
 	std::vector<MatchedEnvelopeSet> matchedEnvelopeSets(rows.size());
 	std::vector<char> baselineOk(rows.size(), 0);
@@ -3071,7 +3426,7 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 		decoyPeptidesGenerated = generatedCount;
 	}
 
-	const size_t plannedOutputFileCount = targetAbundances.size() * (args.writeDecoy ? 2 : 1);
+	const size_t plannedOutputFileCount = args.writeDecoy ? 2 : 1;
 	const bool multipleOutputFiles = plannedOutputFileCount > 1;
 	fs::path outputBasePath;
 	try
@@ -3083,48 +3438,46 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 		std::cerr << ex.what() << "\n";
 		return 1;
 	}
-	const std::string outputSipLabel = sipLabelForPath(sipAtom, sipIsotopeMassNumber);
 	size_t outputFilesWritten = 0;
 	size_t decoyFilesWritten = 0;
 	std::vector<OutputFileJob> outputJobs;
-	outputJobs.reserve(targetAbundances.size() * (args.writeDecoy ? 2 : 1));
-	for (double targetAbundancePct : targetAbundances)
+	outputJobs.reserve(plannedOutputFileCount);
+	Hdf5OutputMetadata outputMetadata;
+	outputMetadata.recordKind = "target";
+	outputMetadata.chemistryProfileId = ProNovoConfig::getChemistryProfileId();
+	outputMetadata.targetSipAbundancePct = targetAbundances.size() == 1
+		? targetAbundances.front()
+		: sipros::SpectraIndexMetadata::MixedSipAbundancePct;
+	outputMetadata.sipAtom = sipAtom;
+	outputMetadata.sipIsotopeMassNumber = sipIsotopeMassNumber;
+	outputMetadata.probCutoff = args.probCutoff;
+	outputMetadata.ppmTolerance = args.ppmTolerance;
+	outputMetadata.minMatchedEnvelopes = static_cast<uint64_t>(args.minMatchedEnvelopes);
+	outputMetadata.envelopeTopN = static_cast<uint32_t>(args.envelopeTopN);
+
+	OutputFileJob targetJob;
+	targetJob.path = outputBasePath;
+	targetJob.metadata = outputMetadata;
+	targetJob.decoy = false;
+	targetJob.targetAbundancesPct = targetAbundances;
+	outputJobs.push_back(std::move(targetJob));
+
+	if (args.writeDecoy)
 	{
-		const double effectiveAbundancePct = effectiveTargetSipAbundancePct(
-			pristineIso, sipAtom, targetSipIsotopeIndex, targetAbundancePct);
-		Hdf5OutputMetadata outputMetadata;
-		outputMetadata.recordKind = "target";
-		outputMetadata.chemistryProfileId = ProNovoConfig::getChemistryProfileId();
-		outputMetadata.targetSipAbundancePct = effectiveAbundancePct;
-		outputMetadata.sipAtom = sipAtom;
-		outputMetadata.sipIsotopeMassNumber = sipIsotopeMassNumber;
-		outputMetadata.probCutoff = args.probCutoff;
-		outputMetadata.ppmTolerance = args.ppmTolerance;
-		outputMetadata.minMatchedEnvelopes = static_cast<uint64_t>(args.minMatchedEnvelopes);
-
-		OutputFileJob targetJob;
-		targetJob.path = multipleOutputFiles
-							 ? outputPathForAbundance(outputBasePath, outputSipLabel, targetAbundancePct)
-							 : outputBasePath;
-		targetJob.metadata = outputMetadata;
-		targetJob.decoy = false;
-		outputJobs.push_back(std::move(targetJob));
-
-		if (args.writeDecoy)
-		{
-			Hdf5OutputMetadata decoyMetadata = outputMetadata;
-			decoyMetadata.recordKind = "decoy";
-			OutputFileJob decoyJob;
-			decoyJob.path = decoyOutputPathForAbundance(outputBasePath, outputSipLabel, targetAbundancePct);
-			decoyJob.metadata = decoyMetadata;
-			decoyJob.decoy = true;
-			outputJobs.push_back(std::move(decoyJob));
-		}
+		Hdf5OutputMetadata decoyMetadata = outputMetadata;
+		decoyMetadata.recordKind = "decoy";
+		OutputFileJob decoyJob;
+		decoyJob.path = decoyOutputPath(outputBasePath);
+		decoyJob.metadata = decoyMetadata;
+		decoyJob.decoy = true;
+		decoyJob.targetAbundancesPct = targetAbundances;
+		outputJobs.push_back(std::move(decoyJob));
 	}
 
 	{
 		bool outputOk = false;
-		timing.run("Write HDF5", "write output HDF5 files", outputJobs.size(), "files", [&]()
+		timing.run("Generate/write SFI", "generate spectra and write SFI files",
+			outputJobs.size(), "files", [&]()
 		{
 			outputOk = runOutputJobs(outputJobs, rows, baselineOk, matchedEnvelopeSets,
 									 decoyPeptides, decoyAddedResidues, pristineIso, args,
@@ -3149,20 +3502,55 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 			allOutputSucceeded = false;
 			continue;
 		}
+		const auto &build = job.buildStats;
+		std::ostringstream buildLog;
+		buildLog << "SFI v5 compact RT-aware index (top "
+				 << job.metadata.envelopeTopN << " peaks/envelope): "
+				 << job.path << '\n'
+				 << "  records=" << build.recordCount
+				 << ", precursors=" << build.precursorCount
+				 << ", fragments=" << build.fragmentCount << " x 16 bytes"
+				 << ", packed_product_postings=" << build.productPostingCount
+				 << " x 4 bytes, sparse_rt_bins=" << build.rtBinCount
+				 << ", blocks=" << build.blockCount << '\n'
+					 << "  parallel spectra generation: " << std::fixed
+				 << std::setprecision(3) << job.generationSeconds << "s (up to "
+				 << std::max(1, effectiveThreads /
+					static_cast<int>(outputJobs.size())) << " threads/job)\n"
+					 << "  combine generated records: " << job.combineSeconds << "s\n"
+					 << "  parallel compact/validate: "
+					 << build.compactValidateSeconds
+					 << "s (generation supplied compact envelopes; "
+					 << build.threadsUsed << " threads)\n"
+					 << "  precursor ordering: " << build.orderSeconds << "s; reserve="
+					 << build.reserveSeconds << "s\n"
+				 << "  parallel product-index build: " << std::fixed
+				 << std::setprecision(3) << build.productIndexSeconds << "s ("
+				 << build.threadsUsed << " threads)\n"
+				 << "  parallel flatten=" << build.flattenSeconds << "s, layout/checksum="
+				 << build.layoutChecksumSeconds << "s, parallel write="
+				 << build.writeSeconds << "s (" << build.threadsUsed
+				 << " threads), total=" << build.totalSeconds << "s, file="
+				 << std::setprecision(3)
+				 << static_cast<double>(build.fileBytes) / (1024.0 * 1024.0 * 1024.0)
+				 << " GiB\n";
+		std::cerr << buildLog.str();
 
 		if (job.decoy)
 		{
 			++decoyFilesWritten;
 			std::cerr << "Wrote decoy shifted spectra for " << job.written
-					  << " PSMs at " << job.metadata.targetSipAbundancePct
-					  << "% to " << job.path << "\n";
+					  << " abundance-specific PSM records across "
+					  << job.targetAbundancesPct.size() << " SIP percentages to "
+					  << job.path << "\n";
 		}
 		else
 		{
 			++outputFilesWritten;
 			std::cerr << "Wrote shifted matched experimental spectra for " << job.written
-					  << " PSMs at " << job.metadata.targetSipAbundancePct
-					  << "% to " << job.path << "\n";
+					  << " abundance-specific PSM records across "
+					  << job.targetAbundancesPct.size() << " SIP percentages to "
+					  << job.path << "\n";
 		}
 	}
 
@@ -3174,7 +3562,8 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 	std::cerr << "Input peptide spectra: " << rows.size()
 			  << "; baseline matched peptide spectra extracted: " << baselineMatchedRows
 			  << "; output files written: " << outputFilesWritten
-			  << "; minimum matched envelopes: " << args.minMatchedEnvelopes;
+			  << "; minimum matched envelopes: " << args.minMatchedEnvelopes
+			  << "; SFI envelope top-N: " << args.envelopeTopN;
 	if (args.writeDecoy)
 	{
 		std::cerr << "; decoy peptides generated: " << decoyPeptidesGenerated

@@ -5,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -22,6 +23,7 @@
 #include "SiprosSearchRunner.h"
 #include "isotopologue.h"
 #include "proNovoConfig.h"
+#include "spectraindex.h"
 
 namespace fs = std::filesystem;
 
@@ -64,10 +66,10 @@ struct PsmRow
 void printUsage(const char *prog)
 {
 	std::cerr << "Usage: " << prog
-			  << " -i <input.tsv|fragpipe_dir> -o <output.h5> -a <SIP atom/isotope, e.g. C13,H2,O18,N15,S34> [-b <pct>] [-p <prob cutoff>] [--fixed-ptm <name|default|none|all>] [-t <threads>]\n";
+			  << " -i <input.tsv|fragpipe_dir> -o <output.sfi> -a <SIP atom/isotope, e.g. C13,H2,O18,N15,S34> [-b <pct>] [-p <prob cutoff>] [--fixed-ptm <name|default|none|all>] [-t <threads>]\n";
 	std::cerr << "Required columns in input: (PSMId, SpecId, or FragPipe Spectrum), Peptide";
 	std::cerr << " [MS2IsotopicAbundances required unless -b/--sip-abundance is set]\n";
-	std::cerr << "Directory input recursively combines files named psm.tsv. Output uses the search-spectra HDF5 schema.\n";
+	std::cerr << "Directory input recursively combines files named psm.tsv. Output is a memory-mapped SIP fragment index (.sfi).\n";
 	std::cerr << "--fixed-ptm is repeatable; omit it to use the compiled default (carbamidomethyl C).\n";
 }
 
@@ -1006,11 +1008,85 @@ fs::path resolvedOutputPath(const std::string &outputPath)
 {
 	fs::path path(outputPath);
 	const std::string extension = sipros::TextUtils::toLower(path.extension().string());
-	if (extension != ".h5" && extension != ".hdf5")
+	if (extension != ".sfi")
 	{
-		path += ".h5";
+		path += ".sfi";
 	}
 	return path;
+}
+
+bool writeSpectraSfi(const fs::path &path,
+					 const Hdf5OutputData &data,
+					 char sipAtom,
+					 int sipIsotopeMassNumber,
+					 double targetSipAbundancePct,
+					 double probCutoff,
+					 int threads,
+					 sipros::SpectraIndexBuildStats &buildStats)
+{
+	std::vector<sipros::SpectraIndexRecordInput> records;
+	records.reserve(data.psmIds.size());
+	std::vector<double> retentionValues(data.psmIds.size(), 0.0);
+	for (size_t i = 0; i < data.psmIds.size(); ++i)
+	{
+		retentionValues[i] = i < data.retentions.size()
+			? parseFirstDouble(data.retentions[i]) : 0.0;
+	}
+	for (size_t i = 0; i < data.psmIds.size(); ++i)
+	{
+		sipros::SpectraIndexRecordInput record;
+		record.psmId = data.psmIds[i];
+		record.peptide = i < data.peptides.size() ? data.peptides[i] : std::string();
+		record.proteins = i < data.proteins.size() ? data.proteins[i] : std::string();
+		record.charge = i < data.charges.size() ? data.charges[i] : 1;
+		// FragPipe/Aerith psm.tsv Retention is defined in seconds. Store the
+		// index RT in minutes so search does not need a unit heuristic.
+		record.retentionMinutes = retentionValues[i] / 60.0;
+		record.sipAbundancePct = i < data.sipAbundancePct.size()
+			? data.sipAbundancePct[i]
+			: (std::isfinite(targetSipAbundancePct) ? targetSipAbundancePct : 0.0);
+		const size_t precursorOffset = static_cast<size_t>(data.precursorOffset[i]);
+		const size_t precursorCount = static_cast<size_t>(data.precursorCount[i]);
+		record.precursors.reserve(precursorCount);
+		for (size_t k = 0; k < precursorCount; ++k)
+		{
+			record.precursors.push_back({data.precursorMz[precursorOffset + k],
+				data.precursorIntensity[precursorOffset + k]});
+		}
+		const size_t fragmentOffset = static_cast<size_t>(data.fragmentOffset[i]);
+		const size_t fragmentCount = static_cast<size_t>(data.fragmentCount[i]);
+		record.fragments.reserve(fragmentCount);
+		for (size_t k = 0; k < fragmentCount; ++k)
+		{
+			const size_t index = fragmentOffset + k;
+			sipros::SpectraIndexFragmentPeakInput fragment;
+			fragment.mz = data.fragmentMz[index];
+			fragment.theoreticalIntensity = static_cast<float>(data.theoreticalIntensity[index]);
+			fragment.experimentalIntensity = 0.0F;
+			fragment.ionKind = static_cast<uint8_t>(data.ionKind[index]);
+			fragment.ionPosition = static_cast<uint32_t>(data.ionPosition[index]);
+			record.fragments.push_back(fragment);
+		}
+		records.push_back(std::move(record));
+	}
+	sipros::SpectraIndexMetadata metadata;
+	metadata.chemistryProfileId = ProNovoConfig::getChemistryProfileId();
+	metadata.recordKind = "theoretical";
+	metadata.targetSipAbundancePct = std::isfinite(targetSipAbundancePct)
+		? targetSipAbundancePct : 0.0;
+	metadata.sipAtom = sipAtom;
+	metadata.sipIsotopeMassNumber = sipIsotopeMassNumber;
+	metadata.probabilityCutoff = probCutoff;
+	metadata.envelopeTopN = 3;
+	metadata.label = 1;
+	std::string error;
+	if (!sipros::SpectraIndex::write(
+			path.string(), metadata, records, error, threads, &buildStats))
+	{
+		std::cerr << error << '\n';
+		return false;
+	}
+	return true;
 }
 
 bool writeSpectraHdf5(const fs::path &path,
@@ -1098,12 +1174,21 @@ bool writeSpectraHdf5(const fs::path &path,
 	}
 }
 
-bool buildPrecursorDistribution(Isotopologue &iso,
-								const std::string &decoratedPeptide,
-								IsotopeDistribution &precursorDist)
+bool buildPrecursorDistributionFromProductIons(
+	const Isotopologue &iso,
+	const std::vector<std::vector<double>> &yMass,
+	const std::vector<std::vector<double>> &yProb,
+	const std::vector<std::vector<double>> &bMass,
+	const std::vector<std::vector<double>> &bProb,
+	IsotopeDistribution &precursorDist)
 {
-	return iso.computePeptideIsotopicDistribution(
-		decoratedPeptide, precursorDist);
+	if (bMass.empty() || bProb.empty() || yMass.empty() || yProb.empty())
+		return false;
+	precursorDist = iso.sum(
+		IsotopeDistribution(bMass.back(), bProb.back()),
+		IsotopeDistribution(yMass.front(), yProb.front()));
+	return !precursorDist.vMass.empty() &&
+		precursorDist.vMass.size() == precursorDist.vProb.size();
 }
 } // namespace
 
@@ -1260,12 +1345,14 @@ int TheoreticalSpectraWorkflow::run(int argc, char **argv)
 					continue;
 				}
 				IsotopeDistribution precursorDist;
-				if (!buildPrecursorDistribution(
-						localIso, row.peptide, precursorDist))
+				if (!buildPrecursorDistributionFromProductIons(
+						localIso, yMass, yProb, bMass, bProb,
+						precursorDist))
 				{
 #pragma omp critical
 					{
-						std::cerr << "Skipping PSM " << row.psmId << ": direct precursor convolution failed.\n";
+						std::cerr << "Skipping PSM " << row.psmId
+								  << ": precursor reconstruction from product ions failed.\n";
 					}
 					continue;
 				}
@@ -1306,22 +1393,31 @@ int TheoreticalSpectraWorkflow::run(int argc, char **argv)
 		args.sipAbundanceMode == SipAbundanceMode::InputRow
 			? std::numeric_limits<double>::quiet_NaN()
 			: fixedSipAbundancePct;
-	const std::string abundanceSource =
-		args.sipAbundanceMode == SipAbundanceMode::InputRow
-			? "input-row"
-			: "fixed-user";
-	if (!writeSpectraHdf5(outputPath,
+	sipros::SpectraIndexBuildStats buildStats;
+	if (!writeSpectraSfi(outputPath,
 						  output,
 						  sipAtom,
 						  sipIsotopeMassNumber,
 						  fileAbundance,
-						  abundanceSource,
-						  args.probCutoff))
+						  args.probCutoff,
+						  args.threads > 0 ? args.threads : omp_get_max_threads(),
+						  buildStats))
 	{
 		return 1;
 	}
 
 	std::cerr << "Wrote theoretical spectra for " << output.psmIds.size()
-			  << " PSMs to " << outputPath << "\n";
+			  << " PSMs to " << outputPath << "\n"
+			  << "SFI v5 compact RT-aware index (top 3 peaks/envelope): fragments=" << buildStats.fragmentCount
+			  << " x 16 bytes, packed_product_postings="
+			  << buildStats.productPostingCount << " x 4 bytes, sparse_rt_bins="
+			  << buildStats.rtBinCount << ", blocks="
+			  << buildStats.blockCount << "\n"
+			  << "  parallel product-index build: " << std::fixed
+			  << std::setprecision(3) << buildStats.productIndexSeconds << "s ("
+			  << buildStats.threadsUsed << " threads); total="
+			  << buildStats.totalSeconds << "s; file="
+			  << static_cast<double>(buildStats.fileBytes) /
+				 (1024.0 * 1024.0 * 1024.0) << " GiB\n";
 	return 0;
 }

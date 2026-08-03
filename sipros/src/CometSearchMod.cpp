@@ -1016,10 +1016,18 @@ bool CometSearchMod::ScorePeptides(string * currentPeptide, bool *pbDuplFragment
 	return true;
 }
 
-bool CometSearchMod::ScorePeptidesSIPNoCancelOut(vector<vector<double> > & vvdYionMass, vector<vector<double> > & vvdYionProb,
-		vector<vector<double> > & vvdBionMass, vector<vector<double> > & vvdBionProb, MS2Scan * mstSpectrum, vector<bool> & pbDuplFragment,
+bool CometSearchMod::ScorePeptidesSIPNoCancelOut(const vector<vector<double> > & vvdYionMass, const vector<vector<double> > & vvdYionProb,
+		const vector<vector<double> > & vvdBionMass, const vector<vector<double> > & vvdBionProb, MS2Scan * mstSpectrum, vector<unsigned char> & pbDuplFragment,
 		vector<double> & vdBinnedIonMasses, vector<int> & vdBin, double & dXcorr) {
 	double dInverseBinWidth = 0, dOneMinusBinOffset = 0;
+	// Reuse the sparse list from the preceding candidate to reset only bins
+	// that were touched.  The old implementation visited every theoretical
+	// ion once to clear its marker, visited all ions again to populate weights,
+	// and then allocated a std::set to deduplicate bins.
+	for (int bin : vdBin) {
+		pbDuplFragment.at(bin) = 0;
+		vdBinnedIonMasses.at(bin) = 0.0;
+	}
 	vdBin.clear();
 	if (mstSpectrum->isMS2HighRes) {
 		dInverseBinWidth = ProNovoConfig::dHighResInverseBinWidth;
@@ -1052,43 +1060,15 @@ bool CometSearchMod::ScorePeptidesSIPNoCancelOut(vector<vector<double> > & vvdYi
 				}
 				dFragmentIonMassZ = (vvdYionMass.at(i).at(j) + (ctCharge) * PROTON_MASS) / ctCharge;
 				iVal = BINX(dFragmentIonMassZ, dInverseBinWidth, dOneMinusBinOffset);
-				pbDuplFragment.at(iVal) = false;
-			}
-		}
-		// b-ion
-		iIonMassSize = vvdBionMass.size();
-		for (int i = 0; i < iIonMassSize; ++i) {
-			iIsotopicDistSize = vvdBionMass.at(i).size();
-			for (int j = 0; j < iIsotopicDistSize; ++j) {
-				if (vvdBionProb.at(i).at(j) < ProbabilityCutOff) {
-					continue;
-				}
-				dFragmentIonMassZ = (vvdBionMass.at(i).at(j) + (ctCharge) * PROTON_MASS) / ctCharge;
-				iVal = BINX(dFragmentIonMassZ, dInverseBinWidth, dOneMinusBinOffset);
-				pbDuplFragment.at(iVal) = false;
-			}
-		}
-	}
-	for (ctCharge = 1; ctCharge <= iMaxFragCharge; ctCharge++) {
-		// y-ion
-		iIonMassSize = vvdYionMass.size();
-		for (int i = 0; i < iIonMassSize; ++i) {
-			iIsotopicDistSize = vvdYionMass.at(i).size();
-			for (int j = 0; j < iIsotopicDistSize; ++j) {
-				if (vvdYionProb.at(i).at(j) < ProbabilityCutOff) {
-					continue;
-				}
-				dFragmentIonMassZ = (vvdYionMass.at(i).at(j) + (ctCharge) * PROTON_MASS) / ctCharge;
-				iVal = BINX(dFragmentIonMassZ, dInverseBinWidth, dOneMinusBinOffset);
-				if (pbDuplFragment.at(iVal) == false) {
+				if (pbDuplFragment.at(iVal) == 0) {
 					vdBinnedIonMasses.at(iVal) = vvdYionProb.at(i).at(j);
-					pbDuplFragment.at(iVal) = true;
+					pbDuplFragment.at(iVal) = 1;
+					vdBin.push_back(iVal);
 				} else {
 					if (vdBinnedIonMasses.at(iVal) < vvdYionProb.at(i).at(j)) {
 						vdBinnedIonMasses.at(iVal) = vvdYionProb.at(i).at(j);
 					}
 				}
-				vdBin.push_back(iVal);
 			}
 		}
 		// b-ion
@@ -1101,25 +1081,20 @@ bool CometSearchMod::ScorePeptidesSIPNoCancelOut(vector<vector<double> > & vvdYi
 				}
 				dFragmentIonMassZ = (vvdBionMass.at(i).at(j) + (ctCharge) * PROTON_MASS) / ctCharge;
 				iVal = BINX(dFragmentIonMassZ, dInverseBinWidth, dOneMinusBinOffset);
-				if (pbDuplFragment.at(iVal) == false) {
+				if (pbDuplFragment.at(iVal) == 0) {
 					vdBinnedIonMasses.at(iVal) = vvdBionProb.at(i).at(j);
-					pbDuplFragment.at(iVal) = true;
+					pbDuplFragment.at(iVal) = 1;
+					vdBin.push_back(iVal);
 				} else {
 					if (vdBinnedIonMasses.at(iVal) < vvdBionProb.at(i).at(j)) {
 						vdBinnedIonMasses.at(iVal) = vvdBionProb.at(i).at(j);
 					}
 				}
-				vdBin.push_back(iVal);
 			}
 		}
 	}
 
-	set<int> s;
-	int iSize = vdBin.size();
-	for (int i = 0; i < iSize; ++i) {
-		s.insert(vdBin.at(i));
-	}
-	vdBin.assign(s.begin(), s.end());
+	std::sort(vdBin.begin(), vdBin.end());
 
 	vdBinnedIonMasses.at(0) = 1;
 	dXcorr = 0;
@@ -1136,11 +1111,10 @@ bool CometSearchMod::ScorePeptidesSIPNoCancelOut(vector<vector<double> > & vvdYi
 	int iBinSize = vdBin.size();
 	for (int i = 0; i < iBinSize; ++i) {
 		bin = vdBin.at(i);
-		if (vdBinnedIonMasses.at(iVal) == 0) {
-			bin = 0;
-		}
+		if (bin < 0 || bin >= pQuery->_spectrumInfoInternal.iArraySize)
+			continue;
 		x = bin / SPARSE_MATRIX_SIZE;
-		if (ppSparseFastXcorrData[x] == NULL || x > iMax) // x should never be > iMax so this is just a safety check
+		if (x > iMax || ppSparseFastXcorrData[x] == NULL)
 			continue;
 		y = bin - (x * SPARSE_MATRIX_SIZE);
 		dXcorr += ppSparseFastXcorrData[x][y] * vdBinnedIonMasses.at(bin);

@@ -113,6 +113,18 @@ if(BUILD_TESTING)
     COMMAND fragment_index_test
   )
 
+  add_executable(spectra_index_test
+    ${PROJECT_SOURCE_DIR}/sipros/tests/test_spectra_index.cpp
+  )
+  target_include_directories(spectra_index_test PUBLIC ${SIPROS_INCLUDE_DIRS})
+  target_link_libraries(spectra_index_test PUBLIC sipros_core)
+  sipros_compile_definitions(spectra_index_test)
+  sipros_optimization_options(spectra_index_test)
+  add_test(
+    NAME spectra_index
+    COMMAND spectra_index_test
+  )
+
   add_executable(native_precursor_test
     ${PROJECT_SOURCE_DIR}/sipros/tests/test_native_precursors.cpp
   )

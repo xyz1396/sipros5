@@ -1,7 +1,8 @@
 // sipros search-spectra
 //
-// Re-score Raxport HDF5 MS2 scans against a pre-generated SIP spectra
-// library (HDF5). HDF5 records are loaded into bounded in-memory batches.
+// Re-score Raxport HDF5 MS2 scans against memory-mapped SIP spectra indexes
+// (.sfi). Candidate discovery uses precursor/RT ranges and sparse product-ion
+// postings before the existing MVH, Xcorr, and WDP scoring stages.
 // Output: one Percolator PIN per HDF5 sample file, 30 columns.
 
 #include <iostream>
@@ -13,6 +14,7 @@
 #include <map>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -55,6 +57,8 @@
 #include "RaxportHdf5Reader.h"
 #include "PinWriter.h"
 #include "PSMfeatureExtractor.h"
+#include "spectraindex.h"
+#include "performancelog.h"
 
 namespace fs = std::filesystem;
 
@@ -68,8 +72,9 @@ struct Args
 {
 	std::string workingDir;
 	std::string singleHdf5;
-	std::string hdf5Dir;
+	std::string sfiDir;
 	std::string outputDir;
+	int sfiLabel = 0;
 	int threads = 0;
 	double rtToleranceMin = 5.0;
 	// Separate MS1 (precursor) and MS2 (fragment) tolerances. Default 10 ppm
@@ -79,7 +84,8 @@ struct Args
 	double toleranceMs2 = 10.0;
 	bool toleranceMs2Ppm = true;
 	int isotopeShiftWindow = 3;
-	int scoreEnvelopeTopN = 2;
+	int scoreEnvelopeTopN = 3;
+	int mvhCascadeTopN = 150;
 	int topPsmsPerScan = 20;
 };
 
@@ -116,7 +122,6 @@ struct TimingEntry
 	std::string workName;
 	double wallSeconds = 0.0;
 	double cpuSeconds = 0.0;
-	long memoryMbDelta = 0;
 	size_t workItems = 0;
 };
 
@@ -124,15 +129,9 @@ struct TimingLogger
 {
 	std::vector<TimingEntry> entries;
 
-	void printHeader() const
+	void printHeader(const std::string &title, int threadCount) const
 	{
-		std::cout << "\nTiming log\n"
-				  << "  " << std::left << std::setw(34) << "Region"
-				  << std::right << std::setw(10) << "Wall(s)"
-				  << std::setw(10) << "CPU(s)"
-				  << std::setw(9) << "CPU/Wall"
-				  << std::setw(11) << "Mem(MB)"
-				  << "  Work\n";
+		sipros::printPerformanceHeader(std::cout, title, threadCount);
 	}
 
 	template <typename Fn>
@@ -142,13 +141,11 @@ struct TimingLogger
 			 const std::string &workName,
 			 Fn &&fn)
 	{
-		const long memStart = static_cast<long>(checkMemoryUsage());
 		const double cpuStart = processTreeCpuSeconds();
 		const double wallStart = omp_get_wtime();
 		fn();
 		const double wallSeconds = omp_get_wtime() - wallStart;
 		const double cpuSeconds = processTreeCpuSeconds() - cpuStart;
-		const long memEnd = static_cast<long>(checkMemoryUsage());
 
 		TimingEntry entry;
 		entry.group = group;
@@ -156,7 +153,6 @@ struct TimingLogger
 		entry.workName = workName;
 		entry.wallSeconds = wallSeconds;
 		entry.cpuSeconds = cpuSeconds;
-		entry.memoryMbDelta = memEnd - memStart;
 		entry.workItems = workItems;
 		entries.push_back(entry);
 		printEntry(entry);
@@ -164,92 +160,26 @@ struct TimingLogger
 
 	static void printEntry(const TimingEntry &entry)
 	{
-		const double speedup = entry.wallSeconds > 0.0 ? entry.cpuSeconds / entry.wallSeconds : 0.0;
-		std::cout << "  " << std::left << std::setw(34) << entry.label
-				  << std::right << std::setw(10) << std::fixed << std::setprecision(3) << entry.wallSeconds
-				  << std::setw(10) << std::fixed << std::setprecision(3) << entry.cpuSeconds
-				  << std::setw(9) << std::fixed << std::setprecision(2) << speedup
-				  << std::setw(11) << std::showpos << entry.memoryMbDelta << std::noshowpos;
+		std::string detail;
 		if (entry.workItems > 0 && !entry.workName.empty())
 		{
-			const double rate = entry.wallSeconds > 0.0
-									? static_cast<double>(entry.workItems) / entry.wallSeconds
-									: 0.0;
-			std::cout << "  " << entry.workItems << ' ' << entry.workName
-					  << " (" << std::fixed << std::setprecision(0) << rate << "/s)";
+			detail = sipros::formatPerformanceCount(entry.workItems) +
+				" " + entry.workName;
 		}
-		std::cout << '\n';
+		else if (!entry.workName.empty())
+		{
+			detail = entry.workName;
+		}
+		sipros::PerformanceTiming timing;
+		timing.wallSeconds = entry.wallSeconds;
+		timing.cpuSeconds = entry.cpuSeconds;
+		sipros::printPerformanceStage(
+			std::cout, entry.group, timing, detail);
 	}
 
-	void printSummary(double totalWallSeconds,
-					  double totalCpuSeconds,
-					  size_t totalRecords,
-					  size_t totalCandidates,
-					  size_t retainedPsms,
-					  size_t writtenRows) const
+	void printFooter() const
 	{
-		std::map<std::string, TimingEntry> totals;
-		std::vector<std::string> groupOrder;
-		for (const TimingEntry &entry : entries)
-		{
-			if (totals.find(entry.group) == totals.end())
-				groupOrder.push_back(entry.group);
-			TimingEntry &sum = totals[entry.group];
-			sum.group = entry.group;
-			sum.label = entry.group;
-			sum.wallSeconds += entry.wallSeconds;
-			sum.cpuSeconds += entry.cpuSeconds;
-			sum.memoryMbDelta += entry.memoryMbDelta;
-			sum.workItems += entry.workItems;
-			if (sum.workName.empty())
-				sum.workName = entry.workName;
-		}
-
-		std::cout << "\nTiming summary\n"
-				  << "  " << std::left << std::setw(28) << "Stage"
-				  << std::right << std::setw(10) << "Wall(s)"
-				  << std::setw(9) << "Share"
-				  << std::setw(10) << "CPU(s)"
-				  << std::setw(9) << "CPU/Wall"
-				  << std::setw(11) << "Mem(MB)"
-				  << '\n';
-		for (const std::string &group : groupOrder)
-		{
-			const TimingEntry &entry = totals[group];
-			const double share = totalWallSeconds > 0.0 ? entry.wallSeconds / totalWallSeconds * 100.0 : 0.0;
-			const double speedup = entry.wallSeconds > 0.0 ? entry.cpuSeconds / entry.wallSeconds : 0.0;
-			std::cout << "  " << std::left << std::setw(28) << entry.label
-					  << std::right << std::setw(10) << std::fixed << std::setprecision(3) << entry.wallSeconds
-					  << std::setw(8) << std::fixed << std::setprecision(1) << share << "%"
-					  << std::setw(10) << std::fixed << std::setprecision(3) << entry.cpuSeconds
-					  << std::setw(9) << std::fixed << std::setprecision(2) << speedup
-					  << std::setw(11) << std::showpos << entry.memoryMbDelta << std::noshowpos
-					  << '\n';
-		}
-
-		const double totalSpeedup = totalWallSeconds > 0.0 ? totalCpuSeconds / totalWallSeconds : 0.0;
-		std::cout << "  " << std::left << std::setw(28) << "End-to-end"
-				  << std::right << std::setw(10) << std::fixed << std::setprecision(3) << totalWallSeconds
-				  << std::setw(8) << "100.0%"
-				  << std::setw(10) << std::fixed << std::setprecision(3) << totalCpuSeconds
-				  << std::setw(9) << std::fixed << std::setprecision(2) << totalSpeedup
-				  << std::setw(11) << "-" << '\n';
-
-		std::cout << "\nThroughput\n"
-				  << "  HDF5 records loaded:       " << totalRecords << '\n'
-				  << "  Assigned candidates:       " << totalCandidates << '\n'
-				  << "  Retained top PSMs:         " << retainedPsms << '\n'
-				  << "  PIN rows written:          " << writtenRows << '\n';
-		if (totalWallSeconds > 0.0)
-		{
-			std::cout << "  Records/sec end-to-end:    "
-					  << std::fixed << std::setprecision(0)
-					  << static_cast<double>(totalRecords) / totalWallSeconds << '\n'
-					  << "  Candidates/sec end-to-end: "
-					  << std::fixed << std::setprecision(0)
-					  << static_cast<double>(totalCandidates) / totalWallSeconds << '\n';
-		}
-		std::cout << '\n';
+		sipros::printPerformanceFooter(std::cout);
 	}
 };
 
@@ -258,12 +188,14 @@ void printUsage(const char *prog)
 	std::cerr
 		<< "Usage:\n  " << prog
 		<< " -w <Raxport HDF5 dir> [-f <single.h5>]\n"
-		<< "    -h5 <SIP spectra dir> -o <PIN output dir> [-t <N>] [--rt-tolerance <min>]\n"
+		<< "    --sfi <SIP spectra-index dir> -o <PIN output dir> [-t <N>] [--rt-tolerance <min>]\n"
+		<< "    [--sfi-label target|decoy]                           search one label set and write _target/_decoy.pin\n"
 		<< "    [--tolerance-ms1 <N>] [--tolerance-ms1-unit ppm|da]   (default: 10 ppm)\n"
 		<< "    [--tolerance-ms2 <N>] [--tolerance-ms2-unit ppm|da]   (default: 10 ppm)\n"
 		<< "    [--tolerance <N>] [--tolerance-unit ppm|da]            shortcut: set BOTH MS1 and MS2\n"
 		<< "    [--isotope-shift-window <N>]                           precursor isotope shifts +/-N (default: 3)\n"
-		<< "    [--score-envelope-top-n <N>]                           Xcorr/MVH envelope peaks (default: 2)\n"
+		<< "    [--score-envelope-top-n <N>]                           compact Xcorr/MVH envelope peaks (default: 3)\n"
+		<< "    [--mvh-cascade-top-n <N>]                              MVH candidates per scan sent to Xcorr/WDP (default: 150)\n"
 		<< "    [--top-psms-per-scan <N>]                              WDP winners per scan/label (default: 20)\n";
 }
 
@@ -289,8 +221,23 @@ Args parseArgs(int argc, char **argv)
 			a.workingDir = next();
 		else if (k == "-f")
 			a.singleHdf5 = next();
-		else if (k == "-h5")
-			a.hdf5Dir = next();
+		else if (k == "--sfi")
+			a.sfiDir = next();
+		else if (k == "--sfi-label")
+		{
+			std::string label = next();
+			for (char &c : label)
+				c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+			if (label == "target" || label == "1" || label == "+1")
+				a.sfiLabel = 1;
+			else if (label == "decoy" || label == "-1")
+				a.sfiLabel = -1;
+			else
+			{
+				std::cerr << "--sfi-label must be target or decoy\n";
+				std::exit(1);
+			}
+		}
 		else if (k == "-o")
 			a.outputDir = next();
 		else if (k == "-t")
@@ -359,6 +306,8 @@ Args parseArgs(int argc, char **argv)
 			a.isotopeShiftWindow = std::atoi(next().c_str());
 		else if (k == "--score-envelope-top-n")
 			a.scoreEnvelopeTopN = std::atoi(next().c_str());
+		else if (k == "--mvh-cascade-top-n")
+			a.mvhCascadeTopN = std::atoi(next().c_str());
 		else if (k == "--top-psms-per-scan")
 			a.topPsmsPerScan = std::atoi(next().c_str());
 		else if (k == "-h" || k == "--help")
@@ -377,9 +326,9 @@ Args parseArgs(int argc, char **argv)
 		a.workingDir = ".";
 	if (a.outputDir.empty())
 		a.outputDir = a.workingDir;
-	if (a.hdf5Dir.empty())
+	if (a.sfiDir.empty())
 	{
-		std::cerr << "-h5 <SIP spectra dir> is required\n";
+		std::cerr << "--sfi <SIP spectra-index dir> is required; HDF5 spectra libraries are not supported\n";
 		std::exit(1);
 	}
 	if (a.threads <= 0)
@@ -390,6 +339,11 @@ Args parseArgs(int argc, char **argv)
 	if (a.scoreEnvelopeTopN <= 0)
 	{
 		std::cerr << "--score-envelope-top-n must be > 0\n";
+		std::exit(1);
+	}
+	if (a.mvhCascadeTopN <= 0)
+	{
+		std::cerr << "--mvh-cascade-top-n must be > 0\n";
 		std::exit(1);
 	}
 	if (a.topPsmsPerScan <= 0)
@@ -440,13 +394,21 @@ bool isDecoyHdf5(const std::string &path)
 	return lower.find("decoy") != std::string::npos;
 }
 
+bool isDecoySfi(const std::string &path)
+{
+	std::string name = fs::path(path).filename().string();
+	std::transform(name.begin(), name.end(), name.begin(),
+		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return name.find("decoy") != std::string::npos;
+}
+
 // -------------------- SipRecord --------------------
 
 struct SipRecord
 {
 	std::string psmId;
 	std::string retention;
-	std::string peptide;     // bracketed/decorated form from HDF5
+	std::string peptide;     // bracketed/decorated form from the spectra index
 	std::string nakedPeptide; // letters-only used for scoring
 	std::string proteins;
 	int charge = 1;
@@ -459,8 +421,10 @@ struct SipRecord
 	// indexed by ion position (1-based ⇒ pos-1 row); each row holds an envelope
 	std::vector<std::vector<double>> vvdYionMass;
 	std::vector<std::vector<double>> vvdYionProb;
+	std::vector<std::vector<double>> vvdYionExpIntensity;
 	std::vector<std::vector<double>> vvdBionMass;
 	std::vector<std::vector<double>> vvdBionProb;
+	std::vector<std::vector<double>> vvdBionExpIntensity;
 	// flattened fragment view for entropy/cosine
 	std::vector<double> fragMz;
 	std::vector<double> fragExpInt;
@@ -1048,8 +1012,10 @@ bool loadHdf5File(const std::string &path,
 			r.nBpositions = need;
 			r.vvdYionMass.assign(need, {});
 			r.vvdYionProb.assign(need, {});
+			r.vvdYionExpIntensity.assign(need, {});
 			r.vvdBionMass.assign(need, {});
 			r.vvdBionProb.assign(need, {});
+			r.vvdBionExpIntensity.assign(need, {});
 
 			// per-position sums for probability normalization
 			std::vector<double> sumY(need, 0.0), sumB(need, 0.0);
@@ -1065,12 +1031,14 @@ bool loadHdf5File(const std::string &path,
 				{
 					r.vvdYionMass[pos - 1].push_back(m - protonMass);
 					r.vvdYionProb[pos - 1].push_back(t);
+					r.vvdYionExpIntensity[pos - 1].push_back(fragEx[fOff + k]);
 					sumY[pos - 1] += t;
 				}
 				else if (kind == 'b' || kind == 'B')
 				{
 					r.vvdBionMass[pos - 1].push_back(m - protonMass);
 					r.vvdBionProb[pos - 1].push_back(t);
+					r.vvdBionExpIntensity[pos - 1].push_back(fragEx[fOff + k]);
 					sumB[pos - 1] += t;
 				}
 			}
@@ -1094,11 +1062,13 @@ bool loadHdf5File(const std::string &path,
 				{
 					r.vvdYionMass[p].push_back(0.0);
 					r.vvdYionProb[p].push_back(0.0);
+					r.vvdYionExpIntensity[p].push_back(0.0);
 				}
 				if (r.vvdBionMass[p].empty())
 				{
 					r.vvdBionMass[p].push_back(0.0);
 					r.vvdBionProb[p].push_back(0.0);
+					r.vvdBionExpIntensity[p].push_back(0.0);
 				}
 			}
 
@@ -1217,7 +1187,8 @@ struct EnvCounts
 };
 
 EnvCounts countMatchedEnvelopes(const MS2Scan *scan,
-								const SipRecord &rec,
+								const std::vector<std::vector<double>> &yIonMass,
+								const std::vector<std::vector<double>> &bIonMass,
 								const MassTolerance &tol)
 {
 	EnvCounts c;
@@ -1243,13 +1214,21 @@ EnvCounts countMatchedEnvelopes(const MS2Scan *scan,
 		}
 		return false;
 	};
-	for (const auto &env : rec.vvdYionMass)
+	for (const auto &env : yIonMass)
 		if (envelopeMatches(env))
 			++c.matchedY;
-	for (const auto &env : rec.vvdBionMass)
+	for (const auto &env : bIonMass)
 		if (envelopeMatches(env))
 			++c.matchedB;
 	return c;
+}
+
+EnvCounts countMatchedEnvelopes(const MS2Scan *scan,
+								const SipRecord &rec,
+								const MassTolerance &tol)
+{
+	return countMatchedEnvelopes(
+		scan, rec.vvdYionMass, rec.vvdBionMass, tol);
 }
 
 // Build aligned (p, q) pairs by matching each HDF5 fragment to its nearest
@@ -1406,6 +1385,95 @@ double computeEntropy(const std::vector<double> &p, const std::vector<double> &q
 	if (sim > 1.0)
 		sim = 1.0;
 	return sim;
+}
+
+bool buildPrecursorEnvelopeFromProductIons(
+	const Isotopologue &isotopologue,
+	const std::vector<std::vector<double>> &yIonMass,
+	const std::vector<std::vector<double>> &yIonProb,
+	const std::vector<std::vector<double>> &bIonMass,
+	const std::vector<std::vector<double>> &bIonProb,
+	IsotopeDistribution &precursor)
+{
+	if (bIonMass.empty() || bIonProb.empty() ||
+		yIonMass.empty() || yIonProb.empty() ||
+		bIonMass.back().empty() || bIonProb.back().empty() ||
+		yIonMass.front().empty() || yIonProb.front().empty())
+		return false;
+	precursor = isotopologue.sum(
+		IsotopeDistribution(bIonMass.back(), bIonProb.back()),
+		IsotopeDistribution(yIonMass.front(), yIonProb.front()));
+	return !precursor.vMass.empty() &&
+		precursor.vMass.size() == precursor.vProb.size();
+}
+
+// Expand the compact SFI envelope intensities onto the full-resolution WDP
+// isotope masses. SFI retains the empirical apex for every b/y envelope; WDP
+// supplies the complete isotope shape used to distribute that apex intensity.
+void buildHighResolutionFeatureSpectrum(
+	const SipRecord &record,
+	const std::vector<std::vector<double>> &yIonMass,
+	const std::vector<std::vector<double>> &yIonProb,
+	const std::vector<std::vector<double>> &bIonMass,
+	const std::vector<std::vector<double>> &bIonProb,
+	std::vector<double> &fragmentMz,
+	std::vector<double> &fragmentIntensity)
+{
+	std::vector<std::pair<double, double>> peaks;
+	const double proton = ProNovoConfig::getProtonMass();
+	const auto appendSeries = [&peaks, proton](
+		const std::vector<std::vector<double>> &masses,
+		const std::vector<std::vector<double>> &probabilities,
+		const std::vector<std::vector<double>> &compactExperimental)
+	{
+		const size_t envelopeCount = std::min(
+			masses.size(), probabilities.size());
+		for (size_t envelopeIndex = 0;
+			 envelopeIndex < envelopeCount; ++envelopeIndex)
+		{
+			const size_t peakCount = std::min(
+				masses[envelopeIndex].size(),
+				probabilities[envelopeIndex].size());
+			if (peakCount == 0 ||
+				envelopeIndex >= compactExperimental.size() ||
+				compactExperimental[envelopeIndex].empty())
+				continue;
+			const double empiricalApex = *std::max_element(
+				compactExperimental[envelopeIndex].begin(),
+				compactExperimental[envelopeIndex].end());
+			const double theoreticalApex = *std::max_element(
+				probabilities[envelopeIndex].begin(),
+				probabilities[envelopeIndex].begin() +
+					static_cast<std::ptrdiff_t>(peakCount));
+			if (!(empiricalApex > 0.0) || !(theoreticalApex > 0.0))
+				continue;
+			for (size_t peakIndex = 0; peakIndex < peakCount; ++peakIndex)
+			{
+				if (!(masses[envelopeIndex][peakIndex] > 0.0) ||
+					!(probabilities[envelopeIndex][peakIndex] > 0.0))
+					continue;
+				peaks.emplace_back(
+					masses[envelopeIndex][peakIndex] + proton,
+					empiricalApex *
+						probabilities[envelopeIndex][peakIndex] /
+						theoreticalApex);
+			}
+		}
+	};
+	appendSeries(yIonMass, yIonProb, record.vvdYionExpIntensity);
+	appendSeries(bIonMass, bIonProb, record.vvdBionExpIntensity);
+	std::sort(peaks.begin(), peaks.end(),
+		[](const auto &left, const auto &right)
+		{ return left.first < right.first; });
+	fragmentMz.clear();
+	fragmentIntensity.clear();
+	fragmentMz.reserve(peaks.size());
+	fragmentIntensity.reserve(peaks.size());
+	for (const auto &peak : peaks)
+	{
+		fragmentMz.push_back(peak.first);
+		fragmentIntensity.push_back(peak.second);
+	}
 }
 
 // -------------------- Per-peptide feature helpers --------------------
@@ -2213,6 +2281,16 @@ struct ScoringPsm
 	int scanNumber = 0;
 	int label = 0;
 	double wdp = -std::numeric_limits<double>::infinity();
+	double xcorr = 0.0;
+	double mvh = 0.0;
+	double entropy = 0.0;
+	double cosine = 0.0;
+	EnvCounts envelopeCounts;
+	// Keep only the small precursor convolution after consuming the full WDP
+	// product envelopes. Retaining all b/y envelopes for every top PSM would
+	// substantially increase peak RAM.
+	std::vector<double> precursorNeutralMasses;
+	std::vector<double> precursorProbabilities;
 	ShardPsmRow row;
 	double ms2Pct = 0.0;
 	std::string nakedPeptide;
@@ -2360,6 +2438,512 @@ size_t assignCandidatesToScans(const std::vector<MS2Scan *> &scans,
 	return assignedCount;
 }
 
+SipRecord materializeSfiRecord(const sipros::SpectraIndex &index,
+							   uint32_t recordId)
+{
+	const sipros::SpectraIndexRecord &source = index.record(recordId);
+	SipRecord record;
+	record.psmId = std::string(index.psmId(recordId));
+	record.peptide = std::string(index.peptide(recordId));
+	record.nakedPeptide = nakedPeptideOf(record.peptide);
+	record.proteins = normalizeProteinList(std::string(index.proteins(recordId)));
+	record.charge = source.charge;
+	record.rtMinutes = source.retentionMinutes;
+	record.retention = std::to_string(source.retentionMinutes);
+	record.topPrecursorMz = source.topPrecursorMz;
+	record.topPrecursorIntensity = source.topPrecursorIntensity;
+	record.sumPrecursorIntensity = source.sumPrecursorIntensity;
+	const auto precursorRange = index.precursors(recordId);
+	record.precursorMz.reserve(static_cast<size_t>(precursorRange.second - precursorRange.first));
+	record.precursorIntensity.reserve(record.precursorMz.capacity());
+	for (const auto *peak = precursorRange.first; peak != precursorRange.second; ++peak)
+	{
+		record.precursorMz.push_back(peak->mz);
+		record.precursorIntensity.push_back(peak->intensity);
+	}
+
+	const size_t peptideLength = record.nakedPeptide.size();
+	const size_t positions = peptideLength > 0 ? peptideLength - 1 : 0;
+	record.nYpositions = positions;
+	record.nBpositions = positions;
+	record.vvdYionMass.assign(positions, {});
+	record.vvdYionProb.assign(positions, {});
+	record.vvdYionExpIntensity.assign(positions, {});
+	record.vvdBionMass.assign(positions, {});
+	record.vvdBionProb.assign(positions, {});
+	record.vvdBionExpIntensity.assign(positions, {});
+	std::vector<double> sumY(positions, 0.0);
+	std::vector<double> sumB(positions, 0.0);
+	const double proton = ProNovoConfig::getProtonMass();
+	const auto fragmentRange = index.fragments(recordId);
+	record.fragMz.reserve(static_cast<size_t>(fragmentRange.second - fragmentRange.first));
+	record.fragExpInt.reserve(record.fragMz.capacity());
+	for (const auto *fragment = fragmentRange.first;
+		 fragment != fragmentRange.second; ++fragment)
+	{
+		const double fragmentMz = fragment->mz();
+		record.fragMz.push_back(fragmentMz);
+		record.fragExpInt.push_back(fragment->experimentalIntensity);
+		const size_t position = fragment->ionPosition;
+		if (position == 0 || position > positions)
+			continue;
+		const double mass = fragmentMz - proton;
+		const double probability = fragment->theoreticalIntensity;
+		if (fragment->ionKind == static_cast<uint8_t>('y') ||
+			fragment->ionKind == static_cast<uint8_t>('Y'))
+		{
+			record.vvdYionMass[position - 1].push_back(mass);
+			record.vvdYionProb[position - 1].push_back(probability);
+			record.vvdYionExpIntensity[position - 1].push_back(
+				fragment->experimentalIntensity);
+			sumY[position - 1] += probability;
+		}
+		else if (fragment->ionKind == static_cast<uint8_t>('b') ||
+				 fragment->ionKind == static_cast<uint8_t>('B'))
+		{
+			record.vvdBionMass[position - 1].push_back(mass);
+			record.vvdBionProb[position - 1].push_back(probability);
+			record.vvdBionExpIntensity[position - 1].push_back(
+				fragment->experimentalIntensity);
+			sumB[position - 1] += probability;
+		}
+	}
+	for (size_t position = 0; position < positions; ++position)
+	{
+		if (sumY[position] > 0.0)
+			for (double &probability : record.vvdYionProb[position])
+				probability /= sumY[position];
+		if (sumB[position] > 0.0)
+			for (double &probability : record.vvdBionProb[position])
+				probability /= sumB[position];
+		if (record.vvdYionMass[position].empty())
+		{
+			record.vvdYionMass[position].push_back(0.0);
+			record.vvdYionProb[position].push_back(0.0);
+			record.vvdYionExpIntensity[position].push_back(0.0);
+		}
+		if (record.vvdBionMass[position].empty())
+		{
+			record.vvdBionMass[position].push_back(0.0);
+			record.vvdBionProb[position].push_back(0.0);
+			record.vvdBionExpIntensity[position].push_back(0.0);
+		}
+	}
+	return record;
+}
+
+PrecursorMatch matchSfiPrecursor(const MS2Scan *scan,
+								 const sipros::SpectraIndexRecord &record,
+								 const MassTolerance &tolerance,
+								 double rtTolerance,
+								 int isotopeShiftWindow)
+{
+	PrecursorMatch best;
+	double bestError = std::numeric_limits<double>::infinity();
+	const double neutron = ProNovoConfig::getNeutronMass();
+	const double scanRt = scanRtMinutes(scan);
+	const double deltaRt = scanRt - record.retentionMinutes;
+	if (std::fabs(deltaRt) > rtTolerance)
+		return best;
+	for (const ScanPrecursor &precursor : scanPrecursors(scan))
+	{
+		if (precursor.charge <= 0 || precursor.charge != record.charge)
+			continue;
+		const double toleranceMz = tolerance.daAt(precursor.mz);
+		const double deltaNeutral =
+			(precursor.mz - record.topPrecursorMz) * precursor.charge;
+		const int shift = static_cast<int>(std::round(deltaNeutral / neutron));
+		if (std::abs(shift) > isotopeShiftWindow)
+			continue;
+		const double residual = deltaNeutral - shift * neutron;
+		if (std::fabs(residual) > toleranceMz * precursor.charge)
+			continue;
+		const double error = std::fabs(residual);
+		if (error < bestError)
+		{
+			bestError = error;
+			best.ok = true;
+			best.isotopicShift = shift;
+			best.mzShift = precursor.mz - record.topPrecursorMz;
+			best.mzAbsErrPpm = record.topPrecursorMz > 0.0
+				? error / record.topPrecursorMz * 1.0e6 : 0.0;
+			best.deltaRT = std::fabs(deltaRt);
+			best.matchedCharge = precursor.charge;
+			best.matchedMz = precursor.mz;
+		}
+	}
+	return best;
+}
+
+struct SfiGateCounters
+{
+	size_t rtRejected = 0;
+	size_t precursorCandidates = 0;
+	size_t rtProductBins = 0;
+	size_t productMassIntervals = 0;
+	size_t productRangeLookups = 0;
+	size_t productPostingsScanned = 0;
+	size_t productPostings = 0;
+	size_t productGateSurvivors = 0;
+	double lookupWallSeconds = 0.0;
+	double lookupCpuSeconds = 0.0;
+	double recordReductionWallSeconds = 0.0;
+	double recordReductionCpuSeconds = 0.0;
+};
+
+struct ProductMassBinRange
+{
+	uint32_t lower = 0;
+	uint32_t upper = 0;
+};
+
+ProductMassBinRange productMassBinRange(double lowerMz, double upperMz)
+{
+	constexpr double binWidth = 0.001;
+	constexpr double maximumBin = static_cast<double>((1U << 24) - 1U);
+	const double lower = std::floor(std::max(0.0, lowerMz) / binWidth);
+	const double upper = std::ceil(std::max(0.0, upperMz) / binWidth);
+	return {
+		static_cast<uint32_t>(std::min(lower, maximumBin)),
+		static_cast<uint32_t>(std::min(upper, maximumBin))};
+}
+
+size_t assignSfiCandidatesToScans(
+	const std::vector<MS2Scan *> &scans,
+	const sipros::SpectraIndex &index,
+	const MassTolerance &precursorTolerance,
+	const MassTolerance &fragmentTolerance,
+	double rtTolerance,
+	int isotopeShiftWindow,
+	uint32_t minimumProductIons,
+	std::vector<uint32_t> &candidateRecordIds,
+	std::vector<std::vector<CandidateMatch>> &out,
+	SfiGateCounters &counters)
+{
+	out.assign(scans.size(), {});
+	size_t precursorCandidates = 0;
+	size_t rtRejected = 0;
+	size_t rtProductBins = 0;
+	size_t productMassIntervals = 0;
+	size_t productRangeLookups = 0;
+	size_t productPostingsScanned = 0;
+	size_t productPostings = 0;
+	size_t survivors = 0;
+	const double neutron = ProNovoConfig::getNeutronMass();
+	const double proton = ProNovoConfig::getProtonMass();
+	const size_t recordWordCount =
+		(static_cast<size_t>(index.recordCount()) + 63U) / 64U;
+	const int gateThreadCount = std::max(1, omp_get_max_threads());
+	// Each scan is owned by one OpenMP worker. Record its surviving SFI IDs in
+	// that worker's bitset so the post-gate unique-record reduction does not
+	// append and sort tens of millions of IDs on one core.
+	std::vector<uint64_t> threadRecordBits(
+		static_cast<size_t>(gateThreadCount) * recordWordCount, 0);
+	const double lookupWallStart = omp_get_wtime();
+	const double lookupCpuStart = processTreeCpuSeconds();
+#pragma omp parallel for schedule(guided, 4) reduction(+ : rtRejected, precursorCandidates, rtProductBins, productMassIntervals, productRangeLookups, productPostingsScanned, productPostings, survivors)
+	for (size_t scanIndex = 0; scanIndex < scans.size(); ++scanIndex)
+	{
+		MS2Scan *scan = scans[scanIndex];
+		const double scanRt = scanRtMinutes(scan);
+		std::vector<CandidateMatch> candidates;
+		for (const ScanPrecursor &precursor : scanPrecursors(scan))
+		{
+			if (precursor.charge <= 0)
+				continue;
+			const double toleranceMz = precursorTolerance.daAt(precursor.mz);
+			for (int shift = -isotopeShiftWindow; shift <= isotopeShiftWindow; ++shift)
+			{
+				const double center = precursor.mz - shift * neutron / precursor.charge;
+				const auto range = index.precursorMzRange(
+					center - toleranceMz, center + toleranceMz);
+				for (uint32_t recordId = range.first; recordId < range.second; ++recordId)
+				{
+					const auto &record = index.record(recordId);
+					if (record.charge != precursor.charge)
+						continue;
+					if (std::fabs(scanRt - record.retentionMinutes) > rtTolerance)
+					{
+						++rtRejected;
+						continue;
+					}
+					PrecursorMatch match = matchSfiPrecursor(
+						scan, record, precursorTolerance, rtTolerance,
+						isotopeShiftWindow);
+					if (match.ok)
+						candidates.push_back({recordId, match});
+				}
+			}
+		}
+		std::sort(candidates.begin(), candidates.end(),
+			[](const CandidateMatch &left, const CandidateMatch &right)
+			{
+				if (left.recordIdx != right.recordIdx)
+					return left.recordIdx < right.recordIdx;
+				return left.match.mzAbsErrPpm < right.match.mzAbsErrPpm;
+			});
+		candidates.erase(std::unique(candidates.begin(), candidates.end(),
+			[](const CandidateMatch &left, const CandidateMatch &right)
+			{ return left.recordIdx == right.recordIdx; }), candidates.end());
+		precursorCandidates += candidates.size();
+		int scanMaximumFragmentCharge = 0;
+		for (const CandidateMatch &candidate : candidates)
+		{
+			scanMaximumFragmentCharge = std::max(
+				scanMaximumFragmentCharge,
+				candidate.match.matchedCharge <= 2
+					? 1 : candidate.match.matchedCharge - 1);
+		}
+		std::vector<std::vector<ProductMassBinRange>> massRangesByCharge(
+			static_cast<size_t>(scanMaximumFragmentCharge + 1));
+		for (int fragmentCharge = 1;
+			 fragmentCharge <= scanMaximumFragmentCharge; ++fragmentCharge)
+		{
+			auto &ranges = massRangesByCharge[static_cast<size_t>(fragmentCharge)];
+			ranges.reserve(scan->vdMZ.size());
+			for (double observedMz : scan->vdMZ)
+			{
+				const double indexedMz = fragmentCharge *
+					(observedMz - proton) + proton;
+				const double tolerance = fragmentCharge *
+					fragmentTolerance.daAt(observedMz);
+				ranges.push_back(productMassBinRange(
+					indexedMz - tolerance, indexedMz + tolerance));
+			}
+			std::sort(ranges.begin(), ranges.end(),
+				[](const ProductMassBinRange &left, const ProductMassBinRange &right)
+				{
+					if (left.lower != right.lower)
+						return left.lower < right.lower;
+					return left.upper < right.upper;
+				});
+			productMassIntervals += ranges.size();
+		}
+
+		std::vector<CandidateMatch> gated;
+		for (size_t begin = 0; begin < candidates.size();)
+		{
+			const uint32_t block = index.precursorBlockForRecord(
+				static_cast<uint32_t>(candidates[begin].recordIdx));
+			const uint32_t recordBegin = index.precursorBlockRecordBegin(block);
+			size_t end = begin + 1;
+			while (end < candidates.size() &&
+				index.precursorBlockForRecord(
+					static_cast<uint32_t>(candidates[end].recordIdx)) == block)
+				++end;
+			std::array<uint32_t, sipros::SpectraIndex::recordBlockCapacity()> hits;
+			std::array<uint8_t, sipros::SpectraIndex::recordBlockCapacity()> maxFragmentCharges{};
+			hits.fill(std::numeric_limits<uint32_t>::max());
+			for (size_t i = begin; i < end; ++i)
+			{
+				const size_t localRecord = candidates[i].recordIdx - recordBegin;
+				hits[localRecord] = 0;
+				maxFragmentCharges[localRecord] = static_cast<uint8_t>(
+					candidates[i].match.matchedCharge <= 2
+						? 1 : candidates[i].match.matchedCharge - 1);
+			}
+			if (minimumProductIons > 0)
+			{
+				const int maximumFragmentCharge = *std::max_element(
+					maxFragmentCharges.begin(), maxFragmentCharges.end());
+				const auto rtBins = index.rtBins(
+					block, scanRt - rtTolerance, scanRt + rtTolerance);
+				if (rtBins.first != nullptr)
+				{
+					for (const auto *rtBin = rtBins.first; rtBin != rtBins.second; ++rtBin)
+					{
+						// A precursor block is mass ordered and can contain records from
+						// many runs/RT regions.  Only visit an RT segment when it owns an
+						// exact precursor candidate, and stop visiting that segment once
+						// all of its candidates reach the product-ion threshold.  This is
+						// the same bounded-block/early-exit strategy used by the regular
+						// FASTA peptide-cache query.
+						size_t candidatesBelowThreshold = 0;
+						for (size_t i = begin; i < end; ++i)
+						{
+							const auto &candidateRecord = index.record(
+								static_cast<uint32_t>(candidates[i].recordIdx));
+							const uint32_t candidateRtBin = static_cast<uint32_t>(
+								std::floor(std::max(0.0,
+									candidateRecord.retentionMinutes) /
+									sipros::SpectraIndex::rtBinWidthMinutes()));
+							if (candidateRtBin == rtBin->rtBin &&
+								hits[candidates[i].recordIdx - recordBegin] < minimumProductIons)
+								++candidatesBelowThreshold;
+						}
+						if (candidatesBelowThreshold == 0)
+							continue;
+						++rtProductBins;
+						for (int fragmentCharge = 1;
+							 fragmentCharge <= maximumFragmentCharge &&
+							 candidatesBelowThreshold != 0; ++fragmentCharge)
+						{
+							const auto &ranges = massRangesByCharge[
+								static_cast<size_t>(fragmentCharge)];
+							if (ranges.empty())
+								continue;
+							const auto segment = index.productPostings(block, *rtBin);
+							if (segment.first == nullptr)
+								continue;
+							constexpr size_t intervalsPerLookup = 1;
+							for (size_t groupBegin = 0;
+								 groupBegin < ranges.size() && candidatesBelowThreshold != 0;
+								 groupBegin += intervalsPerLookup)
+							{
+								const size_t groupEnd = std::min(
+									ranges.size(), groupBegin + intervalsPerLookup);
+								const auto first = std::lower_bound(
+									segment.first, segment.second, ranges[groupBegin].lower,
+									[](const sipros::SpectraIndexFragmentPosting &posting,
+									   uint32_t value)
+									{ return posting.massBin() < value; });
+								const auto last = std::upper_bound(
+									first, segment.second, ranges[groupEnd - 1].upper,
+									[](uint32_t value,
+									   const sipros::SpectraIndexFragmentPosting &posting)
+									{ return value < posting.massBin(); });
+								++productRangeLookups;
+								productPostingsScanned += static_cast<size_t>(last - first);
+								for (const auto *posting = first; posting != last; ++posting)
+								{
+									const uint32_t massBin = posting->massBin();
+									uint32_t matches = 0;
+									for (size_t i = groupBegin; i < groupEnd; ++i)
+									{
+										if (ranges[i].lower <= massBin && massBin <= ranges[i].upper)
+											++matches;
+									}
+									if (matches == 0)
+										continue;
+									productPostings += matches;
+									const uint8_t localRecordId = posting->localRecordId();
+									uint32_t &hit = hits[localRecordId];
+									if (hit != std::numeric_limits<uint32_t>::max() &&
+										fragmentCharge <= maxFragmentCharges[localRecordId] &&
+										hit < minimumProductIons)
+									{
+										hit = std::min<uint32_t>(
+											minimumProductIons, hit + matches);
+										if (hit == minimumProductIons)
+											--candidatesBelowThreshold;
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			for (size_t i = begin; i < end; ++i)
+			{
+				if (minimumProductIons == 0 ||
+					hits[candidates[i].recordIdx - recordBegin] >= minimumProductIons)
+				{
+					gated.push_back(candidates[i]);
+					++survivors;
+				}
+			}
+			begin = end;
+		}
+		uint64_t *recordBits = threadRecordBits.data() +
+			static_cast<size_t>(omp_get_thread_num()) * recordWordCount;
+		for (const CandidateMatch &candidate : gated)
+		{
+			const size_t recordId = candidate.recordIdx;
+			recordBits[recordId >> 6U] |= uint64_t{1} << (recordId & 63U);
+		}
+		out[scanIndex] = std::move(gated);
+	}
+	const double lookupWallSeconds = omp_get_wtime() - lookupWallStart;
+	const double lookupCpuSeconds = processTreeCpuSeconds() - lookupCpuStart;
+
+	const double reductionWallStart = omp_get_wtime();
+	const double reductionCpuStart = processTreeCpuSeconds();
+	std::vector<uint64_t> combinedRecordBits(recordWordCount, 0);
+	std::vector<size_t> recordWordOffsets(recordWordCount + 1U, 0);
+#pragma omp parallel for schedule(static)
+	for (size_t word = 0; word < recordWordCount; ++word)
+	{
+		uint64_t combined = 0;
+		for (int thread = 0; thread < gateThreadCount; ++thread)
+			combined |= threadRecordBits[
+				static_cast<size_t>(thread) * recordWordCount + word];
+		combinedRecordBits[word] = combined;
+		recordWordOffsets[word + 1U] = static_cast<size_t>(
+			__builtin_popcountll(combined));
+	}
+	for (size_t word = 0; word < recordWordCount; ++word)
+		recordWordOffsets[word + 1U] += recordWordOffsets[word];
+	candidateRecordIds.resize(recordWordOffsets.back());
+#pragma omp parallel for schedule(static)
+	for (size_t word = 0; word < recordWordCount; ++word)
+	{
+		uint64_t bits = combinedRecordBits[word];
+		size_t output = recordWordOffsets[word];
+		while (bits != 0)
+		{
+			const unsigned bit = static_cast<unsigned>(__builtin_ctzll(bits));
+			candidateRecordIds[output++] = static_cast<uint32_t>(
+				(word << 6U) + bit);
+			bits &= bits - 1U;
+		}
+	}
+	const double reductionWallSeconds = omp_get_wtime() - reductionWallStart;
+	const double reductionCpuSeconds = processTreeCpuSeconds() - reductionCpuStart;
+	counters.rtRejected += rtRejected;
+	counters.precursorCandidates += precursorCandidates;
+	counters.rtProductBins += rtProductBins;
+	counters.productMassIntervals += productMassIntervals;
+	counters.productRangeLookups += productRangeLookups;
+	counters.productPostingsScanned += productPostingsScanned;
+	counters.productPostings += productPostings;
+	counters.productGateSurvivors += survivors;
+	counters.lookupWallSeconds += lookupWallSeconds;
+	counters.lookupCpuSeconds += lookupCpuSeconds;
+	counters.recordReductionWallSeconds += reductionWallSeconds;
+	counters.recordReductionCpuSeconds += reductionCpuSeconds;
+	return survivors;
+}
+
+void materializeSfiCandidates(
+	const sipros::SpectraIndex &index,
+	const std::vector<uint32_t> &recordIds,
+	std::vector<std::vector<CandidateMatch>> &scanCandidates,
+	std::vector<LabeledRecord> &materialized)
+{
+	materialized.clear();
+	materialized.resize(recordIds.size());
+	std::vector<uint32_t> materializedPositions(
+		static_cast<size_t>(index.recordCount()),
+		std::numeric_limits<uint32_t>::max());
+	const int indexLabel = index.metadata().label;
+	const std::string canonicalSipIsotope =
+		PSMfeatureExtractor::canonicalSipIsotope(
+			std::string(1, index.metadata().sipAtom),
+			index.metadata().sipIsotopeMassNumber);
+#pragma omp parallel for schedule(guided, 32)
+	for (size_t i = 0; i < recordIds.size(); ++i)
+	{
+		const uint32_t recordId = recordIds[i];
+		LabeledRecord labeled;
+		labeled.rec = materializeSfiRecord(index, recordId);
+		labeled.label = indexLabel;
+		labeled.ms2Pct = index.record(recordId).sipAbundancePct;
+		labeled.sipAtom = canonicalSipIsotope;
+		materialized[i] = std::move(labeled);
+		materializedPositions[recordId] = static_cast<uint32_t>(i);
+	}
+#pragma omp parallel for schedule(guided, 32)
+	for (size_t scanIndex = 0; scanIndex < scanCandidates.size(); ++scanIndex)
+	{
+		auto &candidates = scanCandidates[scanIndex];
+		for (CandidateMatch &candidate : candidates)
+		{
+			const uint32_t recordId = static_cast<uint32_t>(candidate.recordIdx);
+			candidate.recordIdx = materializedPositions[recordId];
+		}
+	}
+}
+
 void keepTopNEnvelopePeaks(std::vector<std::vector<double>> &masses,
 						   std::vector<std::vector<double>> &probs,
 						   int topN)
@@ -2458,6 +3042,102 @@ void trimIonVectorsForXcorr(const MS2Scan *scan,
 	}
 }
 
+void buildSfiMvhIonCache(
+	const sipros::SpectraIndex &index,
+	const std::vector<uint32_t> &recordIds,
+	int envelopeTopN,
+	std::vector<std::vector<double>> &recordIons)
+{
+	recordIons.clear();
+	recordIons.resize(static_cast<size_t>(index.recordCount()));
+#pragma omp parallel for schedule(guided, 32)
+	for (size_t i = 0; i < recordIds.size(); ++i)
+	{
+		const uint32_t recordId = recordIds[i];
+		SipRecord record = materializeSfiRecord(index, recordId);
+		keepTopNEnvelopePeaks(
+			record.vvdYionMass, record.vvdYionProb, envelopeTopN);
+		keepTopNEnvelopePeaks(
+			record.vvdBionMass, record.vvdBionProb, envelopeTopN);
+		std::vector<char> residues;
+		MVH::CalculateSequenceIonsSIP(
+			record.nakedPeptide, record.charge,
+			MVH::bUseSmartPlusThreeModel, &recordIons[recordId],
+			record.vvdYionMass, record.vvdYionProb,
+			record.vvdBionMass, record.vvdBionProb, &residues);
+	}
+}
+
+size_t retainTopMvhCandidates(
+	std::vector<std::vector<CandidateMatch>> &scanCandidates,
+	std::vector<std::vector<double>> &candidateMvh,
+	std::vector<std::vector<char>> &candidateMvhAccepted,
+	size_t perScanLimit)
+{
+	size_t retained = 0;
+#pragma omp parallel for schedule(guided, 8) reduction(+ : retained)
+	for (size_t scanIndex = 0; scanIndex < scanCandidates.size(); ++scanIndex)
+	{
+		auto &candidates = scanCandidates[scanIndex];
+		auto &scores = candidateMvh[scanIndex];
+		auto &accepted = candidateMvhAccepted[scanIndex];
+		std::vector<size_t> order;
+		order.reserve(candidates.size());
+		for (size_t i = 0; i < candidates.size(); ++i)
+			if (accepted[i])
+				order.push_back(i);
+		const size_t keep = std::min(perScanLimit, order.size());
+		if (keep < order.size())
+		{
+			std::partial_sort(order.begin(), order.begin() + keep, order.end(),
+				[&](size_t left, size_t right)
+				{
+					if (scores[left] != scores[right])
+						return scores[left] > scores[right];
+					return candidates[left].recordIdx < candidates[right].recordIdx;
+				});
+			order.resize(keep);
+		}
+		else
+		{
+			std::sort(order.begin(), order.end(),
+				[&](size_t left, size_t right)
+				{
+					if (scores[left] != scores[right])
+						return scores[left] > scores[right];
+					return candidates[left].recordIdx < candidates[right].recordIdx;
+				});
+		}
+		std::vector<CandidateMatch> keptCandidates;
+		std::vector<double> keptScores;
+		keptCandidates.reserve(keep);
+		keptScores.reserve(keep);
+		for (size_t index : order)
+		{
+			keptCandidates.push_back(candidates[index]);
+			keptScores.push_back(scores[index]);
+		}
+		candidates = std::move(keptCandidates);
+		scores = std::move(keptScores);
+		accepted.assign(keep, 1);
+		retained += keep;
+	}
+	return retained;
+}
+
+std::vector<uint32_t> uniqueSfiCandidateRecordIds(
+	const std::vector<std::vector<CandidateMatch>> &scanCandidates)
+{
+	std::vector<uint32_t> recordIds;
+	for (const auto &candidates : scanCandidates)
+		for (const CandidateMatch &candidate : candidates)
+			recordIds.push_back(static_cast<uint32_t>(candidate.recordIdx));
+	std::sort(recordIds.begin(), recordIds.end());
+	recordIds.erase(std::unique(recordIds.begin(), recordIds.end()),
+		recordIds.end());
+	return recordIds;
+}
+
 ShardPsmRow makeScoringRow(size_t scanIdx,
                            const MS2Scan *scan,
                            const SipRecord &rec,
@@ -2466,6 +3146,8 @@ ShardPsmRow makeScoringRow(size_t scanIdx,
                            const EnvCounts &envCounts,
                            const sipros::RaxportMs1Data *ms1Data,
                            const MassTolerance &mzTol,
+						   const std::vector<double> &precursorNeutralMasses,
+						   const std::vector<double> &precursorProbabilities,
                            double wdp,
                            double xcorr,
                            double mvh,
@@ -2480,26 +3162,24 @@ ShardPsmRow makeScoringRow(size_t scanIdx,
         PeptideIsotopeCalculator calculator;
         const std::string peptideForComposition = PSMfeatureExtractor::peptideBodyWithPtms(rec.peptide);
         baseMass = calculator.calPrecursorBaseMass(peptideForComposition);
-        const double monoPrecursorMz =
-            baseMass / precursorCharge + ProNovoConfig::getProtonMass();
         int ms1ScanNumber = scan->iParentScanID;
         const auto mzToleranceDaAt = [&](double mz)
         { return mzTol.daAt(mz); };
-        ms1Peaks = PSMfeatureExtractor::findMs1IsotopicPeaks(
+        ms1Peaks = PSMfeatureExtractor::findMs1IsotopicPeaksFromEnvelope(
             ms1Data,
             ms1ScanNumber,
             precursorCharge,
-            monoPrecursorMz,
+            baseMass,
             match.matchedMz,
-            calculator.pepComposition,
-            labeledRecord.sipAtom,
-            labeledRecord.ms2Pct,
+            precursorNeutralMasses,
+            precursorProbabilities,
             mzToleranceDaAt);
     }
     const PSMfeatureExtractor::Ms1AbundanceResult ms1Abundance =
-        PSMfeatureExtractor::getSIPelementAbundanceFromMS1Peaks(
-            ms1Peaks, baseMass, rec.peptide, precursorCharge, labeledRecord.sipAtom,
-            labeledRecord.ms2Pct);
+        PSMfeatureExtractor::getSIPelementAbundanceFromMS1PeaksWithEnvelope(
+            ms1Peaks, baseMass, rec.peptide, precursorCharge,
+            labeledRecord.sipAtom, labeledRecord.ms2Pct,
+            precursorNeutralMasses, precursorProbabilities);
 
     ShardPsmRow row;
     row.scanIdx = static_cast<int32_t>(scanIdx);
@@ -2536,8 +3216,175 @@ ShardPsmRow makeScoringRow(size_t scanIdx,
     return row;
 }
 
+bool loadAndValidateSfiLibraries(
+	const std::vector<std::string> &paths,
+	std::vector<sipros::SpectraIndex> &indices,
+	std::string &canonicalSipIsotope,
+	int expectedLabel,
+	std::string &error)
+{
+	indices.clear();
+	canonicalSipIsotope.clear();
+	if (paths.empty())
+	{
+		error = "No .sfi SIP spectra libraries were provided.";
+		return false;
+	}
+	indices.reserve(paths.size());
+	std::string chemistryProfile;
+	uint32_t envelopeTopN = 0;
+	for (const std::string &path : paths)
+	{
+		sipros::SpectraIndex index;
+		if (!index.load(path, error))
+			return false;
+		const auto &metadata = index.metadata();
+		if (chemistryProfile.empty())
+		{
+			chemistryProfile = metadata.chemistryProfileId;
+			std::string chemistryError;
+			if (!ProNovoConfig::configureChemistryProfileId(
+					chemistryProfile, chemistryError))
+			{
+				error = "Cannot use spectra index " + path + ": " + chemistryError;
+				return false;
+			}
+		}
+		else if (metadata.chemistryProfileId != chemistryProfile)
+		{
+			error = "Mixed chemistry_profile_id values in SFI spectra libraries.";
+			return false;
+		}
+		if (metadata.envelopeTopN == 0)
+		{
+			error = "SFI library has no compact-envelope top-N metadata: " + path;
+			return false;
+		}
+		if (envelopeTopN == 0)
+			envelopeTopN = metadata.envelopeTopN;
+		else if (metadata.envelopeTopN != envelopeTopN)
+		{
+			error = "Mixed envelope_top_n values in SFI spectra libraries.";
+			return false;
+		}
+		if (metadata.label != 1 && metadata.label != -1)
+		{
+			error = "Invalid target/decoy label in " + path;
+			return false;
+		}
+		if (expectedLabel != 0 && metadata.label != expectedLabel)
+		{
+			error = "SFI label metadata does not match --sfi-label in " + path;
+			return false;
+		}
+		const std::string isotope = PSMfeatureExtractor::canonicalSipIsotope(
+			std::string(1, metadata.sipAtom), metadata.sipIsotopeMassNumber);
+		if (isotope.empty())
+		{
+			error = "Unsupported SIP isotope metadata in " + path;
+			return false;
+		}
+		if (canonicalSipIsotope.empty())
+			canonicalSipIsotope = isotope;
+		else if (canonicalSipIsotope != isotope)
+		{
+			error = "Mixed SIP isotope targets in SFI spectra libraries.";
+			return false;
+		}
+		indices.push_back(std::move(index));
+	}
+	return true;
+}
+
+struct LibraryPtmSummary
+{
+	size_t uniquePeptideForms = 0;
+	size_t modifiedPeptideForms = 0;
+	std::map<char, size_t> tokenOccurrences;
+};
+
+LibraryPtmSummary summarizeLibraryPtms(
+	const std::vector<sipros::SpectraIndex> &indices)
+{
+	std::unordered_set<std::string> forms;
+	forms.reserve(65536);
+	for (const auto &index : indices)
+	{
+		for (uint32_t recordId = 0;
+			 recordId < index.recordCount(); ++recordId)
+		{
+			forms.emplace(index.peptide(recordId));
+		}
+	}
+
+	std::unordered_set<char> ptmTokens;
+	for (const auto &definition : ProNovoConfig::getPtmCatalog())
+	{
+		if (definition.token.size() == 1)
+			ptmTokens.insert(definition.token.front());
+	}
+
+	LibraryPtmSummary summary;
+	summary.uniquePeptideForms = forms.size();
+	for (const std::string &peptide : forms)
+	{
+		bool modified = false;
+		for (const char value : peptide)
+		{
+			if (ptmTokens.count(value) == 0)
+				continue;
+			modified = true;
+			++summary.tokenOccurrences[value];
+		}
+		if (modified)
+			++summary.modifiedPeptideForms;
+	}
+	return summary;
+}
+
+std::string fixedPtmSummary()
+{
+	const auto names = ProNovoConfig::getEnabledFixedPtmNames();
+	if (names.empty())
+		return "none";
+	std::ostringstream output;
+	for (size_t index = 0; index < names.size(); ++index)
+	{
+		if (index != 0)
+			output << ", ";
+		output << names[index];
+	}
+	output << " (implicit in every applicable SFI peptide)";
+	return output.str();
+}
+
+std::string variablePtmSummary(const LibraryPtmSummary &summary)
+{
+	if (summary.tokenOccurrences.empty())
+		return "none encoded in SFI peptide forms";
+	std::ostringstream output;
+	bool first = true;
+	for (const auto &definition : ProNovoConfig::getPtmCatalog())
+	{
+		if (definition.token.size() != 1)
+			continue;
+		const char token = definition.token.front();
+		const auto found = summary.tokenOccurrences.find(token);
+		if (found == summary.tokenOccurrences.end())
+			continue;
+		if (!first)
+			output << ", ";
+		first = false;
+		output << definition.name << " [token " << token
+			   << ", sites " << definition.sites << ", "
+			   << sipros::formatPerformanceCount(found->second)
+			   << " occurrences]";
+	}
+	return output.str();
+}
+
 int processOneHdf5(const Args &args, const std::string &scanPath,
-                   const std::vector<std::string> &hdf5Files)
+                   const std::vector<std::string> &sfiFiles)
 {
 	const double processWallStart = omp_get_wtime();
 	const double processCpuStart = processTreeCpuSeconds();
@@ -2566,8 +3413,10 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 	}
 	std::string libraryMetadataError;
 	std::string canonicalSipIsotope;
-	if (!validateSpectraLibraryMetadata(
-			hdf5Files, canonicalSipIsotope, libraryMetadataError))
+	std::vector<sipros::SpectraIndex> spectraIndices;
+	if (!loadAndValidateSfiLibraries(
+			sfiFiles, spectraIndices, canonicalSipIsotope, args.sfiLabel,
+			libraryMetadataError))
 	{
 		std::cerr << libraryMetadataError << "\n";
 		return 2;
@@ -2581,33 +3430,85 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 				  << canonicalSipIsotope << ": " << libraryMetadataError << "\n";
 		return 2;
 	}
+	const uint32_t storedEnvelopeTopN =
+		spectraIndices.front().metadata().envelopeTopN;
+	if (args.scoreEnvelopeTopN > static_cast<int>(storedEnvelopeTopN))
+	{
+		std::cerr << "--score-envelope-top-n " << args.scoreEnvelopeTopN
+				  << " exceeds the " << storedEnvelopeTopN
+				  << " peaks stored per SFI envelope\n";
+		return 2;
+	}
+	int sipIsotopeIndex = -1;
+	try
+	{
+		sipIsotopeIndex = ProNovoConfig::resolveSipIsotopeIndex(
+			ProNovoConfig::configIsotopologue,
+			canonicalSipIsotope[0],
+			std::stoi(canonicalSipIsotope.substr(1)));
+	}
+	catch (const std::exception &exception)
+	{
+		std::cerr << "Cannot initialize high-resolution WDP envelopes: "
+				  << exception.what() << "\n";
+		return 2;
+	}
+	const Isotopologue pristineWdpIsotopologue =
+		ProNovoConfig::configIsotopologue;
 	ProNovoConfig::setMassAccuracy(parentTolDa, fragmentToleranceDa);
 
-	std::cout << "  Chemistry profile: "
-			  << ProNovoConfig::getChemistryProfileId() << "\n";
-	std::cout << "  Tolerance: MS1=" << args.toleranceMs1
+	const int nThreads = std::max(1, args.threads);
+	omp_set_num_threads(nThreads);
+	uint64_t totalRtBins = 0;
+	for (const auto &index : spectraIndices)
+		totalRtBins += index.rtBinCount();
+	const LibraryPtmSummary ptmSummary = summarizeLibraryPtms(spectraIndices);
+	const char *labelName = args.sfiLabel == -1 ? "decoy" :
+		(args.sfiLabel == 1 ? "target" : "target and decoy");
+	std::cout << "\nSFI spectra search\n"
+			  << "  Scan file : " << scanPath << "\n"
+			  << "  SFI       : "
+			  << (fs::path(args.sfiDir) / "*.sfi").string()
+			  << " (" << labelName << ")\n"
+			  << "  Profile   : " << ProNovoConfig::getChemistryProfileId() << "\n"
+			  << "  Fixed PTMs: " << fixedPtmSummary() << "\n"
+			  << "  Var PTMs  : " << variablePtmSummary(ptmSummary) << "\n"
+			  << "  PTM forms : "
+			  << sipros::formatPerformanceCount(ptmSummary.modifiedPeptideForms)
+			  << "/"
+			  << sipros::formatPerformanceCount(ptmSummary.uniquePeptideForms)
+			  << " unique library peptide forms carry variable PTMs\n"
+			  << "  SIP       : " << canonicalSipIsotope
+			  << " abundance stored per SFI record\n"
+			  << "  Tolerance : MS1=" << args.toleranceMs1
 			  << (args.toleranceMs1Ppm ? " ppm" : " Da")
 			  << ", MS2=" << args.toleranceMs2
 			  << (args.toleranceMs2Ppm ? " ppm" : " Da")
-				  << "  (scoring tolerances: parent=" << parentTolDa
+			  << " (scoring: parent=" << parentTolDa
 			  << " Da, fragment=" << fragmentToleranceDa << " Da)\n";
-	std::cout << "  Xcorr/MVH envelope top-N peaks: "
-			  << args.scoreEnvelopeTopN << "\n";
-	std::cout << "  WDP top PSMs per scan/label: "
-			  << args.topPsmsPerScan << "\n";
-	std::cout << "  Precursor isotope shift window: +/-"
-			  << args.isotopeShiftWindow << "\n";
+	std::cout << "  RT window : +/-" << args.rtToleranceMin << " minutes; "
+			  << sipros::SpectraIndex::rtBinWidthMinutes()
+			  << " minute bins; " << sipros::formatPerformanceCount(totalRtBins)
+			  << " sparse segments\n"
+			  << "  Gate      : +/-" << args.isotopeShiftWindow
+			  << " isotope shifts, " << ProNovoConfig::MinMatchedFragments
+			  << " matched product ions\n"
+			  << "  Cascade   : top " << args.mvhCascadeTopN
+			  << " MVH candidates per scan to Xcorr/WDP; "
+			  << storedEnvelopeTopN << " compact peaks/envelope; top "
+			  << args.topPsmsPerScan << " PSMs per label\n"
+			  << "  WDP       : regenerated full high-resolution SIP envelopes\n"
+			  << "  Search    : RT-aware precursor/product SFI index\n";
 
 	// -------- Read HDF5 scans and score assigned SIP spectra --------
-	const int nThreads = std::max(1, args.threads);
-	omp_set_num_threads(nThreads);
-	timing.printHeader();
+	timing.printHeader(
+		"Search timing: " + fs::path(scanPath).filename().string(), nThreads);
 
 	std::vector<MS2Scan *> scans;
 	sipros::RaxportMs1Data ms1Data;
 	std::string readError;
 	bool readHdf5Ok = false;
-	timing.run("Read HDF5", "read HDF5 MS1/MS2 scans", 0, "", [&]()
+	timing.run("Load HDF5 scans", "read HDF5 MS1/MS2 scans", 0, "", [&]()
 			   { readHdf5Ok = sipros::readRaxportHdf5Scans(scanPath, scans, &ms1Data, readError); });
 	if (!readHdf5Ok)
 	{
@@ -2646,17 +3547,13 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 	}
 
 	const sipros::RaxportMs1Data *ms1DataPtr = &ms1Data;
-	std::cout << "HDF5 sample: " << scanPath << "  (" << scans.size()
-			  << " MS2 scans, " << ms1Data.scans.size() << " MS1 scans)\n";
-	std::cout << "HDF5 spectra library: " << (fs::path(args.hdf5Dir) / "*.h5").string()
-			  << " (" << hdf5Files.size() << " percentages)\n";
 	auto preprocessScans = [&]()
 	{
 #pragma omp parallel for schedule(guided)
 		for (size_t i = 0; i < scans.size(); ++i)
 			scans[i]->preprocess();
 	};
-	timing.run("Preprocess HDF5", "preprocess HDF5 MS2 scans",
+	timing.run("Preprocess spectra", "preprocess HDF5 MS2 scans",
 			   scans.size(), "scans", preprocessScans);
 
 	MassTolerance mzTol{args.toleranceMs1Ppm, args.toleranceMs1};
@@ -2683,11 +3580,9 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 
 	// Per-thread scratch
 	std::vector<std::unique_ptr<double[]>> tRaw(nThreads), tFXc(nThreads), tCorr(nThreads), tSmooth(nThreads), tPeak(nThreads);
-	std::vector<std::vector<bool>> tDuplSip(nThreads);
+	std::vector<std::vector<unsigned char>> tDuplSip(nThreads);
 	std::vector<std::vector<double>> tBinIonSip(nThreads);
 	std::vector<std::vector<int>> tBinSip(nThreads);
-	std::vector<std::vector<double>> tMvhIonMasses(nThreads);
-	std::vector<std::vector<char>> tMvhSeqs(nThreads);
 	std::vector<std::unique_ptr<multimap<double, double>>> tMvhSorted(nThreads);
 	for (int i = 0; i < nThreads; ++i)
 	{
@@ -2730,107 +3625,451 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 	timing.run("Prepare scan scoring", "prepare scan scoring",
 			   scans.size(), "scans", prepareScanScoring);
 
-	// Per-scan WDP winners split by label. Entries are self-contained so the
-	// current HDF5 cache batch can be freed after each scoring pass.
+	// Per-scan WDP winners split by label. Entries are self-contained so each
+	// memory-mapped SFI can be queried and released independently.
 	std::vector<std::vector<ScoringPsm>> topTarget(scans.size());
 	std::vector<std::vector<ScoringPsm>> topDecoy(scans.size());
 
-	const size_t cacheBatchSize = static_cast<size_t>(std::max(1, args.threads));
 	size_t totalRecordsScored = 0;
 	size_t totalAssignedCandidates = 0;
-	size_t batchesScored = 0;
-	int hdf5LoadFailures = 0;
-
-	for (size_t batchBegin = 0; batchBegin < hdf5Files.size(); batchBegin += cacheBatchSize)
+	size_t totalMvhAccepted = 0;
+	size_t totalCascadeCandidates = 0;
+	size_t totalWdpEnvelopeFailures = 0;
+	SfiGateCounters gateCounters;
+	std::vector<double> wdpAbundances;
+	for (const sipros::SpectraIndex &index : spectraIndices)
 	{
-		const size_t batchEnd = std::min(hdf5Files.size(), batchBegin + cacheBatchSize);
-		std::vector<LabeledRecord> batchRecords;
-		++batchesScored;
-		auto loadBatch = [&]()
+		wdpAbundances.reserve(
+			wdpAbundances.size() + static_cast<size_t>(index.recordCount()));
+		for (uint32_t recordId = 0; recordId < index.recordCount(); ++recordId)
+			wdpAbundances.push_back(index.record(recordId).sipAbundancePct);
+	}
+	std::sort(wdpAbundances.begin(), wdpAbundances.end());
+	wdpAbundances.erase(std::unique(wdpAbundances.begin(),
+		wdpAbundances.end()), wdpAbundances.end());
+	std::vector<Isotopologue> wdpIsotopologues(
+		wdpAbundances.size(), pristineWdpIsotopologue);
+	std::vector<std::string> wdpIsotopologueErrors(wdpAbundances.size());
+	auto prepareWdpIsotopologues = [&]()
+	{
+#pragma omp parallel for schedule(dynamic, 1)
+		for (size_t abundanceIndex = 0;
+			 abundanceIndex < wdpAbundances.size(); ++abundanceIndex)
 		{
-			hdf5LoadFailures += loadHdf5Batch(hdf5Files, batchBegin, batchEnd,
-											  batchRecords);
-		};
-		const size_t totalBatches = (hdf5Files.size() + cacheBatchSize - 1) / cacheBatchSize;
-		std::ostringstream loadLabel;
-		loadLabel << "load HDF5 batch " << batchesScored << '/' << totalBatches;
-		timing.run("Load HDF5", loadLabel.str(),
-				   batchEnd - batchBegin, "files", loadBatch);
+			try
+			{
+				ProNovoConfig::setSipAbundance(
+					wdpIsotopologues[abundanceIndex],
+					canonicalSipIsotope[0], sipIsotopeIndex,
+					wdpAbundances[abundanceIndex]);
+			}
+			catch (const std::exception &exception)
+			{
+				wdpIsotopologueErrors[abundanceIndex] = exception.what();
+			}
+		}
+	};
+	timing.run("Prepare WDP isotope states",
+		"prepare full-resolution WDP isotope states",
+		wdpAbundances.size(), "SIP abundances", prepareWdpIsotopologues);
+	for (size_t abundanceIndex = 0;
+		 abundanceIndex < wdpIsotopologueErrors.size(); ++abundanceIndex)
+	{
+		if (!wdpIsotopologueErrors[abundanceIndex].empty())
+		{
+			std::cerr << "Cannot prepare WDP isotope state for "
+					  << wdpAbundances[abundanceIndex] << "%: "
+					  << wdpIsotopologueErrors[abundanceIndex] << "\n";
+			return 2;
+		}
+	}
 
-		const size_t nRec = batchRecords.size();
+	for (size_t libraryIndex = 0; libraryIndex < spectraIndices.size(); ++libraryIndex)
+	{
+		const sipros::SpectraIndex &spectraIndex = spectraIndices[libraryIndex];
+		std::vector<LabeledRecord> batchRecords;
+		std::vector<uint32_t> candidateRecordIds;
+		const size_t nRec = static_cast<size_t>(spectraIndex.recordCount());
 		totalRecordsScored += nRec;
 		if (nRec == 0)
 			continue;
 
-		std::vector<MzIndexedRecord> mzIndex = buildMzIndex(batchRecords);
 		std::vector<std::vector<CandidateMatch>> scanCandidates(scans.size());
 		size_t assignedCandidates = 0;
+		const double priorGateLookupWall = gateCounters.lookupWallSeconds;
+		const double priorGateLookupCpu = gateCounters.lookupCpuSeconds;
+		const double priorGateReductionWall =
+			gateCounters.recordReductionWallSeconds;
+		const double priorGateReductionCpu =
+			gateCounters.recordReductionCpuSeconds;
 		auto assignBatch = [&]()
 		{
-			assignedCandidates = assignCandidatesToScans(scans, batchRecords,
-														 mzIndex, mzTol, rtTol,
-														 args.isotopeShiftWindow,
-														 scanCandidates);
+			assignedCandidates = assignSfiCandidatesToScans(
+				scans, spectraIndex, mzTol, fragTol, rtTol,
+				args.isotopeShiftWindow,
+				static_cast<uint32_t>(std::max(0, ProNovoConfig::MinMatchedFragments)),
+				candidateRecordIds, scanCandidates, gateCounters);
 		};
 		std::ostringstream assignLabel;
-		assignLabel << "assign candidates batch " << batchesScored << '/' << totalBatches;
-		timing.run("Assign candidates", assignLabel.str(),
+		assignLabel << "precursor/product gate SFI " << (libraryIndex + 1)
+					<< '/' << spectraIndices.size();
+		timing.run("Query spectra index", assignLabel.str(),
 				   nRec, "records", assignBatch);
+		{
+			const double lookupWall =
+				gateCounters.lookupWallSeconds - priorGateLookupWall;
+			const double lookupCpu =
+				gateCounters.lookupCpuSeconds - priorGateLookupCpu;
+			const double reductionWall =
+				gateCounters.recordReductionWallSeconds - priorGateReductionWall;
+			const double reductionCpu =
+				gateCounters.recordReductionCpuSeconds - priorGateReductionCpu;
+			sipros::PerformanceTiming lookupTiming;
+			lookupTiming.wallSeconds = lookupWall;
+			lookupTiming.cpuSeconds = lookupCpu;
+			sipros::printPerformanceStage(
+				std::cout, "  SFI precursor/product lookup", lookupTiming);
+			sipros::PerformanceTiming reductionTiming;
+			reductionTiming.wallSeconds = reductionWall;
+			reductionTiming.cpuSeconds = reductionCpu;
+			sipros::printPerformanceStage(
+				std::cout, "  SFI record-ID reduction", reductionTiming,
+				sipros::formatPerformanceCount(candidateRecordIds.size()) +
+					" unique records");
+		}
 		totalAssignedCandidates += assignedCandidates;
 
-		auto scoreBatch = [&]()
+		std::vector<std::vector<double>> candidateMvh(scans.size());
+		std::vector<std::vector<double>> candidateXcorr(scans.size());
+		std::vector<std::vector<char>> candidateMvhAccepted(scans.size());
+		std::vector<std::vector<double>> recordMvhIons;
+		auto prepareMvhCache = [&]()
+		{
+			buildSfiMvhIonCache(spectraIndex, candidateRecordIds,
+				args.scoreEnvelopeTopN, recordMvhIons);
+		};
+		timing.run("Prepare MVH ions", "prepare cached SFI MVH ions",
+			candidateRecordIds.size(), "records", prepareMvhCache);
+
+		auto scoreMvhBatch = [&]()
 		{
 #pragma omp parallel for schedule(dynamic, 1)
 			for (size_t s = 0; s < scans.size(); ++s)
 			{
 				MS2Scan *scan = scans[s];
-
-				for (const CandidateMatch &candidate : scanCandidates[s])
+				const size_t count = scanCandidates[s].size();
+				candidateMvh[s].assign(count, 0.0);
+				candidateMvhAccepted[s].assign(count, 0);
+				if (scan->bSkip)
+					continue;
+				for (size_t i = 0; i < count; ++i)
 				{
+					const CandidateMatch &candidate = scanCandidates[s][i];
+					candidateMvhAccepted[s][i] = MVH::ScoreIonsVsSpectrum(
+						recordMvhIons[candidate.recordIdx], scan,
+						candidateMvh[s][i]) ? 1 : 0;
+				}
+			}
+		};
+		std::ostringstream mvhLabel;
+		mvhLabel << "score MVH SFI " << (libraryIndex + 1)
+				 << '/' << spectraIndices.size();
+		timing.run("MVH scoring", mvhLabel.str(),
+				   assignedCandidates, "candidates", scoreMvhBatch);
+		for (const auto &accepted : candidateMvhAccepted)
+			totalMvhAccepted += static_cast<size_t>(
+				std::count(accepted.begin(), accepted.end(), 1));
+
+		const size_t cascadeLimit = std::max<size_t>(
+			static_cast<size_t>(args.mvhCascadeTopN),
+			static_cast<size_t>(args.topPsmsPerScan));
+		const size_t cascadeCandidates = retainTopMvhCandidates(
+			scanCandidates, candidateMvh, candidateMvhAccepted, cascadeLimit);
+		totalCascadeCandidates += cascadeCandidates;
+		std::vector<std::vector<double>>().swap(recordMvhIons);
+		candidateRecordIds = uniqueSfiCandidateRecordIds(scanCandidates);
+		auto materializeCascade = [&]()
+		{
+			materializeSfiCandidates(spectraIndex, candidateRecordIds,
+				scanCandidates, batchRecords);
+		};
+		timing.run("Materialize cascade", "materialize MVH top-N SFI records",
+			candidateRecordIds.size(), "records", materializeCascade);
+
+		auto scoreXcorrBatch = [&]()
+		{
+#pragma omp parallel for schedule(dynamic, 1)
+			for (size_t s = 0; s < scans.size(); ++s)
+			{
+				const int tid = omp_get_thread_num();
+				MS2Scan *scan = scans[s];
+				const size_t count = scanCandidates[s].size();
+				candidateXcorr[s].assign(count, 0.0);
+				if (!scan->pQuery)
+					continue;
+				for (size_t i = 0; i < count; ++i)
+				{
+					if (!candidateMvhAccepted[s][i])
+						continue;
+					const SipRecord &rec =
+						batchRecords[scanCandidates[s][i].recordIdx].rec;
+					if (args.scoreEnvelopeTopN ==
+						static_cast<int>(storedEnvelopeTopN))
+					{
+						CometSearchMod::ScorePeptidesSIPNoCancelOut(
+							rec.vvdYionMass, rec.vvdYionProb,
+							rec.vvdBionMass, rec.vvdBionProb, scan,
+							tDuplSip[tid], tBinIonSip[tid], tBinSip[tid],
+							candidateXcorr[s][i]);
+					}
+					else
+					{
+						auto vvdYM = rec.vvdYionMass;
+						auto vvdYP = rec.vvdYionProb;
+						auto vvdBM = rec.vvdBionMass;
+						auto vvdBP = rec.vvdBionProb;
+						keepTopNEnvelopePeaks(
+							vvdYM, vvdYP, args.scoreEnvelopeTopN);
+						keepTopNEnvelopePeaks(
+							vvdBM, vvdBP, args.scoreEnvelopeTopN);
+						trimIonVectorsForXcorr(scan, vvdYM, vvdYP);
+						trimIonVectorsForXcorr(scan, vvdBM, vvdBP);
+						CometSearchMod::ScorePeptidesSIPNoCancelOut(
+							vvdYM, vvdYP, vvdBM, vvdBP, scan,
+							tDuplSip[tid], tBinIonSip[tid], tBinSip[tid],
+							candidateXcorr[s][i]);
+					}
+				}
+			}
+		};
+		std::ostringstream xcorrLabel;
+		xcorrLabel << "score Xcorr SFI " << (libraryIndex + 1)
+				   << '/' << spectraIndices.size();
+		timing.run("XCorr scoring", xcorrLabel.str(),
+				   cascadeCandidates, "candidates", scoreXcorrBatch);
+
+		std::vector<std::vector<std::vector<double>>> wdpYMass(nThreads);
+		std::vector<std::vector<std::vector<double>>> wdpYProb(nThreads);
+		std::vector<std::vector<std::vector<double>>> wdpBMass(nThreads);
+		std::vector<std::vector<std::vector<double>>> wdpBProb(nThreads);
+		std::vector<std::vector<double>> candidateWdp(scans.size());
+		std::vector<size_t> recordOccurrenceOffsets;
+		std::vector<uint64_t> recordOccurrences;
+		auto prepareWdpReuse = [&]()
+		{
+			std::vector<uint32_t> counts(batchRecords.size(), 0);
+			for (size_t s = 0; s < scanCandidates.size(); ++s)
+			{
+				candidateWdp[s].assign(scanCandidates[s].size(),
+					std::numeric_limits<double>::quiet_NaN());
+				for (const CandidateMatch &candidate : scanCandidates[s])
+					++counts[candidate.recordIdx];
+			}
+			recordOccurrenceOffsets.assign(batchRecords.size() + 1, 0);
+			for (size_t recordIndex = 0; recordIndex < counts.size(); ++recordIndex)
+				recordOccurrenceOffsets[recordIndex + 1] =
+					recordOccurrenceOffsets[recordIndex] + counts[recordIndex];
+			recordOccurrences.resize(recordOccurrenceOffsets.back());
+			std::vector<size_t> cursor = recordOccurrenceOffsets;
+			for (size_t s = 0; s < scanCandidates.size(); ++s)
+			{
+				for (size_t i = 0; i < scanCandidates[s].size(); ++i)
+				{
+					const size_t recordIndex = scanCandidates[s][i].recordIdx;
+					recordOccurrences[cursor[recordIndex]++] =
+						(static_cast<uint64_t>(s) << 32U) |
+						static_cast<uint32_t>(i);
+				}
+			}
+		};
+		timing.run("Prepare WDP reuse", "group candidates by SFI record",
+			cascadeCandidates, "candidates", prepareWdpReuse);
+		size_t batchWdpEnvelopeFailures = 0;
+
+		auto scoreWdpBatch = [&]()
+		{
+#pragma omp parallel for schedule(guided, 32) reduction(+ : batchWdpEnvelopeFailures)
+			for (size_t recordIndex = 0;
+				 recordIndex < batchRecords.size(); ++recordIndex)
+			{
+				const int tid = omp_get_thread_num();
+				const size_t occurrenceBegin =
+					recordOccurrenceOffsets[recordIndex];
+				const size_t occurrenceEnd =
+					recordOccurrenceOffsets[recordIndex + 1];
+				if (occurrenceBegin == occurrenceEnd)
+					continue;
+				const LabeledRecord &lr = batchRecords[recordIndex];
+				const SipRecord &rec = lr.rec;
+				const auto abundance = std::lower_bound(
+					wdpAbundances.begin(), wdpAbundances.end(), lr.ms2Pct);
+				if (abundance == wdpAbundances.end() || *abundance != lr.ms2Pct)
+				{
+					batchWdpEnvelopeFailures += occurrenceEnd - occurrenceBegin;
+					continue;
+				}
+				const size_t abundanceIndex = static_cast<size_t>(
+					abundance - wdpAbundances.begin());
+				if (!wdpIsotopologues[abundanceIndex].computeProductIon(
+						rec.peptide,
+						wdpYMass[tid], wdpYProb[tid],
+						wdpBMass[tid], wdpBProb[tid]))
+				{
+					batchWdpEnvelopeFailures += occurrenceEnd - occurrenceBegin;
+					continue;
+				}
+				for (size_t occurrenceIndex = occurrenceBegin;
+					 occurrenceIndex < occurrenceEnd; ++occurrenceIndex)
+				{
+					const uint64_t occurrence =
+						recordOccurrences[occurrenceIndex];
+					const size_t s = static_cast<size_t>(occurrence >> 32U);
+					const size_t i = static_cast<uint32_t>(occurrence);
+					const CandidateMatch &candidate = scanCandidates[s][i];
+					candidateWdp[s][i] = scans[s]->scoreWeightSumHighMS2(
+						&rec.nakedPeptide, candidate.match.matchedCharge,
+						&wdpYMass[tid], &wdpYProb[tid],
+						&wdpBMass[tid], &wdpBProb[tid]);
+				}
+			}
+		};
+		std::ostringstream wdpLabel;
+		wdpLabel << "score WDP with record reuse SFI " << (libraryIndex + 1)
+				 << '/' << spectraIndices.size();
+		timing.run("WDP scoring", wdpLabel.str(),
+				   cascadeCandidates, "candidates", scoreWdpBatch);
+		auto rankWdpBatch = [&]()
+		{
+#pragma omp parallel for schedule(dynamic, 1)
+			for (size_t s = 0; s < scans.size(); ++s)
+			{
+				MS2Scan *scan = scans[s];
+				for (size_t i = 0; i < scanCandidates[s].size(); ++i)
+				{
+					const double wdp = candidateWdp[s][i];
+					if (!std::isfinite(wdp))
+						continue;
+					const CandidateMatch &candidate = scanCandidates[s][i];
 					const LabeledRecord &lr = batchRecords[candidate.recordIdx];
 					const SipRecord &rec = lr.rec;
-					const PrecursorMatch &m = candidate.match;
-
-					std::vector<std::vector<double>> vvdYM = rec.vvdYionMass;
-					std::vector<std::vector<double>> vvdYP = rec.vvdYionProb;
-					std::vector<std::vector<double>> vvdBM = rec.vvdBionMass;
-					std::vector<std::vector<double>> vvdBP = rec.vvdBionProb;
-
-					std::string pepForScoring = rec.nakedPeptide;
-					int charge = m.matchedCharge;
-
-					double wdp = scan->scoreWeightSumHighMS2(
-						&pepForScoring, charge, &vvdYM, &vvdYP, &vvdBM, &vvdBP);
-
-					std::vector<ScoringPsm> &topList = lr.label == -1 ? topDecoy[s] : topTarget[s];
-					if (!wouldKeepTopUniquePeptide(topList, rec.nakedPeptide, wdp, args.topPsmsPerScan))
+					std::vector<ScoringPsm> &topList =
+						lr.label == -1 ? topDecoy[s] : topTarget[s];
+					if (!wouldKeepTopUniquePeptide(
+							topList, rec.nakedPeptide, wdp,
+							args.topPsmsPerScan))
 						continue;
-
 					ScoringPsm psm;
 					psm.scanIdx = s;
 					psm.scanNumber = scan->iScanId;
 					psm.label = lr.label;
 					psm.wdp = wdp;
+					psm.xcorr = candidateXcorr[s][i];
+					psm.mvh = candidateMvh[s][i];
 					psm.ms2Pct = lr.ms2Pct;
 					psm.nakedPeptide = rec.nakedPeptide;
 					psm.sipAtom = lr.sipAtom;
-					psm.match = m;
+					psm.match = candidate.match;
 					psm.rec = rec;
-
-					pushTopUniquePeptide(topList, std::move(psm), args.topPsmsPerScan);
+					pushTopUniquePeptide(
+						topList, std::move(psm), args.topPsmsPerScan);
 				}
 			}
 		};
-		std::ostringstream rankLabel;
-		rankLabel << "rank WDP batch " << batchesScored << '/' << totalBatches;
-		timing.run("Rank WDP candidates", rankLabel.str(),
-				   assignedCandidates, "candidates", scoreBatch);
+		timing.run("Rank WDP candidates", "retain unique-peptide WDP winners",
+			cascadeCandidates, "candidates", rankWdpBatch);
+		totalWdpEnvelopeFailures += batchWdpEnvelopeFailures;
 	}
-	std::cout << "  Scoring (" << nThreads << " threads, "
-			  << batchesScored << " HDF5 batches, "
-			  << totalRecordsScored << " records, "
-			  << totalAssignedCandidates << " assigned candidates)\n";
-
+	std::vector<std::vector<std::vector<double>>> featureYMass(nThreads);
+	std::vector<std::vector<std::vector<double>>> featureYProb(nThreads);
+	std::vector<std::vector<std::vector<double>>> featureBMass(nThreads);
+	std::vector<std::vector<std::vector<double>>> featureBProb(nThreads);
+	std::vector<std::vector<double>> wdpFeatureMz(nThreads);
+	std::vector<std::vector<double>> wdpFeatureIntensity(nThreads);
+	std::vector<std::vector<double>> wdpAlignedP(nThreads);
+	std::vector<std::vector<double>> wdpAlignedQ(nThreads);
+	size_t rankedPsms = 0;
+	for (const auto &v : topTarget)
+		rankedPsms += v.size();
+	for (const auto &v : topDecoy)
+		rankedPsms += v.size();
+	auto prepareRetainedWdpFeatures =
+		[&](std::vector<std::vector<ScoringPsm>> &perScan)
+	{
+		size_t failures = 0;
+#pragma omp parallel for schedule(dynamic, 1) reduction(+ : failures)
+		for (size_t s = 0; s < perScan.size(); ++s)
+		{
+			const int tid = omp_get_thread_num();
+			MS2Scan *scan = scans[s];
+			std::vector<ScoringPsm> valid;
+			valid.reserve(perScan[s].size());
+			for (ScoringPsm &psm : perScan[s])
+			{
+				const auto abundance = std::lower_bound(
+					wdpAbundances.begin(), wdpAbundances.end(), psm.ms2Pct);
+				if (abundance == wdpAbundances.end() || *abundance != psm.ms2Pct)
+				{
+					++failures;
+					continue;
+				}
+				const size_t abundanceIndex = static_cast<size_t>(
+					abundance - wdpAbundances.begin());
+				if (!wdpIsotopologues[abundanceIndex].computeProductIon(
+						psm.rec.peptide,
+						featureYMass[tid], featureYProb[tid],
+						featureBMass[tid], featureBProb[tid]))
+				{
+					++failures;
+					continue;
+				}
+				buildHighResolutionFeatureSpectrum(
+					psm.rec,
+					featureYMass[tid], featureYProb[tid],
+					featureBMass[tid], featureBProb[tid],
+					wdpFeatureMz[tid], wdpFeatureIntensity[tid]);
+				alignSpectra(
+					wdpFeatureMz[tid], wdpFeatureIntensity[tid],
+					scan->vdMZ, scan->vdIntensity, fragTol,
+					wdpAlignedP[tid], wdpAlignedQ[tid]);
+				psm.entropy = computeEntropy(
+					wdpAlignedP[tid], wdpAlignedQ[tid]);
+				alignSpectraSparseCosine(
+					wdpFeatureMz[tid], wdpFeatureIntensity[tid],
+					scan->vdMZ, scan->vdIntensity, fragTol,
+					wdpAlignedP[tid], wdpAlignedQ[tid]);
+				psm.cosine = computeCosine(
+					wdpAlignedP[tid], wdpAlignedQ[tid]);
+				psm.envelopeCounts = countMatchedEnvelopes(
+					scan, featureYMass[tid], featureBMass[tid], fragTol);
+				IsotopeDistribution precursorEnvelope;
+				if (!buildPrecursorEnvelopeFromProductIons(
+						wdpIsotopologues[abundanceIndex],
+						featureYMass[tid], featureYProb[tid],
+						featureBMass[tid], featureBProb[tid],
+						precursorEnvelope))
+				{
+					++failures;
+					continue;
+				}
+				psm.precursorNeutralMasses =
+					std::move(precursorEnvelope.vMass);
+				psm.precursorProbabilities =
+					std::move(precursorEnvelope.vProb);
+				valid.push_back(std::move(psm));
+			}
+			perScan[s] = std::move(valid);
+		}
+		return failures;
+	};
+	timing.run("Prepare retained WDP features",
+		"regenerate envelopes only for WDP winners",
+		rankedPsms, "PSMs", [&]()
+		{
+			totalWdpEnvelopeFailures +=
+				prepareRetainedWdpFeatures(topTarget);
+			totalWdpEnvelopeFailures +=
+				prepareRetainedWdpFeatures(topDecoy);
+		});
 	size_t retainedPsms = 0;
 	for (const auto &v : topTarget)
 		retainedPsms += v.size();
@@ -2842,59 +4081,26 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 #pragma omp parallel for schedule(dynamic, 1)
 		for (size_t s = 0; s < perScan.size(); ++s)
 		{
-			const int tid = omp_get_thread_num();
 			MS2Scan *scan = scans[s];
 			for (ScoringPsm &psm : perScan[s])
 			{
-				std::vector<std::vector<double>> vvdYM = psm.rec.vvdYionMass;
-				std::vector<std::vector<double>> vvdYP = psm.rec.vvdYionProb;
-				std::vector<std::vector<double>> vvdBM = psm.rec.vvdBionMass;
-				std::vector<std::vector<double>> vvdBP = psm.rec.vvdBionProb;
-
-				keepTopNEnvelopePeaks(vvdYM, vvdYP, args.scoreEnvelopeTopN);
-				keepTopNEnvelopePeaks(vvdBM, vvdBP, args.scoreEnvelopeTopN);
-
-				double xcorr = 0.0;
-				if (scan->pQuery)
-				{
-					auto xYM = vvdYM, xYP = vvdYP, xBM = vvdBM, xBP = vvdBP;
-					trimIonVectorsForXcorr(scan, xYM, xYP);
-					trimIonVectorsForXcorr(scan, xBM, xBP);
-					CometSearchMod::ScorePeptidesSIPNoCancelOut(
-						xYM, xYP, xBM, xBP, scan,
-						tDuplSip[tid], tBinIonSip[tid], tBinSip[tid], xcorr);
-				}
-
-				double mvhScore = 0.0;
-				if (!scan->bSkip)
-				{
-					std::string pepForScoring = psm.rec.nakedPeptide;
-					MVH::ScoreSequenceVsSpectrumSIP(
-						pepForScoring, psm.match.matchedCharge, scan,
-						&tMvhIonMasses[tid], vvdYM, vvdYP, vvdBM, vvdBP, mvhScore,
-						&tMvhSeqs[tid]);
-				}
-
-				std::vector<double> p, q;
-				alignSpectra(psm.rec.fragMz, psm.rec.fragExpInt, scan->vdMZ, scan->vdIntensity,
-							 fragTol, p, q);
-				const double entropy = computeEntropy(p, q);
-				alignSpectraSparseCosine(psm.rec.fragMz, psm.rec.fragExpInt,
-										 scan->vdMZ, scan->vdIntensity,
-										 fragTol, p, q);
-				const double cosine = computeCosine(p, q);
-				const EnvCounts ec = countMatchedEnvelopes(scan, psm.rec, fragTol);
-
 				LabeledRecord labeledRecord;
 				labeledRecord.label = psm.label;
 				labeledRecord.ms2Pct = psm.ms2Pct;
 				labeledRecord.sipAtom = psm.sipAtom;
-				psm.row = makeScoringRow(psm.scanIdx, scan, psm.rec, labeledRecord, psm.match, ec,
-										  ms1DataPtr, mzTol, psm.wdp, xcorr, mvhScore, entropy, cosine);
+				psm.row = makeScoringRow(
+					psm.scanIdx, scan, psm.rec, labeledRecord, psm.match,
+					psm.envelopeCounts, ms1DataPtr, mzTol,
+					psm.precursorNeutralMasses,
+					psm.precursorProbabilities,
+					psm.wdp, psm.xcorr, psm.mvh,
+					psm.entropy, psm.cosine);
+				std::vector<double>().swap(psm.precursorNeutralMasses);
+				std::vector<double>().swap(psm.precursorProbabilities);
 			}
 		}
 	};
-	timing.run("Score retained PSMs", "score retained PSMs",
+	timing.run("Calculate PSM features", "score retained PSMs",
 			   retainedPsms, "PSMs", [&]()
 			   {
 				   scoreRetained(topTarget);
@@ -2913,7 +4119,7 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 		}
 	};
 
-	timing.run("Materialize PIN rows", "materialize PIN rows",
+	timing.run("Build PIN columns", "materialize PIN rows",
 			   retainedPsms, "PSMs", [&]()
 			   {
 				   for (size_t s = 0; s < scans.size(); ++s)
@@ -2949,19 +4155,21 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 				   }
 			   });
 
-	fs::path pinPath = fs::path(args.outputDir) / (sampleBasename + ".pin");
+	std::string pinSuffix = ".pin";
+	if (args.sfiLabel == 1)
+		pinSuffix = "_target.pin";
+	else if (args.sfiLabel == -1)
+		pinSuffix = "_decoy.pin";
+	fs::path pinPath = fs::path(args.outputDir) / (sampleBasename + pinSuffix);
 	size_t writtenRows = 0;
-	timing.run("Write PIN", "write PIN file",
-			   kept.size(), "rows", [&]()
+	timing.run("Format and write PIN", "write PIN file",
+			   0, pinPath.string(), [&]()
 			   {
 				   const std::vector<PinWriter::SearchSpectraPinRow> pinRows = makeSearchSpectraPinRows(kept);
 				   writtenRows = PinWriter::writeSearchSpectraPin(pinPath.string(), sampleBasename, pinRows);
 			   });
-	std::cout << "Wrote " << pinPath << " (" << writtenRows << " rows, WDP >= "
-			  << std::fixed << std::setprecision(1) << kMinPinWdpScore << ")\n";
-
 	// Cleanup
-	timing.run("Cleanup", "cleanup scans",
+	timing.run("Cleanup scans", "cleanup scans",
 			   scans.size(), "scans", [&]()
 			   {
 				   for (auto *s : scans)
@@ -2977,10 +4185,56 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 
 	const double processWallSeconds = omp_get_wtime() - processWallStart;
 	const double processCpuSeconds = processTreeCpuSeconds() - processCpuStart;
-	timing.printSummary(processWallSeconds, processCpuSeconds,
-						totalRecordsScored, totalAssignedCandidates,
-						retainedPsms, writtenRows);
-	return hdf5LoadFailures == 0 ? 0 : 1;
+	double accountedWallSeconds = 0.0;
+	double accountedCpuSeconds = 0.0;
+	for (const TimingEntry &entry : timing.entries)
+	{
+		accountedWallSeconds += entry.wallSeconds;
+		accountedCpuSeconds += entry.cpuSeconds;
+	}
+	// The file timer also covers initialization and coordination outside the
+	// individually timed stages (SFI/profile setup, buffer allocation,
+	// cascade pruning/ID compaction, and transient container cleanup).  Print
+	// that remainder explicitly so the non-indented stage rows reconcile with
+	// Search file (total).  The indented query rows are diagnostic sub-stages
+	// and must not be added a second time.
+	sipros::PerformanceTiming overheadTiming;
+	overheadTiming.wallSeconds = std::max(
+		0.0, processWallSeconds - accountedWallSeconds);
+	overheadTiming.cpuSeconds = std::max(
+		0.0, processCpuSeconds - accountedCpuSeconds);
+	sipros::printPerformanceStage(
+		std::cout, "Workflow setup/overhead", overheadTiming);
+	sipros::PerformanceTiming fileTiming;
+	fileTiming.wallSeconds = processWallSeconds;
+	fileTiming.cpuSeconds = processCpuSeconds;
+	sipros::printPerformanceStage(
+		std::cout, "Search file (total)", fileTiming);
+	timing.printFooter();
+	std::cout << "\nSearch statistics\n"
+			  << "  SFI records              : "
+			  << sipros::formatPerformanceCount(totalRecordsScored) << "\n"
+			  << "  RT/precursor candidates  : "
+			  << sipros::formatPerformanceCount(gateCounters.precursorCandidates)
+			  << " (" << sipros::formatPerformanceCount(gateCounters.rtRejected)
+			  << " RT rejected)\n"
+			  << "  Product postings scanned : "
+			  << sipros::formatPerformanceCount(gateCounters.productPostingsScanned)
+			  << "\n"
+			  << "  Product-gate survivors   : "
+			  << sipros::formatPerformanceCount(totalAssignedCandidates) << "\n"
+			  << "  MVH accepted             : "
+			  << sipros::formatPerformanceCount(totalMvhAccepted) << "\n"
+			  << "  Xcorr/WDP candidates     : "
+			  << sipros::formatPerformanceCount(totalCascadeCandidates) << "\n"
+			  << "  WDP envelope failures    : "
+			  << sipros::formatPerformanceCount(totalWdpEnvelopeFailures) << "\n"
+			  << "  Retained PSMs            : "
+			  << sipros::formatPerformanceCount(retainedPsms) << "\n"
+			  << "  PIN rows                 : "
+			  << sipros::formatPerformanceCount(writtenRows) << "\n"
+			  << "  PIN output               : " << pinPath.string() << "\n";
+	return 0;
 }
 
 } // namespace
@@ -3000,29 +4254,48 @@ int SearchSpectraWorkflow::run(int argc, char **argv)
 		return 1;
 	}
 
-	std::vector<std::string> hdf5Files = listFiles(args.hdf5Dir, {".h5", ".H5", ".hdf5", ".HDF5"});
-	if (hdf5Files.empty())
+	std::vector<std::string> sfiFiles = listFiles(args.sfiDir, {".sfi", ".SFI"});
+	if (args.sfiLabel != 0)
 	{
-		std::cerr << "No HDF5 spectra library files in " << args.hdf5Dir << "\n";
+		sfiFiles.erase(std::remove_if(sfiFiles.begin(), sfiFiles.end(),
+			[&](const std::string &path)
+			{
+				return (args.sfiLabel == -1) != isDecoySfi(path);
+			}), sfiFiles.end());
+	}
+	if (sfiFiles.empty())
+	{
+		std::cerr << "No matching SFI spectra library files in " << args.sfiDir
+				  << "; HDF5 spectra libraries are not supported\n";
 		return 1;
 	}
-	// target first, decoy second (no semantic effect — every shard knows its
-	// own label — but predictable ordering is convenient for debugging).
-	std::stable_partition(hdf5Files.begin(), hdf5Files.end(),
-						  [](const std::string &p)
-						  { return !isDecoyHdf5(p); });
 
 	if (!fs::is_directory(args.outputDir))
 		fs::create_directories(args.outputDir);
 
-	const double t0 = omp_get_wtime();
+	omp_set_num_threads(std::max(1, args.threads));
+	std::cout << "Sipros spectra search\n"
+			  << "  Input files: " << scanFiles.size() << "\n"
+			  << "  Mode       : search H5 scans against SFI\n"
+			  << "  Label      : "
+			  << (args.sfiLabel == -1 ? "decoy" :
+				  (args.sfiLabel == 1 ? "target" : "target and decoy"))
+			  << "\n"
+			  << "  Threads    : " << omp_get_max_threads() << "\n";
+	const sipros::PerformanceTimer runTimer;
 	int rc = 0;
 	for (const auto &scanPath : scanFiles)
 	{
-		int r = processOneHdf5(args, scanPath, hdf5Files);
+		int r = processOneHdf5(args, scanPath, sfiFiles);
 		if (r != 0)
 			rc = r;
 	}
-	std::cout << "sipros search-spectra finished in " << (omp_get_wtime() - t0) << "s\n";
+	sipros::printPerformanceHeader(
+		std::cout, "Run summary", omp_get_max_threads());
+	sipros::printPerformanceStage(
+		std::cout, "Complete spectra search", runTimer.elapsed(),
+		sipros::formatPerformanceCount(scanFiles.size()) + " input file(s)");
+	sipros::printPerformanceFooter(std::cout);
+	std::cout << "\nSipros spectra search complete.\n";
 	return rc;
 }

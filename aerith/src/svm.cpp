@@ -336,58 +336,85 @@ SvmFit SvmImplementation::fit(
     result.scores.resize(data.rows.size());
     result.iterations.resize(data.input_paths.size());
     result.calibrated_weights.resize(data.input_paths.size());
+    result.sample_valid.assign(data.input_paths.size(), 1);
+    result.sample_warnings.resize(data.input_paths.size());
     const int jobs = static_cast<int>(data.input_paths.size() * kRtFolds);
     #pragma omp parallel for schedule(dynamic, 1)
     for (int job = 0; job < jobs; ++job) {
         const auto file = static_cast<std::size_t>(job) / kRtFolds;
         const auto fold = static_cast<std::size_t>(job) % kRtFolds;
+        try {
+            const auto [begin, end] = ranges[file];
+            std::vector<std::size_t> rows;
+            std::vector<int> labels;
+            rows.reserve((end - begin) * (kRtFolds - 1) / kRtFolds);
+            labels.reserve(rows.capacity());
+            for (std::size_t i = begin; i < end; ++i) {
+                if (folds[i] == fold) continue;
+                rows.push_back(i);
+                labels.push_back(data.rows[i].label);
+            }
+            auto matrix = make_matrix(
+                data, fold_extra[fold], rows, begin, end);
+            auto weights = initial_direction(matrix, data, rows, train_fdr);
+            std::array<std::size_t, 2> previous{};
+            for (unsigned int iteration = 0; iteration < max_iterations; ++iteration) {
+                std::vector<double> scores(rows.size());
+                for (std::size_t i = 0; i < rows.size(); ++i)
+                    scores[i] = score(matrix, rows[i], weights);
+                const auto q = training_qvalues(scores, labels);
+                weights = fit_svm(matrix, data, rows, q, train_fdr, c_pos, c_neg);
+                for (std::size_t i = 0; i < rows.size(); ++i)
+                    scores[i] = score(matrix, rows[i], weights);
+                const auto found = count_confident(scores, labels, train_fdr);
+                ++result.iterations[file][fold];
+                if (iteration >= 2 &&
+                    static_cast<double>(found) <= 1.01 * previous[iteration % 2]) {
+                    break;
+                }
+                previous[iteration % 2] = found;
+            }
+            std::vector<double> training_scores(rows.size());
+            for (std::size_t i = 0; i < rows.size(); ++i)
+                training_scores[i] = score(matrix, rows[i], weights);
+            const auto [offset, scale] = training_score_calibration(
+                training_scores, labels, train_fdr);
+            auto& calibrated = result.calibrated_weights[file][fold];
+            calibrated.resize(weights.size());
+            for (std::size_t feature = 0; feature < matrix.columns; ++feature) {
+                calibrated[feature] = weights[feature] / scale;
+            }
+            calibrated.back() = (weights.back() - offset) / scale;
+            for (std::size_t i = begin; i < end; ++i) {
+                if (folds[i] == fold) {
+                    result.scores[i] = (score(matrix, i, weights) - offset) / scale;
+                }
+            }
+        } catch (const std::exception& error) {
+            #pragma omp critical(aerith_svm_sample_failure)
+            {
+                result.sample_valid[file] = 0;
+                if (result.sample_warnings[file].empty()) {
+                    result.sample_warnings[file] = error.what();
+                }
+            }
+        } catch (...) {
+            #pragma omp critical(aerith_svm_sample_failure)
+            {
+                result.sample_valid[file] = 0;
+                if (result.sample_warnings[file].empty()) {
+                    result.sample_warnings[file] =
+                        "unknown SVM training failure";
+                }
+            }
+        }
+    }
+    for (std::size_t file = 0; file < ranges.size(); ++file) {
+        if (result.sample_valid[file]) continue;
         const auto [begin, end] = ranges[file];
-        std::vector<std::size_t> rows;
-        std::vector<int> labels;
-        rows.reserve((end - begin) * (kRtFolds - 1) / kRtFolds);
-        labels.reserve(rows.capacity());
-        for (std::size_t i = begin; i < end; ++i) {
-            if (folds[i] == fold) continue;
-            rows.push_back(i);
-            labels.push_back(data.rows[i].label);
-        }
-        auto matrix = make_matrix(
-            data, fold_extra[fold], rows, begin, end);
-        auto weights = initial_direction(matrix, data, rows, train_fdr);
-        std::array<std::size_t, 2> previous{};
-        for (unsigned int iteration = 0; iteration < max_iterations; ++iteration) {
-            std::vector<double> scores(rows.size());
-            for (std::size_t i = 0; i < rows.size(); ++i)
-                scores[i] = score(matrix, rows[i], weights);
-            const auto q = training_qvalues(scores, labels);
-            weights = fit_svm(matrix, data, rows, q, train_fdr, c_pos, c_neg);
-            for (std::size_t i = 0; i < rows.size(); ++i)
-                scores[i] = score(matrix, rows[i], weights);
-            const auto found = count_confident(scores, labels, train_fdr);
-            ++result.iterations[file][fold];
-            if (iteration >= 2 &&
-                static_cast<double>(found) <= 1.01 * previous[iteration % 2]) {
-                break;
-            }
-            previous[iteration % 2] = found;
-        }
-        std::vector<double> training_scores(rows.size());
-        for (std::size_t i = 0; i < rows.size(); ++i) {
-            training_scores[i] = score(matrix, rows[i], weights);
-        }
-        const auto [offset, scale] = training_score_calibration(
-            training_scores, labels, train_fdr);
-        auto& calibrated = result.calibrated_weights[file][fold];
-        calibrated.resize(weights.size());
-        for (std::size_t feature = 0; feature < matrix.columns; ++feature) {
-            calibrated[feature] = weights[feature] / scale;
-        }
-        calibrated.back() = (weights.back() - offset) / scale;
-        for (std::size_t i = begin; i < end; ++i) {
-            if (folds[i] == fold) {
-                result.scores[i] = (score(matrix, i, weights) - offset) / scale;
-            }
-        }
+        std::fill(result.scores.begin() + begin, result.scores.begin() + end, 0.0);
+        result.iterations[file] = {};
+        result.calibrated_weights[file] = {};
     }
     return result;
 }

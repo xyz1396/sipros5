@@ -345,8 +345,6 @@ std::vector<float> predict_irt(const std::filesystem::path& model_path,
 #pragma GCC diagnostic pop
 #endif
 
-namespace {
-
 constexpr std::uint64_t kRtLibraryMagic = 0x4145525254505231ULL;
 
 void rt_cache_hash_bytes(
@@ -470,8 +468,6 @@ void save_rt_library_cache(
         std::filesystem::rename(temporary, path, error);
     }
 }
-
-} // namespace
 
 double median(std::vector<double> values) {
     if (values.empty()) return 0.0;

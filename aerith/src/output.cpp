@@ -35,6 +35,26 @@ std::string ResultWriter::formatted_number(double value) {
     return stream.str();
 }
 
+std::string assigned_modifications_text(
+    const std::vector<std::string>& modifications) {
+    std::ostringstream stream;
+    for (std::size_t index = 0; index < modifications.size(); ++index) {
+        if (index != 0) stream << ", ";
+        stream << modifications[index];
+    }
+    return stream.str();
+}
+
+void write_ptm_annotation(
+    std::ostream& stream, const Psm& psm, bool fixed_cam) {
+    const auto modifications = modification_info(psm.peptide, fixed_cam);
+    stream << '\t'
+           << (modifications.modified_peptide.empty()
+                   ? modifications.sequence
+                   : modifications.modified_peptide)
+           << '\t' << assigned_modifications_text(modifications.assigned);
+}
+
 void ResultWriter::write_original_field(
     std::ostream& stream, const Dataset& data, const Psm& psm,
     std::size_t column) {
@@ -95,7 +115,7 @@ std::vector<std::size_t> ResultWriter::selected_rows(
 void ResultWriter::write_results(
     const std::string& path, int label, std::size_t file, const Dataset& data,
     const std::vector<double>& scores, const std::vector<double>& q,
-    const std::vector<double>& pep) {
+    const std::vector<double>& pep, bool fixed_cam) {
     const std::filesystem::path output(path);
     if (output.has_parent_path()) {
         std::filesystem::create_directories(output.parent_path());
@@ -105,7 +125,8 @@ void ResultWriter::write_results(
         throw std::runtime_error("Cannot create output: " + path);
     }
     stream << "PSMId\tSVMscore\tq-value\tposterior_error_prob"
-           << "\tpeptide\tproteinIds\n";
+           << "\tpeptide\tmodifiedPeptide\tassignedModifications"
+           << "\tproteinIds\n";
     auto order = selected_rows(data, file, label);
     std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
         return scores[a] > scores[b];
@@ -113,8 +134,10 @@ void ResultWriter::write_results(
     stream << std::setprecision(10);
     for (const auto i : order) {
         const auto& psm = data.rows[i];
-        stream << psm.id << '\t' << scores[i] << '\t' << q[i] << '\t' << pep[i] << '\t'
-               << psm.peptide << '\t' << psm.proteins << '\n';
+        stream << psm.id << '\t' << scores[i] << '\t' << q[i] << '\t'
+               << pep[i] << '\t' << psm.peptide;
+        write_ptm_annotation(stream, psm, fixed_cam);
+        stream << '\t' << psm.proteins << '\n';
     }
 }
 
@@ -122,7 +145,7 @@ void ResultWriter::write_filtered_results(
     const std::string& path, std::size_t file, const Dataset& data,
     const std::vector<double>& scores, const std::vector<double>& q,
     const std::vector<double>& pep, const std::vector<double>& rt_residual,
-    double threshold, bool sip_output) {
+    double threshold, bool sip_output, bool fixed_cam) {
     const std::filesystem::path output(path);
     if (output.has_parent_path()) std::filesystem::create_directories(output.parent_path());
     std::ofstream stream(output);
@@ -141,6 +164,9 @@ void ResultWriter::write_filtered_results(
             }
         }
         stream << '\t' << header;
+        if (header == "Peptide") {
+            stream << "\tModifiedPeptide\tAssignedModifications";
+        }
         if (header == "retentiontime" && data.has_predicted_rt_diagnostics) {
             stream << "\tpred_RT_real_units\tdelta_RT_loess_real";
         }
@@ -181,6 +207,9 @@ void ResultWriter::write_filtered_results(
             }
             stream << '\t';
             write_original_field(stream, data, psm, column);
+            if (data.headers[column] == "Peptide") {
+                write_ptm_annotation(stream, psm, fixed_cam);
+            }
             if (data.headers[column] == "retentiontime" &&
                 data.has_predicted_rt_diagnostics) {
                 stream << '\t' << formatted_number(psm.predicted_rt_real_units)
@@ -234,14 +263,15 @@ void ResultWriter::write(
                 config.output_prefixes[static_cast<std::size_t>(output_index)];
             if (!config.filtered_only) {
                 write_results(prefix + "_target_psms.tsv", 1, file,
-                              data, scores, q, pep);
+                              data, scores, q, pep, config.fixed_cam);
                 write_results(prefix + "_decoy_psms.tsv", -1, file,
-                              data, scores, q, pep);
+                              data, scores, q, pep, config.fixed_cam);
             }
             write_filtered_results(prefix + "_filtered_psms.tsv", file, data,
                                    scores, q, pep, held_out_rt_residuals,
                                    config.q_threshold,
-                                   !config.sip_isotope.empty());
+                                   !config.sip_isotope.empty(),
+                                   config.fixed_cam);
         } catch (...) {
             #pragma omp critical(aerith_write_failure)
             if (!failure) failure = std::current_exception();
@@ -334,15 +364,22 @@ void print_summary(std::ostream& output, const Summary& summary) {
            << std::setw(15) << "Iterations" << '\n'
            << std::string(95, '-') << '\n';
     for (const auto& sample : summary.sample_models) {
-        const std::string iterations = std::to_string(sample.score_iterations[0]) + "/" +
-            std::to_string(sample.score_iterations[1]) + "/" +
-            std::to_string(sample.score_iterations[2]);
+        const std::string iterations = sample.model_valid
+            ? std::to_string(sample.score_iterations[0]) + "/" +
+                std::to_string(sample.score_iterations[1]) + "/" +
+                std::to_string(sample.score_iterations[2])
+            : "skipped";
         output << std::left << std::setw(30) << sample.name
                << std::right << std::setw(14) << sample.psms
                << std::setw(12) << sample.target_ids
                << std::setw(12) << sample.distinct_target_peptides
                << std::setw(12) << sample.pi0
                << std::setw(15) << iterations << '\n';
+        if (!sample.model_valid) {
+            output << "  WARNING: " << sample.name
+                   << " accepted 0 PSMs because SVM initialization failed: "
+                   << sample.warning << '\n';
+        }
     }
     output << "\nTiming by stage (seconds)\n"
            << std::left << std::setw(64) << "Stage"
@@ -350,14 +387,38 @@ void print_summary(std::ostream& output, const Summary& summary) {
            << std::setw(14) << "CPU time"
            << std::setw(12) << "Speedup" << '\n'
            << std::string(104, '-') << '\n';
+    const auto print_wrapped_timing_detail = [&](const std::string& detail) {
+        constexpr std::size_t line_width = 104;
+        const std::string first_prefix = "      Detail: ";
+        const std::string continuation(first_prefix.size(), ' ');
+        std::size_t begin = 0;
+        bool first = true;
+        while (begin < detail.size()) {
+            const std::string& prefix = first ? first_prefix : continuation;
+            const std::size_t available = line_width - prefix.size();
+            std::size_t end = std::min(detail.size(), begin + available);
+            if (end < detail.size()) {
+                const std::size_t space = detail.rfind(' ', end);
+                if (space != std::string::npos && space > begin) end = space;
+            }
+            output << prefix << detail.substr(begin, end - begin) << '\n';
+            begin = end;
+            while (begin < detail.size() && detail[begin] == ' ') ++begin;
+            first = false;
+        }
+    };
     const auto print_timing = [&](const std::string& label,
                                   const StageTiming& timing) {
         const double speedup = timing.wall_seconds > 0.0
             ? timing.cpu_seconds / timing.wall_seconds : 0.0;
-        output << std::left << std::setw(64) << label
+        const bool overlong = label.size() > 64;
+        const std::string display = overlong
+            ? label.substr(0, 61) + "..." : label;
+        output << std::left << std::setw(64) << display
                << std::right << std::setw(14) << timing.wall_seconds
                << std::setw(14) << timing.cpu_seconds
                << std::setw(11) << speedup << "x\n";
+        if (overlong) print_wrapped_timing_detail("Full stage: " + label);
     };
     print_timing("Read, merge, and rerank PIN files", summary.read_timing);
     if (std::find(summary.feature_names.begin(), summary.feature_names.end(),
@@ -390,6 +451,9 @@ void print_summary(std::ostream& output, const Summary& summary) {
     print_timing("Quantification total", summary.quantification_timing);
     for (const auto& stage : summary.quantification_stages) {
         print_timing("  " + stage.name, stage.timing);
+        if (!stage.detail.empty()) {
+            print_wrapped_timing_detail(stage.detail);
+        }
     }
     print_timing("Write result files", summary.write_timing);
     for (const auto& stage : summary.protein_assembly_stages) {
@@ -447,9 +511,12 @@ void print_summary(std::ostream& output, const Summary& summary) {
         print_weight("(intercept)", feature_names.size());
     };
     for (const auto& sample : summary.sample_models) {
-        print_feature_weights(summary.feature_names, sample);
+        if (sample.model_valid) {
+            print_feature_weights(summary.feature_names, sample);
+        }
     }
-    if (summary.negative_control_candidates > 0) {
+    if (summary.negative_control_candidates > 0 &&
+        summary.negative_control_model.model_valid) {
         output
             << "\nSIP-Negative-control SVM feature weights\n"
             << "  These weights are fitted during the native in-memory "
@@ -458,6 +525,10 @@ void print_summary(std::ostream& output, const Summary& summary) {
             summary.negative_control_feature_names,
             summary.negative_control_model,
             false);
+    } else if (summary.negative_control_candidates > 0) {
+        output << "\nSIP-Negative-control SVM warning\n  "
+               << summary.negative_control_model.warning
+               << "; 0 PSMs accepted.\n";
     }
     output << "\nOutputs\n";
     for (const auto& prefix : summary.output_prefixes) {

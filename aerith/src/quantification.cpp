@@ -2110,9 +2110,11 @@ QuantificationResult ChromatographicQuantifier::add(
     };
     const auto record_stage = [&](std::string name, const StageTiming& timing,
                                   bool uses_omp = false,
-                                  bool uses_simd = false) {
+                                  bool uses_simd = false,
+                                  std::string detail = {}) {
         result.stages.push_back({
-            std::move(name), timing, uses_omp, uses_simd});
+            std::move(name), timing, uses_omp, uses_simd,
+            std::move(detail)});
     };
     const std::size_t file_count = config.spectrum_paths.size();
     std::vector<QuantIonMap> ions(file_count);
@@ -2726,9 +2728,8 @@ QuantificationResult ChromatographicQuantifier::add(
                     null_tail_false_by_sip_bin[sip_bin] / denominator);
         }
     }
-    record_stage(
-        "Fit covariance MBR LDA + four-population per-run probability/"
-        "global ion FDR (" +
+    std::string mbr_fit_detail =
+        "four-population per-run calibration: " +
             std::to_string(training_target_count) + " +2, " +
             std::to_string(training_decoy_count) + " -2; " +
             std::to_string(scored_transfer_candidates) + " +1, " +
@@ -2746,9 +2747,10 @@ QuantificationResult ChromatographicQuantifier::add(
             std::to_string(data.transferred_ions.empty() ? 0.0 :
                 null_tail_expected_false /
                     static_cast<double>(data.transferred_ions.size())) +
-            ")" +
-            calibration_summary + ")",
-        score_mbr_timing);
+            ")" + calibration_summary;
+    record_stage(
+        "Fit covariance MBR LDA + probability/global ion FDR",
+        score_mbr_timing, false, false, std::move(mbr_fit_detail));
     return result;
 }
 

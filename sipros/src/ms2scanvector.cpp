@@ -1809,7 +1809,7 @@ void MS2ScanVector::preXcorr()
 	// SIP mode variable
 	for (int i = 0; i < num_max_threads; ++i)
 	{
-		vvpbDuplFragmentGlobal.push_back(vector<bool>());
+		vvpbDuplFragmentGlobal.push_back(vector<unsigned char>());
 		vvpbDuplFragmentGlobal.back().clear();
 		vvpbDuplFragmentGlobal.back().resize(iArraySizeScore, false);
 		vvdBinnedIonMassesGlobal.push_back(vector<double>());

@@ -1,6 +1,7 @@
 import os
 import sys
 import argparse
+import csv
 import logging
 from logging import Logger
 import time
@@ -87,11 +88,17 @@ citation:
         parser.add_argument('-p', '--precision', required=False,
                             help="SIP label precision in percentage, e.g., 1. Don't provide this flag for regular search")
         parser.add_argument('--psm-tsv', required=False,
-                            help="PSM TSV used to generate search-spectra HDF5 spectra libraries")
+                            help="PSM TSV used to generate search-spectra SFI spectra libraries")
         parser.add_argument('--unlabeled-input', required=False,
                             help="Unlabeled raw/.d/.d.zip/HDF5 input used to generate search-spectra spectra libraries")
         parser.add_argument('--spectra-dir', required=False,
-                            help="Reuse an existing HDF5 spectra-library directory instead of generating one")
+                            help="Reuse an existing SFI spectra-library directory instead of generating one")
+        parser.add_argument(
+            '--fast-sip-search', action='store_true',
+            help=("Run regular target/decoy FASTA search and Aerith filtering, "
+                  "build one target and one decoy SFI from the resulting "
+                  "*_filtered_psms.tsv files, then run SIP spectra search"),
+        )
         parser.add_argument('-f', '--fasta', required=True,
                             help="Fasta file path")
         parser.add_argument('-n', '--nPrecursor', required=False,
@@ -111,6 +118,15 @@ citation:
                                   "the budget permits"))
         parser.add_argument('--topN', '--top-psms-per-scan', dest='topN', required=False, type=int, default=20,
                             help="Top PSM rows retained per scan for target and decoy searches before merge (default: 20)")
+        parser.add_argument('--rt-tolerance', required=False, type=float, default=5.0,
+                            help="Retention-time candidate window in minutes for spectra search (default: 5)")
+        parser.add_argument('--sfi-envelope-top-n', required=False, type=int, default=3,
+                            help=("Isotope peaks stored per precursor/product envelope "
+                                  "and used by the compact SFI gate/MVH/XCorr stages "
+                                  "(default: 3); final WDP regenerates full envelopes"))
+        parser.add_argument('--mvh-cascade-top-n', required=False, type=int, default=150,
+                            help=("Spectra-search MVH candidates retained per scan for "
+                                  "XCorr/WDP scoring (default: 150)"))
         parser.add_argument('-o', '--output', required=True, help="Output directory path")
         parser.add_argument('--ignorePCT', action='store_true', 
                             help='Ignore SIP abundance features when filtering')
@@ -145,10 +161,22 @@ citation:
             parser.error('--nPrecursor must be a positive integer')
         if args.product_top_isotopes <= 0:
             parser.error('--product-top-isotopes must be a positive integer')
+        if args.rt_tolerance < 0:
+            parser.error('--rt-tolerance must be non-negative')
+        if args.sfi_envelope_top_n <= 0:
+            parser.error('--sfi-envelope-top-n must be a positive integer')
+        if args.mvh_cascade_top_n <= 0:
+            parser.error('--mvh-cascade-top-n must be a positive integer')
         if args.max_ptm_count is not None and args.max_ptm_count < 0:
             parser.error('--max-ptm-count must be a non-negative integer')
         
         spectra_mode = bool(args.psm_tsv or args.unlabeled_input or args.spectra_dir)
+        if args.fast_sip_search and spectra_mode:
+            parser.error(
+                "--fast-sip-search creates its own filtered PSMs and spectra "
+                "library; do not combine it with --psm-tsv, "
+                "--unlabeled-input, or --spectra-dir"
+            )
         if spectra_mode and (
                 args.ptm is not None or args.max_ptm_count is not None):
             parser.error(
@@ -161,7 +189,7 @@ citation:
                 "spectra library's chemistry metadata is authoritative"
             )
         if not args.element:
-            args.element = "C13" if spectra_mode else "R"
+            args.element = "C13" if (spectra_mode or args.fast_sip_search) else "R"
         elif args.element != "R":
             normalized_element = args.element[0].upper() + args.element[1:]
             supported_isotopes = {"C13", "H2", "N15", "O18", "S34"}
@@ -171,6 +199,8 @@ citation:
             args.element = normalized_element
         if spectra_mode and not args.spectra_dir and (not args.psm_tsv or not args.unlabeled_input):
             parser.error("search-spectra mode requires --psm-tsv and --unlabeled-input unless --spectra-dir is provided")
+        if args.fast_sip_search and args.element == "R":
+            parser.error("--fast-sip-search requires a SIP isotope such as C13")
         return args
 
     def initLogger(self, outputPath: str) -> Logger:
@@ -188,72 +218,180 @@ citation:
         logger.info('sipros_workflow begin')
         return logger
 
+    def make_search(self, *, element: str, output: str,
+                    psm_tsv: str | None = None,
+                    unlabeled_input: str | None = None,
+                    spectra_dir: str | None = None,
+                    stage_hdf5_copies: bool = True) -> search:
+        return search(element=element,
+                      toleranceMS1=self.args.toleranceMS1,
+                      toleranceMS2=self.args.toleranceMS2,
+                      sipRange=self.args.range,
+                      step=self.args.precision,
+                      raxportPath=self.toolsPaths['raxport'],
+                      siprosPath=self.toolsPaths['sipros'],
+                      fastaPath=self.args.fasta,
+                      inputPath=self.args.input,
+                      outputPath=output,
+                      negative_control=self.args.negative_control,
+                      threadNumber=int(self.args.thread),
+                      logger=self.logger,
+                      nPrecursor=self.args.nPrecursor,
+                      dryrun=self.args.dryrun,
+                      psmTsv=psm_tsv,
+                      unlabeledInput=unlabeled_input,
+                      spectraDir=spectra_dir,
+                      topPsmsPerScan=self.args.topN,
+                      ptms=self.args.ptm,
+                      fixedPtms=self.args.fixed_ptm,
+                      maxPtmCount=self.args.max_ptm_count,
+                      rtTolerance=self.args.rt_tolerance,
+                      sfiEnvelopeTopN=self.args.sfi_envelope_top_n,
+                      mvhCascadeTopN=self.args.mvh_cascade_top_n,
+                      stageHdf5Copies=stage_hdf5_copies)
+
+    def make_filter(self, sipros_search: search, output: str, *,
+                    assemble_proteins: bool, sip_isotope: str,
+                    negative_control: str = "",
+                    include_spectra: bool = False) -> filter:
+        spectra_paths = None
+        if include_spectra:
+            spectra_paths = [
+                sipros_search.hdf5_paths.get(
+                    name, sipros_search.expected_hdf5_path(name)
+                )
+                for name in sipros_search.base_names
+            ]
+        return filter(baseNames=sipros_search.base_names,
+                      outputPath=output,
+                      aerithPath=self.toolsPaths['aerith'],
+                      threadNumber=sipros_search.threadNumber,
+                      logger=self.logger,
+                      decoyPrefix=sipros_search.decoyPrefix,
+                      ignorePCT=self.args.ignorePCT,
+                      dryrun=self.args.dryrun,
+                      fastaPath=self.args.fasta,
+                      decoyPath=sipros_search.decoyPath,
+                      assembleProteins=assemble_proteins,
+                      element=sip_isotope,
+                      negative_control=negative_control,
+                      label_threshold=self.args.label_threshold,
+                      fixedCam=not any(
+                          value.strip().lower() == "none"
+                          for value in (self.args.fixed_ptm or [])
+                      ),
+                      sipIsotope=sip_isotope,
+                      ptms=self.args.ptm,
+                      fixedPtms=self.args.fixed_ptm,
+                      maxPtmCount=self.args.max_ptm_count,
+                      productTopIsotopes=self.args.product_top_isotopes,
+                      quantTopIsotopes=self.args.nPrecursor,
+                      spectraPaths=spectra_paths)
+
+    def report_filtered_psms(self, regular_search: search,
+                             regular_output: str) -> None:
+        for base_name in regular_search.base_names:
+            path = os.path.join(
+                regular_output, base_name, f'{base_name}_filtered_psms.tsv'
+            )
+            accepted = 0
+            if os.path.exists(path):
+                with open(path, newline='') as stream:
+                    reader = csv.DictReader(stream, delimiter='\t')
+                    for row in reader:
+                        label = (row.get('Label') or '1').strip()
+                        if label == '1':
+                            accepted += 1
+            if accepted == 0:
+                self.logger.warning(
+                    f'Aerith regular-search filtering retained 0 target PSMs '
+                    f'for {base_name}; this sample contributes no target '
+                    'spectra to the SFI library'
+                )
+            else:
+                self.logger.info(
+                    f'Aerith regular-search filtering retained {accepted:,} '
+                    f'target PSMs for {base_name}'
+                )
+
+    def run_fast_sip_search(self) -> search:
+        regular_output = os.path.join(self.args.output, 'regular')
+        spectra_library = os.path.join(self.args.output, 'spectra_library')
+        spectra_output = os.path.join(self.args.output, 'spectra_search')
+        for path in (regular_output, spectra_library, spectra_output):
+            os.makedirs(path, exist_ok=True)
+
+        self.logger.info('Fast SIP phase 1/4: regular target/decoy FASTA search')
+        regular_search = self.make_search(
+            element='R', output=regular_output, stage_hdf5_copies=False
+        )
+        regular_search.run()
+
+        self.logger.info('Fast SIP phase 2/4: Aerith filtering of regular PSMs')
+        self.make_filter(
+            regular_search, regular_output,
+            assemble_proteins=False, sip_isotope=''
+        ).run()
+        if not self.args.dryrun:
+            self.report_filtered_psms(regular_search, regular_output)
+
+        self.logger.info(
+            'Fast SIP phase 3/4: filtered-PSM SFI generation and spectra search'
+        )
+        spectra_search = self.make_search(
+            element=self.args.element,
+            output=spectra_output,
+            psm_tsv=regular_output,
+            unlabeled_input=regular_output,
+            stage_hdf5_copies=False,
+        )
+        spectra_search.base_names = list(regular_search.base_names)
+        spectra_search.hdf5_paths = dict(regular_search.hdf5_paths)
+        spectra_search.generatedSpectraDir = spectra_library
+        spectra_search.reverse_fasta_sequences()
+        if not self.args.dryrun:
+            generated = spectra_search.generate_or_reuse_spectra_library()
+            spectra_search.search_spectra_samples(generated)
+
+        self.logger.info('Fast SIP phase 4/4: Aerith filtering and reporting')
+        self.make_filter(
+            spectra_search, spectra_output,
+            assemble_proteins=True,
+            sip_isotope=self.args.element,
+            negative_control=self.args.negative_control or '',
+            include_spectra=True,
+        ).run()
+        return spectra_search
+
     def run(self) -> None:
         start_time: float = time.time()
         spectra_mode = bool(self.args.psm_tsv or self.args.unlabeled_input or self.args.spectra_dir)
+        if self.args.fast_sip_search:
+            self.run_fast_sip_search()
+            running_time = time.time() - start_time
+            self.logger.info(f'All job done. Results are in {self.args.output}.')
+            self.logger.info(f'Total running time: {running_time} seconds')
+            return
 
-        sipros_search = search(element=self.args.element,
-                               toleranceMS1=self.args.toleranceMS1,
-                               toleranceMS2=self.args.toleranceMS2,
-                               sipRange=self.args.range,
-                               step=self.args.precision,
-                               raxportPath=self.toolsPaths['raxport'],
-                               siprosPath=self.toolsPaths['sipros'],
-                               fastaPath=self.args.fasta,
-                               inputPath=self.args.input,
-                               outputPath=self.args.output,
-                               negative_control=self.args.negative_control,
-                               threadNumber=int(self.args.thread),
-                               logger=self.logger,
-                               nPrecursor=self.args.nPrecursor,
-                               dryrun=self.args.dryrun,
-                               psmTsv=self.args.psm_tsv,
-                               unlabeledInput=self.args.unlabeled_input,
-                               spectraDir=self.args.spectra_dir,
-                               topPsmsPerScan=self.args.topN,
-                               ptms=self.args.ptm,
-                               fixedPtms=self.args.fixed_ptm,
-                               maxPtmCount=self.args.max_ptm_count)
+        sipros_search = self.make_search(
+            element=self.args.element,
+            output=self.args.output,
+            psm_tsv=self.args.psm_tsv,
+            unlabeled_input=self.args.unlabeled_input,
+            spectra_dir=self.args.spectra_dir,
+        )
         if spectra_mode:
             sipros_search.run_search_spectra()
         else:
             sipros_search.run()
 
-        sipros_filter = filter(baseNames=sipros_search.base_names,
-                               outputPath=self.args.output,
-                               aerithPath=self.toolsPaths['aerith'],
-                               threadNumber=sipros_search.threadNumber,
-                               logger=self.logger,
-                               decoyPrefix=sipros_search.decoyPrefix,
-                               ignorePCT=self.args.ignorePCT,
-                               dryrun=self.args.dryrun,
-                               fastaPath=self.args.fasta,
-                               decoyPath=sipros_search.decoyPath,
-                               assembleProteins=not spectra_mode,
-                               element=self.args.element,
-                               negative_control=self.args.negative_control,
-                               label_threshold=self.args.label_threshold,
-                               fixedCam=not any(
-                                   value.strip().lower() == "none"
-                                   for value in (self.args.fixed_ptm or [])
-                               ),
-                               sipIsotope=self.args.element or "",
-                               ptms=self.args.ptm,
-                               fixedPtms=self.args.fixed_ptm,
-                               maxPtmCount=self.args.max_ptm_count,
-                               productTopIsotopes=(
-                                   self.args.product_top_isotopes
-                               ),
-                               quantTopIsotopes=self.args.nPrecursor,
-                               spectraPaths=(
-                                   [sipros_search.hdf5_paths.get(
-                                       name,
-                                       sipros_search.expected_hdf5_path(name),
-                                   )
-                                    for name in sipros_search.base_names]
-                                   if not spectra_mode
-                                   else None
-                               ))
+        sipros_filter = self.make_filter(
+            sipros_search, self.args.output,
+            assemble_proteins=not spectra_mode,
+            sip_isotope=self.args.element or '',
+            negative_control=self.args.negative_control or '',
+            include_spectra=not spectra_mode,
+        )
         sipros_filter.run()
 
         end_time = time.time()

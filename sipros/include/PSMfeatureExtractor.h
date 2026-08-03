@@ -69,12 +69,33 @@ public:
                                                           const std::string &sipAtom,
                                                           double expectedEnrichmentPct,
                                                           const std::function<double(double)> &mzToleranceDaAt);
+    // Spectra search already has the full-resolution WDP product envelopes.
+    // Its precursor model is b_(n-1) (*) y1, so use that exact model to locate
+    // MS1 peaks instead of independently rebuilding a precursor envelope.
+    static std::vector<isotopicPeak> findMs1IsotopicPeaksFromEnvelope(
+        const sipros::RaxportMs1Data *ms1Data,
+        int &ms1ScanNumber,
+        int precursorCharge,
+        double baseNeutralMass,
+        double matchedPrecursorMz,
+        const std::vector<double> &precursorNeutralMasses,
+        const std::vector<double> &precursorProbabilities,
+        const std::function<double(double)> &mzToleranceDaAt);
     static Ms1AbundanceResult getSIPelementAbundanceFromMS1Peaks(const std::vector<isotopicPeak> &peaks,
                                                                  double baseMass,
                                                                  const std::string &peptide,
                                                                  int precursorCharge,
                                                                  const std::string &sipAtom,
                                                                  double expectedEnrichmentPct);
+    static Ms1AbundanceResult getSIPelementAbundanceFromMS1PeaksWithEnvelope(
+        const std::vector<isotopicPeak> &peaks,
+        double baseMass,
+        const std::string &peptide,
+        int precursorCharge,
+        const std::string &sipAtom,
+        double expectedEnrichmentPct,
+        const std::vector<double> &precursorNeutralMasses,
+        const std::vector<double> &precursorProbabilities);
 
     void extractFeaturesOfEachPSM();
 };

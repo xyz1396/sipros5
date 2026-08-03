@@ -17,7 +17,6 @@
 #include <vector>
 
 namespace aerith {
-namespace {
 
 bool initialized = false;
 char sip_atom = '\0';
@@ -85,8 +84,6 @@ Isotopologue& enriched_isotopologue(double abundance_pct) {
     auto inserted = models.emplace(key, std::move(model));
     return *inserted.first->second;
 }
-
-} // namespace
 
 void initialize_sip_isotope_model(const Config& config) {
     initialized = false;

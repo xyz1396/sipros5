@@ -10,10 +10,12 @@ namespace aerith {
 
 struct SampleModelSummary {
     std::string name;
+    std::string warning;
     std::size_t psms = 0;
     std::size_t target_ids = 0;
     std::size_t distinct_target_peptides = 0;
     double pi0 = 1.0;
+    bool model_valid = true;
     std::array<unsigned int, 3> score_iterations{};
     std::array<std::vector<double>, 3> feature_weights;
 };
@@ -28,6 +30,7 @@ struct AccelerationTiming {
     StageTiming timing;
     bool uses_omp = false;
     bool uses_simd = false;
+    std::string detail;
 };
 
 struct Config {

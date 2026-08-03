@@ -117,8 +117,6 @@ struct SpectrumPredictionLibrary::Impl {
 
 std::string spectrum_peptide_body(const std::string& peptide);
 
-namespace {
-
 constexpr std::uint64_t kSpectrumLibraryMagic = 0x4145525350454331ULL;
 
 void spectrum_cache_hash_bytes(
@@ -270,8 +268,6 @@ void save_spectrum_library_cache(
         std::filesystem::rename(temporary, path, error);
     }
 }
-
-} // namespace
 
 SpectrumPredictionLibrary::SpectrumPredictionLibrary()
     : impl_(std::make_unique<Impl>()) {}

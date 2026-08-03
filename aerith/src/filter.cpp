@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <mutex>
 #include <sstream>
@@ -29,8 +30,6 @@
 #endif
 
 namespace aerith {
-
-namespace {
 
 using Clock = std::chrono::steady_clock;
 
@@ -228,8 +227,6 @@ void save_prediction_cache(
     }
 }
 
-} // namespace
-
 std::string peptide_form(const std::string& peptide) {
     const auto open = peptide.find('[');
     const auto close = peptide.rfind(']');
@@ -258,7 +255,8 @@ NegativeControlResult NegativeControlFilter::run(
                  wall_end - wall_begin).count(),
              static_cast<double>(cpu_end - cpu_begin) / CLOCKS_PER_SEC},
             uses_omp,
-            false});
+            false,
+            {}});
     };
     if (source.rows.size() != source_q.size()) {
         throw std::runtime_error(
@@ -383,9 +381,17 @@ NegativeControlResult NegativeControlFilter::run(
     const auto statistics_begin = Clock::now();
     const auto statistics_cpu_begin = std::clock();
     double pi0 = 1.0;
-    const auto q = mixmax_qvalues(scores, labels, &pi0);
-    const auto pep =
-        SvmRescorer::local_error_probabilities(scores, labels);
+    const bool model_valid = fitted.sample_valid.at(0) != 0;
+    std::vector<double> q(data.rows.size(), 1.0);
+    std::vector<double> pep(data.rows.size(), 1.0);
+    if (model_valid) {
+        q = mixmax_qvalues(scores, labels, &pi0);
+        pep = SvmRescorer::local_error_probabilities(scores, labels);
+    } else {
+        std::cerr << "Aerith warning: SIP negative-control SVM has no usable "
+                  << "seed (" << fitted.sample_warnings.at(0)
+                  << "); reporting 0 accepted PSMs.\n";
+    }
     std::unordered_set<std::string> accepted_peptides;
     std::unordered_set<std::string> accepted_donor_psm_ids;
     for (std::size_t row = 0; row < data.rows.size(); ++row) {
@@ -409,6 +415,8 @@ NegativeControlResult NegativeControlFilter::run(
     }
     result.feature_names = data.feature_names;
     result.model.name = "SIP-Negative-control";
+    result.model.model_valid = model_valid;
+    result.model.warning = fitted.sample_warnings.at(0);
     result.model.psms = data.rows.size();
     result.model.target_ids = result.target_ids;
     result.model.distinct_target_peptides = accepted_peptides.size();
@@ -590,6 +598,8 @@ Summary run_monolithic(const Config& config) {
         sample.name = config.output_prefixes.size() == data.input_paths.size()
             ? std::filesystem::path(config.output_prefixes[file]).filename().string()
             : std::filesystem::path(data.input_paths[file]).stem().string();
+        sample.model_valid = fitted.sample_valid.at(file) != 0;
+        sample.warning = fitted.sample_warnings.at(file);
         sample.score_iterations = fitted.iterations[file];
         sample.feature_weights = std::move(fitted.calibrated_weights[file]);
         std::vector<std::size_t> rows;
@@ -602,6 +612,12 @@ Summary run_monolithic(const Config& config) {
             sample_labels.push_back(labels[i]);
         }
         sample.psms = rows.size();
+        if (!sample.model_valid) {
+            std::cerr << "Aerith warning: sample " << sample.name
+                      << " has no usable SVM seed (" << sample.warning
+                      << "); reporting 0 accepted PSMs for this sample.\n";
+            continue;
+        }
         const auto sample_q = mixmax_qvalues(
             sample_scores, sample_labels, &sample.pi0);
         const auto sample_pep = SvmRescorer::local_error_probabilities(
@@ -751,8 +767,6 @@ Summary run_monolithic(const Config& config) {
     return summary;
 }
 
-namespace {
-
 Config streamed_sample_config(const Config& config, std::size_t sample) {
     Config result = config;
     result.inputs.clear();
@@ -870,7 +884,8 @@ void write_stream_score_spool(
 
 void write_stream_score_table(
     const std::filesystem::path& spool, const std::string& output_path,
-    const std::vector<double>& final_q, bool protein_filtered) {
+    const std::vector<double>& final_q, bool protein_filtered,
+    bool fixed_cam) {
     std::ifstream input(spool);
     if (!input) {
         throw std::runtime_error(
@@ -886,7 +901,8 @@ void write_stream_score_table(
             "Cannot create output: " + output_file.string());
     }
     output << "PSMId\tSVMscore\tq-value\tposterior_error_prob"
-           << "\tpeptide\tproteinIds\n" << std::setprecision(10);
+           << "\tpeptide\tmodifiedPeptide\tassignedModifications"
+           << "\tproteinIds\n" << std::setprecision(10);
     std::string line;
     while (std::getline(input, line)) {
         std::array<std::string_view, 7> fields{};
@@ -909,10 +925,23 @@ void write_stream_score_table(
         } else if (protein_filtered) {
             qvalue = 1.0;
         }
+        const std::string compact_peptide(fields[5]);
+        const auto modifications = modification_info(
+            compact_peptide, fixed_cam);
+        std::ostringstream assigned;
+        for (std::size_t index = 0;
+             index < modifications.assigned.size(); ++index) {
+            if (index != 0) assigned << ", ";
+            assigned << modifications.assigned[index];
+        }
         output << fields[1] << '\t'
                << std::stod(std::string(fields[2])) << '\t' << qvalue
                << '\t' << std::stod(std::string(fields[4])) << '\t'
-               << fields[5] << '\t' << fields[6] << '\n';
+               << compact_peptide << '\t'
+               << (modifications.modified_peptide.empty()
+                       ? modifications.sequence
+                       : modifications.modified_peptide)
+               << '\t' << assigned.str() << '\t' << fields[6] << '\n';
     }
 }
 
@@ -1052,9 +1081,19 @@ Summary run_streamed(const Config& config) {
             model.name = std::filesystem::path(
                 config.output_prefixes[state.file]).filename().string();
             model.psms = state.data.rows.size();
+            model.model_valid = state.fitted.sample_valid.at(0) != 0;
+            model.warning = state.fitted.sample_warnings.at(0);
             model.score_iterations = state.fitted.iterations.at(0);
             model.feature_weights =
                 std::move(state.fitted.calibrated_weights.at(0));
+            if (!model.model_valid) {
+                state.q.assign(state.data.rows.size(), 1.0);
+                state.pep.assign(state.data.rows.size(), 1.0);
+                state.compact_indices.assign(
+                    state.data.rows.size(),
+                    std::numeric_limits<std::size_t>::max());
+                return;
+            }
             state.q = mixmax_qvalues(
                 state.scores, labels, &model.pi0);
             state.pep = SvmRescorer::local_error_probabilities(
@@ -1109,6 +1148,11 @@ Summary run_streamed(const Config& config) {
                 ++retained;
             }
             next_compact += retained;
+            if (!state.model.model_valid) {
+                std::cerr << "Aerith warning: sample " << state.model.name
+                          << " has no usable SVM seed (" << state.model.warning
+                          << "); reporting 0 accepted PSMs for this sample.\n";
+            }
             summary.sample_models[state.file] = std::move(state.model);
             if (!config.filtered_only) {
                 spools[state.file] = {
@@ -1231,10 +1275,10 @@ Summary run_streamed(const Config& config) {
                     const auto& prefix = config.output_prefixes[file];
                     write_stream_score_table(
                         spools[file].target, prefix + "_target_psms.tsv",
-                        q, protein_filtered);
+                        q, protein_filtered, config.fixed_cam);
                     write_stream_score_table(
                         spools[file].decoy, prefix + "_decoy_psms.tsv",
-                        q, protein_filtered);
+                        q, protein_filtered, config.fixed_cam);
                 });
         }
     }
@@ -1290,8 +1334,6 @@ Summary run_streamed(const Config& config) {
     }
     return summary;
 }
-
-} // namespace
 
 Summary run(const Config& config) {
     const bool can_stream = config.stream_samples &&

@@ -1830,8 +1830,11 @@ double MS2Scan::scoreWeightSum(string *currentPeptide, int measuredCharge,
 }
 
 // for post score top N peptide by WDP in regular search
-double MS2Scan::scoreWeightSumHighMS2(string *currentPeptide, const int measuredCharge, vector<vector<double>> *vvdYionMass, vector<vector<double>> *vvdYionProb,
-									  vector<vector<double>> *vvdBionMass, vector<vector<double>> *vvdBionProb)
+double MS2Scan::scoreWeightSumHighMS2(const string *currentPeptide,
+		const int measuredCharge, const vector<vector<double>> *vvdYionMass,
+		const vector<vector<double>> *vvdYionProb,
+		const vector<vector<double>> *vvdBionMass,
+		const vector<vector<double>> *vvdBionProb)
 {
 	double dScore = 0;
 	int iPeptideLength = 0;
@@ -1842,7 +1845,7 @@ double MS2Scan::scoreWeightSumHighMS2(string *currentPeptide, const int measured
 			iPeptideLength = iPeptideLength + 1;
 		}
 	}
-	int i, j, iMostAbundantPeakIndex = 0;
+	int i, iMostAbundantPeakIndex = 0;
 	int n; // Ion number starting from one
 	int z; // charge state
 	vector<ProductIon> vFoundIons;
@@ -1901,30 +1904,36 @@ double MS2Scan::scoreWeightSumHighMS2(string *currentPeptide, const int measured
 		}
 	}
 
-	for (i = 0; i < (int)vFoundIons.size(); ++i)
+	// Complementarity depends only on ion type and ordinal, not charge.  Track
+	// observed b/y ordinals once instead of comparing every found ion pair.
+	std::vector<unsigned char> foundY(static_cast<size_t>(iPeptideLength + 1), 0);
+	std::vector<unsigned char> foundB(static_cast<size_t>(iPeptideLength + 1), 0);
+	for (ProductIon &ion : vFoundIons)
 	{
-		vFoundIons[i].setComplementaryFragmentObserved(false);
+		const int ionNumber = ion.getIonNumber();
+		if (ionNumber < 0 || ionNumber > iPeptideLength)
+			continue;
+		if (ion.getIonType() == 'y')
+			foundY[static_cast<size_t>(ionNumber)] = 1;
+		else if (ion.getIonType() == 'b')
+			foundB[static_cast<size_t>(ionNumber)] = 1;
 	}
-
-	for (i = 0; i < (int)vFoundIons.size(); ++i)
+	for (ProductIon &ion : vFoundIons)
 	{
-		for (j = i + 1; j < (int)vFoundIons.size(); ++j)
-		{
-			if (vFoundIons[i].getIonNumber() + vFoundIons[j].getIonNumber() == iPeptideLength)
-			{
-				if ((vFoundIons[i].getIonType() == 'y' && vFoundIons[j].getIonType() == 'b') || (vFoundIons[i].getIonType() == 'b' && vFoundIons[j].getIonType() == 'y'))
-				{
-					vFoundIons[i].setComplementaryFragmentObserved(true);
-					vFoundIons[j].setComplementaryFragmentObserved(true);
-				}
-			}
-		}
+		const int complement = iPeptideLength - ion.getIonNumber();
+		const bool observed = complement >= 0 && complement <= iPeptideLength &&
+			(ion.getIonType() == 'y'
+				? foundB[static_cast<size_t>(complement)] != 0
+				: ion.getIonType() == 'b' &&
+					foundY[static_cast<size_t>(complement)] != 0);
+		ion.setComplementaryFragmentObserved(observed);
 	}
 	for (i = 0; i < (int)vFoundIons.size(); ++i)
 	{
 		dAverageMZError += vFoundIons[i].getMZError();
 	}
-	dAverageMZError = dAverageMZError / (double)vFoundIons.size();
+	if (!vFoundIons.empty())
+		dAverageMZError /= static_cast<double>(vFoundIons.size());
 
 	for (i = 0; i < (int)vFoundIons.size(); ++i)
 	{

@@ -645,37 +645,50 @@ bool MVH::ScoreSequenceVsSpectrumSIP(string & currentPeptide, int precursorCharg
 			vvdBionProb, seq)) {
 		return false;
 	}
-	int totalPeaks = (int) seqIons->size();
-	char peakItr;
-	PeakList * pPeakList = Spectrum->pPeakList;
-	static thread_local vector<int> mvhKey;
-	mvhKey.assign(ProNovoConfig::NumIntensityClasses + 1, 0);
+	return ScoreIonsVsSpectrum(*seqIons, Spectrum, dMvh);
+}
 
-	for (int j = 0; j < (int) seqIons->size(); ++j) {
-		if (seqIons->at(j) < Spectrum->mzLowerBound || seqIons->at(j) > Spectrum->mzUpperBound) {
+bool MVH::ScoreIonsVsSpectrum(const vector<double> &sequenceIonMasses,
+		MS2Scan *Spectrum, double &dMvh) {
+	int totalPeaks = static_cast<int>(sequenceIonMasses.size());
+	PeakList * pPeakList = Spectrum->pPeakList;
+	const int intensityClassCount = ProNovoConfig::NumIntensityClasses;
+	constexpr size_t StackIntensityClasses = 16;
+	std::array<int, StackIntensityClasses> stackMvhKey{};
+	int *mvhKey = stackMvhKey.data();
+	if (static_cast<size_t>(intensityClassCount + 1) > stackMvhKey.size()) {
+		static thread_local vector<int> overflowMvhKey;
+		overflowMvhKey.assign(intensityClassCount + 1, 0);
+		mvhKey = overflowMvhKey.data();
+	}
+	const double fragmentTolerance =
+		ProNovoConfig::getMassAccuracyFragmentIon();
+
+	for (double ionMz : sequenceIonMasses) {
+		if (ionMz < Spectrum->mzLowerBound || ionMz > Spectrum->mzUpperBound) {
 			--totalPeaks;
 			continue;
 		}
-		peakItr = pPeakList->findNear(seqIons->at(j), ProNovoConfig::getMassAccuracyFragmentIon());
+		const char peakItr = pPeakList->findNear(ionMz, fragmentTolerance);
 		if (peakItr != pPeakList->end() && peakItr > 0) {
-			++(mvhKey.at(peakItr - 1));
+			++mvhKey[peakItr - 1];
 		} else {
-			++(mvhKey.at(ProNovoConfig::NumIntensityClasses));
+			++mvhKey[intensityClassCount];
 		}
 	}
 
 	double mvh = 0.0;
-	int fragmentsUnmatched = mvhKey.back();
+	const int fragmentsUnmatched = mvhKey[intensityClassCount];
 
 	if (fragmentsUnmatched != totalPeaks) {
-		int fragmentsPredicted = accumulate(mvhKey.begin(), mvhKey.end(), 0);
-		int fragmentsMatched = fragmentsPredicted - fragmentsUnmatched;
+		const int fragmentsPredicted = totalPeaks;
+		const int fragmentsMatched = fragmentsPredicted - fragmentsUnmatched;
 
 		if (fragmentsMatched >= ProNovoConfig::MinMatchedFragments) {
-			int numVoids = Spectrum->intenClassCounts->back();
-			int totalPeakBins = numVoids + pPeakList->size();
+			const int numVoids = Spectrum->intenClassCounts->back();
+			const int totalPeakBins = numVoids + pPeakList->size();
 			for (int i = 0; i < (int) Spectrum->intenClassCounts->size(); ++i) {
-				mvh += lnCombin(Spectrum->intenClassCounts->at(i), mvhKey.at(i));
+				mvh += lnCombin(Spectrum->intenClassCounts->at(i), mvhKey[i]);
 			}
 			mvh -= lnCombin(totalPeakBins, fragmentsPredicted);
 			dMvh = -mvh;
