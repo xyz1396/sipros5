@@ -32,6 +32,23 @@ int main() {
     assert(aerith::stripped_peptide("[%M~PEPTIDE]R") == "MPEPTIDE");
     assert(aerith::stripped_peptide("K[PEPN!IDE]") == "PEPNIDE");
     assert(aerith::stripped_peptide("[PEPTIDE]R") == "PEPTIDE");
+    assert(aerith::canonical_peptide_identity("[PEPIJLE]R") == "PEPLLLE");
+    aerith::Dataset prediction_catalog;
+    std::unordered_map<std::string, std::size_t> prediction_rows;
+    aerith::Psm decoy_prediction;
+    decoy_prediction.peptide = "R[COLLIDE]F";
+    decoy_prediction.charge = 2;
+    decoy_prediction.label = -1;
+    aerith::upsert_prediction_exemplar(
+        prediction_catalog, prediction_rows, "COLLIDE/2", decoy_prediction);
+    aerith::Psm target_prediction = decoy_prediction;
+    target_prediction.peptide = "K[COLLIDE]R";
+    target_prediction.label = 1;
+    aerith::upsert_prediction_exemplar(
+        prediction_catalog, prediction_rows, "COLLIDE/2", target_prediction);
+    assert(prediction_catalog.rows.size() == 1);
+    assert(prediction_catalog.rows.front().label == 1);
+    assert(prediction_catalog.rows.front().peptide == "K[COLLIDE]R");
     const auto rendered_modifications =
         aerith::modification_info("K[PEPTM~IDC]R", true);
     assert(rendered_modifications.sequence == "PEPTMIDC");
@@ -152,25 +169,28 @@ int main() {
     const auto decoy0 = collision_root / "decoy0.pin";
     const auto target1 = collision_root / "target1.pin";
     const auto decoy1 = collision_root / "decoy1.pin";
-    write_pin(target0, {{
-        "sample0.1.1", "1", "1", "10.0", "K[PEPTM~IDE]R", "{sp|P1|ONE}"}});
+    write_pin(target0, {
+        {"sample0.1.1", "1", "1", "10.0", "K[PEPTM~IDE]R", "{sp|P1|ONE}"},
+        {"sample0.4.1", "1", "4", "10.0", "K[PEPI]R", "{sp|P3|ISO}"}});
     write_pin(decoy0, {
         {"sample0.1.1", "-1", "1", "10.0", "R[PEPTMIDE]K", "{Decoy_P1}"},
+        {"sample0.4.1", "-1", "4", "10.0", "R[PEPJ]K", "{Decoy_P3}"},
         {"sample0.2.1", "-1", "2", "9.0", "R[UNIQUE]K", "{Decoy_P2}"}});
     write_pin(target1, {{
         "sample1.1.1", "1", "1", "10.0", "K[ANOTHER]R", "{sp|P2|TWO}"}});
     write_pin(decoy1, {
         {"sample1.2.1", "-1", "2", "9.0", "R[PEPTMIDE]K", "{Decoy_P1}"},
+        {"sample1.4.1", "-1", "4", "9.0", "R[PEPL]K", "{Decoy_P3}"},
         {"sample1.3.1", "-1", "3", "8.0", "R[ANOTHER]K", "{Decoy_P2}"}});
     aerith::Config collision_config;
     collision_config.target_pins = {target0.string(), target1.string()};
     collision_config.decoy_pins = {decoy0.string(), decoy1.string()};
     const auto collision_data = aerith::PinReader::read(collision_config);
-    assert(collision_data.rows.size() == 3);
-    assert(collision_data.removed_decoy_peptide_collisions == 3);
+    assert(collision_data.rows.size() == 4);
+    assert(collision_data.removed_decoy_peptide_collisions == 5);
     assert(std::count_if(
         collision_data.rows.begin(), collision_data.rows.end(),
-        [](const auto& row) { return row.label == 1; }) == 2);
+        [](const auto& row) { return row.label == 1; }) == 3);
     assert(std::count_if(
         collision_data.rows.begin(), collision_data.rows.end(),
         [](const auto& row) { return row.label == -1; }) == 1);
@@ -828,6 +848,9 @@ int main() {
     assert(log_text.find("Sample: SIP-Negative-control") ==
            std::string::npos);
     assert(log_text.find("Timing by stage (seconds)") != std::string::npos);
+    assert(log_text.find("Protein assembly total") != std::string::npos);
+    assert(log_text.find("Workflow coordination and timing overhead") !=
+           std::string::npos);
     assert(log_text.find("Quantification total") !=
            std::string::npos);
     assert(log_text.find("Trace identified XICs + detect peaks/intensity") !=
@@ -843,6 +866,40 @@ int main() {
            std::string::npos);
     assert(log_text.find("Protein assembly optimization detail") ==
            std::string::npos);
+    double displayed_stage_wall_sum = 0.0;
+    double displayed_stage_cpu_sum = 0.0;
+    double displayed_total_wall = 0.0;
+    double displayed_total_cpu = 0.0;
+    bool in_timing_table = false;
+    std::istringstream timing_lines(log_text);
+    std::string timing_line;
+    while (std::getline(timing_lines, timing_line)) {
+        if (timing_line == "Timing by stage (seconds)") {
+            in_timing_table = true;
+            continue;
+        }
+        if (!in_timing_table) continue;
+        if (timing_line.rfind("  Overall OpenMP efficiency", 0) == 0) break;
+        if (timing_line.empty() || timing_line.front() == ' ' ||
+            timing_line.rfind("Stage", 0) == 0 ||
+            timing_line.front() == '-') {
+            continue;
+        }
+        assert(timing_line.size() >= 92);
+        auto label = timing_line.substr(0, 64);
+        label.erase(label.find_last_not_of(' ') + 1);
+        const double wall = std::stod(timing_line.substr(64, 14));
+        const double cpu = std::stod(timing_line.substr(78, 14));
+        if (label == "Total") {
+            displayed_total_wall = wall;
+            displayed_total_cpu = cpu;
+        } else {
+            displayed_stage_wall_sum += wall;
+            displayed_stage_cpu_sum += cpu;
+        }
+    }
+    assert(std::abs(displayed_stage_wall_sum - displayed_total_wall) < 1e-9);
+    assert(std::abs(displayed_stage_cpu_sum - displayed_total_cpu) < 1e-9);
     assert(log_text.find("aerith.log") == std::string::npos);
     aerith::Dataset sip_data;
     sip_data.rows = data.rows;

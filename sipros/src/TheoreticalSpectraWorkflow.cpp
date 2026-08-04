@@ -619,7 +619,7 @@ std::string peptideMassClassKey(const std::string &peptide)
 	std::string key = peptide;
 	for (char &residue : key)
 	{
-		if (residue == 'I')
+		if (residue == 'I' || residue == 'J')
 		{
 			residue = 'L';
 		}

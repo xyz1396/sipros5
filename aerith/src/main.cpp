@@ -5,6 +5,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -47,6 +48,9 @@ void CommandLine::usage(std::ostream& out) {
         << "  --spectrum-model FILE    DIA-NN TorchScript model (default: beside aerith)\n"
         << "  --rt-model FILE          DIA-NN RT TorchScript model (default: beside aerith)\n"
         << "  --prediction-cache FILE  Reuse/save generated spectrum and RT features\n"
+        << "  --populate-prediction-cache  Predict/cache only; do not filter or write reports\n"
+        << "  --prediction-cache-only  Require every prediction to be cached; never run a model\n"
+        << "  --prediction-cache-targets-only  Persist target predictions, not regular decoys\n"
         << "  --no-streaming           Keep all sample PSMs in RAM (diagnostic)\n"
         << "  --sample-parallelism INT Concurrent streamed samples (default 3; raises RAM)\n"
         << "  --no-predicted-rt        Use legacy Aerith RT model instead of DIA-NN RT\n"
@@ -102,7 +106,8 @@ unsigned int CommandLine::unsigned_number(
 
 void CommandLine::validate(const aerith::Config& config, int& exit_status) {
     const bool paired = !config.target_pins.empty() || !config.decoy_pins.empty();
-    if ((config.inputs.empty() && !paired) || config.output_prefixes.empty()) {
+    if ((config.inputs.empty() && !paired) ||
+        (!config.populate_prediction_cache && config.output_prefixes.empty())) {
         usage(std::cerr);
         exit_status = EXIT_FAILURE;
         return;
@@ -111,7 +116,8 @@ void CommandLine::validate(const aerith::Config& config, int& exit_status) {
         throw std::runtime_error("Use either --input or target/decoy PIN pairs, not both");
     }
     if (paired && (config.target_pins.size() != config.decoy_pins.size() ||
-                   config.target_pins.size() != config.output_prefixes.size())) {
+                   (!config.populate_prediction_cache &&
+                    config.target_pins.size() != config.output_prefixes.size()))) {
         throw std::runtime_error(
             "Repeat --target-pin, --decoy-pin, and --output-prefix equally");
     }
@@ -120,13 +126,20 @@ void CommandLine::validate(const aerith::Config& config, int& exit_status) {
         throw std::runtime_error("Repeat --spectra exactly once per input sample");
     }
     if (!paired && config.output_prefixes.size() != 1 &&
-        config.output_prefixes.size() != config.inputs.size()) {
+        config.output_prefixes.size() != config.inputs.size() &&
+        !config.populate_prediction_cache) {
         throw std::runtime_error(
             "Use one aggregate --output-prefix or repeat it once per --input");
     }
     if (config.sample_parallelism == 0) {
         throw std::runtime_error(
             "--sample-parallelism must be a positive integer");
+    }
+    if ((config.populate_prediction_cache || config.prediction_cache_only) &&
+        config.prediction_cache_path.empty()) {
+        throw std::runtime_error(
+            "--populate-prediction-cache and --prediction-cache-only require "
+            "--prediction-cache");
     }
     if (!(config.q_threshold > 0.0 && config.q_threshold <= 1.0) ||
         !(config.train_fdr > 0.0 && config.train_fdr <= 1.0) ||
@@ -234,6 +247,12 @@ bool CommandLine::parse(
             config.rt_model_path = value("--rt-model");
         } else if (arg == "--prediction-cache") {
             config.prediction_cache_path = value("--prediction-cache");
+        } else if (arg == "--populate-prediction-cache") {
+            config.populate_prediction_cache = true;
+        } else if (arg == "--prediction-cache-only") {
+            config.prediction_cache_only = true;
+        } else if (arg == "--prediction-cache-targets-only") {
+            config.prediction_cache_targets_only = true;
         } else if (arg == "--no-streaming") {
             config.stream_samples = false;
         } else if (arg == "--sample-parallelism") {
@@ -364,6 +383,80 @@ int main(int argc, char** argv) {
         int exit_status = EXIT_SUCCESS;
         if (!CommandLine::parse(argc, argv, config, exit_status)) {
             return exit_status;
+        }
+        if (config.populate_prediction_cache) {
+            const auto summary = aerith::populate_prediction_cache(config);
+            const auto print_timing = [&](const std::string& label,
+                                          const aerith::StageTiming& timing) {
+                const double speedup = timing.wall_seconds > 0.0
+                    ? timing.cpu_seconds / timing.wall_seconds : 0.0;
+                std::cout << std::left << std::setw(64) << label
+                          << std::right << std::setw(14)
+                          << timing.wall_seconds
+                          << std::setw(14) << timing.cpu_seconds
+                          << std::setw(11) << speedup << "x\n";
+            };
+            const auto displayed_seconds = [](double seconds) {
+                constexpr double scale = 1000000.0;
+                return std::round(seconds * scale) / scale;
+            };
+            aerith::StageTiming accounted_timing;
+            const auto print_top_level_timing = [&](
+                const std::string& label,
+                const aerith::StageTiming& timing) {
+                print_timing(label, timing);
+                accounted_timing.wall_seconds +=
+                    displayed_seconds(timing.wall_seconds);
+                accounted_timing.cpu_seconds +=
+                    displayed_seconds(timing.cpu_seconds);
+            };
+            std::cout << "Aerith prediction cache\n"
+                      << "========================================================================\n"
+                      << "  Peptide-charge forms              "
+                      << summary.peptide_charge_forms << '\n'
+                      << "  Spectrum source                   "
+                      << (summary.spectrum_device.empty()
+                              ? "disabled" : summary.spectrum_device) << '\n'
+                      << "  RT source                         "
+                      << (summary.rt_device.empty()
+                              ? "disabled" : summary.rt_device) << "\n\n"
+                      << "Timing by stage (seconds)\n"
+                      << std::left << std::setw(64) << "Stage"
+                      << std::right << std::setw(14) << "Wall time"
+                      << std::setw(14) << "CPU time"
+                      << std::setw(11) << "Speedup" << '\n'
+                      << std::string(103, '-') << '\n';
+            print_top_level_timing(
+                "Discover unique peptide-charge forms",
+                summary.discovery_timing);
+            print_top_level_timing(
+                "Load/predict spectra and update .spectrum cache",
+                summary.spectrum_stage_timing);
+            print_timing(
+                "  DIA-NN spectra model (" +
+                    (summary.spectrum_device.empty()
+                         ? std::string("disabled")
+                         : summary.spectrum_device) + ")",
+                summary.spectrum_timing);
+            print_top_level_timing(
+                "Load/predict RT and update .rt cache",
+                summary.rt_stage_timing);
+            print_timing(
+                "  DIA-NN RT model (" +
+                    (summary.rt_device.empty()
+                         ? std::string("disabled")
+                         : summary.rt_device) + ")",
+                summary.rt_timing);
+            const aerith::StageTiming coordination_timing{
+                displayed_seconds(summary.total_timing.wall_seconds) -
+                    accounted_timing.wall_seconds,
+                displayed_seconds(summary.total_timing.cpu_seconds) -
+                    accounted_timing.cpu_seconds};
+            print_timing(
+                "Prediction cache coordination and timing overhead",
+                coordination_timing);
+            print_timing("Prediction cache total", summary.total_timing);
+            return EXIT_SUCCESS;
         }
         const auto summary = aerith::run(config);
         std::ostringstream report;

@@ -24,6 +24,12 @@
 
 namespace aerith {
 
+void canonicalize_isobaric_residues(std::string& sequence) {
+    for (char& residue : sequence) {
+        if (residue == 'I' || residue == 'J') residue = 'L';
+    }
+}
+
 struct FastaEntry {
     std::string protein;
     std::string header;
@@ -400,10 +406,10 @@ double coverage(const FastaEntry& entry, const std::set<std::string>& peptides) 
     if (entry.sequence.empty()) return 0.0;
     std::vector<bool> covered(entry.sequence.size(), false);
     auto normalized_protein = entry.sequence;
-    std::replace(normalized_protein.begin(), normalized_protein.end(), 'I', 'L');
+    canonicalize_isobaric_residues(normalized_protein);
     for (const auto& peptide : peptides) {
         auto normalized_peptide = peptide;
-        std::replace(normalized_peptide.begin(), normalized_peptide.end(), 'I', 'L');
+        canonicalize_isobaric_residues(normalized_peptide);
         std::size_t position = 0;
         while (!normalized_peptide.empty() &&
                (position = normalized_protein.find(normalized_peptide, position)) !=
@@ -440,8 +446,8 @@ std::string join_values(const std::vector<std::string>& values) {
 std::pair<std::size_t, std::size_t> protein_coordinates(
     const FastaEntry& entry, std::string peptide) {
     auto protein = entry.sequence;
-    std::replace(protein.begin(), protein.end(), 'I', 'L');
-    std::replace(peptide.begin(), peptide.end(), 'I', 'L');
+    canonicalize_isobaric_residues(protein);
+    canonicalize_isobaric_residues(peptide);
     const auto position = protein.find(peptide);
     if (position == std::string::npos) return {0, 0};
     return {position + 1, position + peptide.size()};

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -24,6 +25,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import command_runner as command_runner_module
 import filter as filter_module
+import main as main_module
 import search as search_module
 import thread_allocation as allocation_module
 
@@ -582,6 +584,8 @@ class WorkflowAllocationTests(unittest.TestCase):
             workflow.fixedPtms = ["default", "carbamidomethyl"]
             workflow.dryrun = False
             workflow.resolve_or_convert_unlabeled_hdf5 = lambda: "unlabeled.h5"
+            Path(workflow.generatedSpectraDir).mkdir(parents=True)
+            Path(workflow.generatedSpectraDir, "sipros_workflow.log").touch()
             captured: list[str] = []
 
             def fake_run(command: str, threads: int) -> None:
@@ -605,6 +609,114 @@ class WorkflowAllocationTests(unittest.TestCase):
             self.assertEqual(fixed_ptms, ["default", "carbamidomethyl"])
             self.assertEqual(
                 arguments[arguments.index("--envelope-top-n") + 1], "3"
+            )
+
+    def test_fast_mode_caches_predictions_and_writes_sfi_in_spectra_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as output:
+            workflow = object.__new__(main_module.SIPROSWorkflow)
+            workflow.args = SimpleNamespace(
+                output=output,
+                dryrun=True,
+                element="C13",
+                negative_control="X1,X2,X3",
+            )
+            workflow.logger = mock.Mock()
+            regular = mock.Mock()
+            regular.base_names = ["T1", "X1"]
+            regular.hdf5_paths = {"T1": "T1.h5", "X1": "X1.h5"}
+            spectra = mock.Mock()
+            post_filters = [mock.Mock(), mock.Mock()]
+            workflow.make_search = mock.Mock(side_effect=[regular, spectra])
+            workflow.make_filter = mock.Mock(side_effect=post_filters)
+
+            result = workflow.run_fast_sip_search()
+
+            self.assertIs(result, spectra)
+            self.assertTrue(Path(output, "regular").is_dir())
+            self.assertTrue(Path(output, "spectra_search").is_dir())
+            self.assertFalse(Path(output, "spectra_library").exists())
+            spectra_output = Path(output, "spectra_search")
+            self.assertEqual(spectra.generatedSpectraDir, str(spectra_output))
+            self.assertTrue(
+                workflow.make_filter.call_args_list[0].kwargs[
+                    "assemble_proteins"
+                ]
+            )
+            self.assertTrue(
+                workflow.make_filter.call_args_list[0].kwargs[
+                    "include_spectra"
+                ]
+            )
+            self.assertTrue(
+                workflow.make_filter.call_args_list[1].kwargs[
+                    "assemble_proteins"
+                ]
+            )
+            regular.run.assert_called_once_with()
+            spectra.reverse_fasta_sequences.assert_called_once_with()
+            for post_filter in post_filters:
+                post_filter.run.assert_called_once_with()
+            self.assertEqual(
+                post_filters[0].populate_prediction_cache.call_count, 2
+            )
+            post_filters[1].populate_prediction_cache.assert_not_called()
+            target_catalog = Path(
+                post_filters[0].populate_prediction_cache
+                .call_args_list[0].args[0][0]
+            )
+            decoy_catalog = Path(
+                post_filters[0].populate_prediction_cache
+                .call_args_list[1].args[0][0]
+            )
+            self.assertEqual(
+                target_catalog.name,
+                "spectra_target_prediction_catalog.tsv",
+            )
+            self.assertEqual(
+                decoy_catalog.name,
+                "spectra_decoy_prediction_catalog.tsv",
+            )
+            self.assertEqual(target_catalog.parent, decoy_catalog.parent)
+            self.assertTrue(
+                target_catalog.parent.name.startswith(
+                    "sipros5-prediction-catalog-"
+                )
+            )
+            self.assertFalse(target_catalog.parent.exists())
+            self.assertEqual(
+                post_filters[0].populate_prediction_cache.call_args_list[0]
+                .kwargs,
+                {"cacheOnly": True},
+            )
+            self.assertEqual(
+                post_filters[0].populate_prediction_cache.call_args_list[1]
+                .kwargs,
+                {"targetsOnly": False},
+            )
+            cache_path = str(
+                Path(output, "regular", "regular_search_predictions")
+            )
+            self.assertEqual(
+                workflow.make_filter.call_args_list[0].kwargs[
+                    "prediction_cache_path"
+                ],
+                cache_path,
+            )
+            self.assertTrue(
+                workflow.make_filter.call_args_list[0].kwargs[
+                    "prediction_cache_targets_only"
+                ]
+            )
+            self.assertEqual(
+                workflow.make_filter.call_args_list[1].kwargs[
+                    "prediction_cache_path"
+                ],
+                cache_path,
+            )
+            self.assertTrue(
+                workflow.make_filter.call_args_list[1].kwargs[
+                    "prediction_cache_only"
+                ]
             )
 
     def test_spectra_generation_accepts_recursive_hdf5_directory(self) -> None:
@@ -741,6 +853,7 @@ class WorkflowAllocationTests(unittest.TestCase):
         workflow.logger = mock.Mock()
         workflow.ignorePCT = False
         workflow.dryrun = False
+        workflow.sampleParallelism = 5
         workflow.spectraPaths = ["/spectra/one.h5", "/spectra/two.h5", "/spectra/three.h5"]
         captured: list[tuple[str, dict[str, str], int]] = []
 
@@ -769,6 +882,9 @@ class WorkflowAllocationTests(unittest.TestCase):
         )
         self.assertEqual(
             arguments[arguments.index("--quant-top-isotopes") + 1], "6"
+        )
+        self.assertEqual(
+            arguments[arguments.index("--sample-parallelism") + 1], "5"
         )
         self.assertEqual(
             arguments[arguments.index("--database") + 1], "target.fasta"
@@ -812,6 +928,9 @@ class WorkflowAllocationTests(unittest.TestCase):
         workflow.quantTopIsotopes = 6
         workflow.negative_control = ""
         workflow.spectraPaths = []
+        workflow.predictionCachePath = "/output/predictions"
+        workflow.predictionCacheOnly = True
+        workflow.predictionCacheTargetsOnly = False
 
         arguments = shlex.split(workflow.command())
         self.assertEqual(arguments.count("--input"), 0)
@@ -822,6 +941,35 @@ class WorkflowAllocationTests(unittest.TestCase):
         self.assertIn("/output/two/two_target.pin", arguments)
         self.assertIn("/output/two/two_decoy.pin", arguments)
         self.assertIn("--filtered-only", arguments)
+        self.assertEqual(
+            arguments[arguments.index("--prediction-cache") + 1],
+            "/output/predictions",
+        )
+        self.assertIn("--prediction-cache-only", arguments)
+
+    def test_prediction_cache_population_uses_filtered_psms_and_spectra(self) -> None:
+        workflow = object.__new__(filter_module.filter)
+        workflow.aerithPath = "aerith"
+        workflow.predictionCachePath = "/output/predictions"
+        workflow.sipIsotope = "C13"
+        workflow.fixedPtms = []
+        workflow.ptms = []
+        workflow.maxPtmCount = None
+        workflow.productTopIsotopes = 3
+        workflow.spectraPaths = ["one.h5", "two.h5"]
+
+        arguments = shlex.split(workflow.prediction_cache_command([
+            "one_filtered_psms.tsv", "two_filtered_psms.tsv"
+        ]))
+
+        self.assertIn("--populate-prediction-cache", arguments)
+        self.assertNotIn("--prediction-cache-only", arguments)
+        self.assertEqual(arguments.count("--input"), 2)
+        self.assertEqual(arguments.count("--spectra"), 2)
+        self.assertEqual(
+            arguments[arguments.index("--prediction-cache") + 1],
+            "/output/predictions",
+        )
 
     def test_negative_control_is_passed_to_native_aerith(self) -> None:
         workflow = object.__new__(filter_module.filter)
@@ -914,6 +1062,7 @@ class InputDiscoveryTests(unittest.TestCase):
         workflow.base_names = []
         workflow.base_names_of_raw = []
         workflow.base_names_of_hdf5 = []
+        workflow.negative_control = ""
         return workflow
 
     def test_comma_separated_raw_list_is_split_before_suffix_detection(
@@ -939,6 +1088,32 @@ class InputDiscoveryTests(unittest.TestCase):
             self.assertEqual(
                 workflow.base_names,
                 ["target", "control1", "control2"],
+            )
+
+    def test_file_lists_are_multiline_and_precede_negative_controls(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [root / "target.raw", root / "control.raw"]
+            for path in paths:
+                path.touch()
+            workflow = self.make_search(",".join(map(str, paths)))
+            workflow.negative_control = "control"
+            workflow.logger = mock.Mock()
+
+            workflow.getInputFiles()
+
+            messages = [
+                call.args[0] for call in workflow.logger.info.call_args_list
+            ]
+            self.assertEqual(
+                messages,
+                [
+                    "Input is a comma-separated file list with 2 entries",
+                    f"RAW files (2):\n  {paths[0]}\n  {paths[1]}",
+                    "HDF5 files (0): none",
+                    "Negative control samples (1):\n  control",
+                ],
             )
 
     def test_missing_file_in_comma_separated_list_is_rejected(self) -> None:

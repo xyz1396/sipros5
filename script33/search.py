@@ -172,12 +172,16 @@ class search:
 
     def input_entries(self, input_path: str) -> list[str]:
         if ',' in input_path:
-            self.logger.info(f'{input_path} is a file list')
-            return [
+            entries = [
                 item.strip()
                 for item in input_path.split(',')
                 if item.strip()
             ]
+            self.logger.info(
+                f'Input is a comma-separated file list with '
+                f'{len(entries)} entries'
+            )
+            return entries
         path = Path(input_path)
         if self.is_raw_input(input_path) or self.is_hdf5_input(input_path):
             return [input_path]
@@ -213,8 +217,34 @@ class search:
         if len(self.raw_files) == 0 and len(self.hdf5_input_files) == 0:
             self.logger.error(f'No raw/.d/.d.zip or Raxport HDF5 files found in {self.inputPath}')
             raise SystemExit(1)
-        self.logger.info(f'raw files: {self.raw_files}')
-        self.logger.info(f'HDF5 files: {self.hdf5_input_files}')
+        raw_file_list = '\n'.join(f'  {path}' for path in self.raw_files)
+        hdf5_file_list = '\n'.join(
+            f'  {path}' for path in self.hdf5_input_files
+        )
+        raw_file_suffix = f'\n{raw_file_list}' if raw_file_list else ' none'
+        hdf5_file_suffix = (
+            f'\n{hdf5_file_list}' if hdf5_file_list else ' none'
+        )
+        self.logger.info(
+            f'RAW files ({len(self.raw_files)}):{raw_file_suffix}'
+        )
+        self.logger.info(
+            f'HDF5 files ({len(self.hdf5_input_files)}):{hdf5_file_suffix}'
+        )
+
+        negative_controls = [
+            sample.strip()
+            for sample in (self.negative_control or '').split(',')
+            if sample.strip()
+        ]
+        if negative_controls:
+            control_list = '\n'.join(
+                f'  {sample}' for sample in negative_controls
+            )
+            self.logger.info(
+                f'Negative control samples ({len(negative_controls)}):\n'
+                f'{control_list}'
+            )
 
     def create_sample_directories(self):
         for base_name in self.base_names:
@@ -535,15 +565,11 @@ class search:
                f'-b {self.q(sip_range)} -s {self.q(sip_step)} '
                f'--decoy -t {self.threadNumber}'
                f' --envelope-top-n {getattr(self, "sfiEnvelopeTopN", 3)}'
+               f'{(" --prediction-catalog-dir " + self.q(self.predictionCatalogDir)) if getattr(self, "predictionCatalogDir", "") else ""}'
                f'{self.fixed_ptm_args()}')
         if not self.dryrun:
             self.run_command(cmd, threads=self.threadNumber)
             require_target_decoy_pair(self.generatedSpectraDir)
-            non_sfi = [path for path in Path(self.generatedSpectraDir).iterdir()
-                       if path.is_file() and path.suffix.lower() != '.sfi']
-            if non_sfi:
-                self.logger.error(f'Unexpected non-SFI spectra intermediates generated: {non_sfi}')
-                raise SystemExit(1)
         return self.generatedSpectraDir
 
     def search_spectra_samples(self, spectra_dir: str):

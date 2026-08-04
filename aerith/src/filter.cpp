@@ -490,8 +490,12 @@ Summary run_monolithic(const Config& config) {
     const auto spectrum_entropy_begin = Clock::now();
     const std::clock_t spectrum_entropy_cpu_begin = std::clock();
     const std::size_t base_feature_count = data.feature_names.size();
-    const bool predictions_cached = load_prediction_cache(
-        config, data, base_feature_count);
+    // The legacy row-wise feature cache cannot exclude regular decoys. Fast
+    // SIP target-only caching therefore uses only the keyed spectrum/RT
+    // stores, including for a one-sample monolithic run.
+    const bool predictions_cached =
+        !config.prediction_cache_targets_only &&
+        load_prediction_cache(config, data, base_feature_count);
     if (!predictions_cached) {
         SpectralEntropyFeature::add(config, data);
     }
@@ -504,7 +508,9 @@ Summary run_monolithic(const Config& config) {
     const std::clock_t predicted_rt_cpu_begin = std::clock();
     if (!predictions_cached) {
         PredictedRetentionTimeFeature::add(config, data);
-        save_prediction_cache(config, data, base_feature_count);
+        if (!config.prediction_cache_targets_only) {
+            save_prediction_cache(config, data, base_feature_count);
+        }
     }
     const std::clock_t predicted_rt_cpu_end = std::clock();
     const auto predicted_rt_end = Clock::now();
@@ -773,7 +779,10 @@ Config streamed_sample_config(const Config& config, std::size_t sample) {
     result.target_pins = {config.target_pins.at(sample)};
     result.decoy_pins = {config.decoy_pins.at(sample)};
     result.output_prefixes = {config.output_prefixes.at(sample)};
-    result.spectrum_paths = {config.spectrum_paths.at(sample)};
+    result.spectrum_paths.clear();
+    if (!config.spectrum_paths.empty()) {
+        result.spectrum_paths = {config.spectrum_paths.at(sample)};
+    }
     result.prediction_cache_path.clear();
     return result;
 }
@@ -1336,13 +1345,48 @@ Summary run_streamed(const Config& config) {
 }
 
 Summary run(const Config& config) {
+    const bool spectra_match_samples = config.spectrum_paths.empty() ||
+        config.target_pins.size() == config.spectrum_paths.size();
     const bool can_stream = config.stream_samples &&
         config.target_pins.size() > 1 &&
         config.target_pins.size() == config.decoy_pins.size() &&
         config.target_pins.size() == config.output_prefixes.size() &&
-        config.target_pins.size() == config.spectrum_paths.size() &&
+        spectra_match_samples &&
         config.predict_rt;
     return can_stream ? run_streamed(config) : run_monolithic(config);
+}
+
+PredictionCacheSummary populate_prediction_cache(const Config& config) {
+    const auto total_begin = Clock::now();
+    const auto total_cpu_begin = std::clock();
+    initialize_sip_isotope_model(config);
+    const auto discovery_begin = Clock::now();
+    const auto discovery_cpu_begin = std::clock();
+    std::unordered_set<std::string> target_peptides;
+    auto catalog = PinReader::discover_predictions(config, target_peptides);
+
+    PredictionCacheSummary summary;
+    summary.peptide_charge_forms = catalog.rows.size();
+    add_timing(
+        summary.discovery_timing, discovery_begin, discovery_cpu_begin);
+    const auto spectrum_begin = Clock::now();
+    const auto spectrum_cpu_begin = std::clock();
+    auto spectra = SpectralEntropyFeature::predict(config, catalog);
+    add_timing(
+        summary.spectrum_stage_timing, spectrum_begin, spectrum_cpu_begin);
+    summary.spectrum_device = spectra.device();
+    summary.spectrum_timing = spectra.timing();
+    const auto rt_begin = Clock::now();
+    const auto rt_cpu_begin = std::clock();
+    auto rt = PredictedRetentionTimeFeature::predict(config, catalog);
+    add_timing(summary.rt_stage_timing, rt_begin, rt_cpu_begin);
+    summary.rt_device = rt.device();
+    summary.rt_timing = rt.timing();
+    summary.total_timing = {
+        std::chrono::duration<double>(Clock::now() - total_begin).count(),
+        static_cast<double>(std::clock() - total_cpu_begin) /
+            CLOCKS_PER_SEC};
+    return summary;
 }
 
 } // namespace aerith

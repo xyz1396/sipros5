@@ -771,4 +771,12 @@ std::string stripped_peptide(const std::string& peptide) {
     return RetentionTimeModel::peptide_sequence(peptide);
 }
 
+std::string canonical_peptide_identity(const std::string& peptide) {
+    auto sequence = stripped_peptide(peptide);
+    for (char& residue : sequence) {
+        if (residue == 'I' || residue == 'J') residue = 'L';
+    }
+    return sequence;
+}
+
 } // namespace aerith

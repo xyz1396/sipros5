@@ -214,6 +214,7 @@ struct Args
 	std::string inputPath;
 	std::string hdf5Path;
 	std::string outputPath;
+	std::string predictionCatalogDirectory;
 	char sipAtom = '\0';
 	int sipIsotopeMassNumber = -1;
 	double fixedSipAbundancePct = 0.0;
@@ -242,6 +243,7 @@ struct PsmRow
 	std::string retentionText = "0";
 	double probability = 0.0;
 	double svmScore = -std::numeric_limits<double>::infinity();
+	double wdpScore = -std::numeric_limits<double>::infinity();
 	size_t order = 0;
 };
 
@@ -409,12 +411,13 @@ std::string peptideMassClassKey(const std::string &peptide);
 void printUsage(const char *prog)
 {
 	std::cerr << "Usage: " << prog
-			  << " -i <psm.tsv|frag_dir> -f <h5_file|h5_dir> -o <output.sfi|output_dir/>"
+			  << " -i <*_filtered_psms.tsv|filtered_dir> -f <h5_file|h5_dir> -o <output.sfi|output_dir/>"
 			  << " -a <SIP atom/isotope, e.g. C13,H2,O18,N15,S34>"
 			  << " [-b <fixed SIP pct|lower-upper, default 0-100>] [-s|--step <pct, default 1.0>]"
 			  << " [-p <prob cutoff, default 0.01>]"
 			  << " [--ppm <match tolerance, default 10>] [--min-matched-envelopes <N, default 3>]"
 			  << " [--envelope-top-n <N, default 3>]"
+			  << " [--prediction-catalog-dir <temporary directory>]"
 			  << " [--decoy] [--decoy-seed <N, default 1>]"
 			  << " [--fixed-ptm <name|default|none|all>] [-t <threads>]\n";
 	std::cerr << "HDF5 MS2 matching is always performed at the natural-abundance C13 baseline; -b controls shifted output abundance(s).\n";
@@ -619,6 +622,14 @@ bool parseArgs(int argc, char **argv, Args &args)
 				std::cerr << "Invalid SFI envelope top-N peak count.\n";
 				return false;
 			}
+		}
+		else if (opt == "--prediction-catalog-dir")
+		{
+			if (!requireValue(opt))
+			{
+				return false;
+			}
+			args.predictionCatalogDirectory = argv[++i];
 		}
 		else if (opt == "--fixed-ptm")
 		{
@@ -854,45 +865,46 @@ std::vector<fs::path> collectPsmFiles(const std::string &inputPath)
 	}
 
 	std::vector<fs::path> files;
+	const std::string filteredSuffix = "_filtered_psms.tsv";
+	const auto isFilteredPsm = [&](const fs::path &candidate)
+	{
+		const std::string filename = candidate.filename().string();
+		return filename.size() >= filteredSuffix.size() &&
+			filename.compare(filename.size() - filteredSuffix.size(),
+				filteredSuffix.size(), filteredSuffix) == 0 &&
+			filename != "SIP_filtered_psms.tsv";
+	};
 	if (fs::is_regular_file(path))
 	{
+		if (!isFilteredPsm(path))
+		{
+			throw std::runtime_error(
+				"Experimental SFI input must be an Aerith "
+				"*_filtered_psms.tsv file: " + inputPath);
+		}
 		files.push_back(path);
 	}
 	else if (fs::is_directory(path))
 	{
 		std::vector<fs::path> filteredFiles;
-		std::vector<fs::path> legacyFiles;
-		const std::string filteredSuffix = "_filtered_psms.tsv";
 		for (const auto &entry : fs::recursive_directory_iterator(path))
 		{
 			if (!entry.is_regular_file())
 			{
 				continue;
 			}
-			const std::string filename = entry.path().filename().string();
-			if (filename.size() >= filteredSuffix.size() &&
-				filename.compare(filename.size() - filteredSuffix.size(),
-					filteredSuffix.size(), filteredSuffix) == 0 &&
-				filename != "SIP_filtered_psms.tsv")
+			if (isFilteredPsm(entry.path()))
 			{
 				filteredFiles.push_back(entry.path());
 			}
-			else if (filename == "psm.tsv")
-			{
-				legacyFiles.push_back(entry.path());
-			}
 		}
-		// Aerith-filtered PSMs are the authoritative fast-SIP input.  Do not
-		// combine them with legacy protein-report psm.tsv files from the same
-		// workflow tree, which would duplicate accepted PSMs.
-		files = filteredFiles.empty()
-			? std::move(legacyFiles) : std::move(filteredFiles);
+		files = std::move(filteredFiles);
 	}
 	std::sort(files.begin(), files.end());
 	if (files.empty())
 	{
 		throw std::runtime_error(
-			"No *_filtered_psms.tsv or psm.tsv files found under: " + inputPath);
+			"No *_filtered_psms.tsv files found under: " + inputPath);
 	}
 	return files;
 }
@@ -1092,15 +1104,8 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 		columns, {"Charge", "parentCharges"});
 	const size_t idxRetention = getRequiredColumnAny(
 		columns, {"Retention", "retentiontime"});
-	const size_t idxProbability = getOptionalColumn(columns, "Probability");
 	const size_t idxPosteriorError =
-		getOptionalColumn(columns, "posterior_error_prob");
-	if (idxProbability == std::string::npos &&
-		idxPosteriorError == std::string::npos)
-	{
-		throw std::runtime_error(
-			"Missing required confidence column: Probability or posterior_error_prob");
-	}
+		getRequiredColumn(columns, "posterior_error_prob");
 	const size_t idxModifiedPeptide = getOptionalColumn(columns, "Modified Peptide") != std::string::npos
 		? getOptionalColumn(columns, "Modified Peptide")
 		: getOptionalColumn(columns, "ModifiedPeptide");
@@ -1108,6 +1113,7 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 		? getOptionalColumn(columns, "Assigned Modifications")
 		: getOptionalColumn(columns, "AssignedModifications");
 	const size_t idxSvmScore = getRequiredColumn(columns, "SVMscore");
+	const size_t idxWdpScore = getRequiredColumn(columns, "WDPscores");
 	const size_t idxLabel = getOptionalColumn(columns, "Label");
 	const size_t idxMappedProteins = getOptionalColumn(columns, "Mapped Proteins");
 	const size_t idxProteins = getRequiredColumnAny(columns, {"Proteins", "ProteinNames", "proteinNames",
@@ -1115,11 +1121,7 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 
 	size_t requiredMax = std::max({
 		idxSpectrum, idxPeptide, idxCharge, idxRetention,
-		idxSvmScore, idxProteins});
-	if (idxProbability != std::string::npos)
-		requiredMax = std::max(requiredMax, idxProbability);
-	if (idxPosteriorError != std::string::npos)
-		requiredMax = std::max(requiredMax, idxPosteriorError);
+		idxPosteriorError, idxSvmScore, idxWdpScore, idxProteins});
 	if (idxLabel != std::string::npos)
 		requiredMax = std::max(requiredMax, idxLabel);
 	if (idxModifiedPeptide != std::string::npos)
@@ -1205,28 +1207,29 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 				: std::string();
 		row.proteins = combineProteinColumns(fields[idxProteins], mappedProteins,
 											 path.string() + " PSM " + row.psmId);
-		if (idxProbability != std::string::npos)
+		double posteriorError = 0.0;
+		if (!parseDoubleField(fields[idxPosteriorError], posteriorError) ||
+			!std::isfinite(posteriorError) || posteriorError < 0.0 ||
+			posteriorError > 1.0)
 		{
-			if (!parseDoubleField(fields[idxProbability], row.probability))
-			{
-				++stats.invalidRows;
-				continue;
-			}
+			throw std::runtime_error(
+				"Invalid posterior_error_prob in " + path.string() +
+				" for PSM " + row.psmId);
 		}
-		else
+		row.probability = 1.0 - posteriorError;
+		if (!parseDoubleField(fields[idxSvmScore], row.svmScore) ||
+			!std::isfinite(row.svmScore))
 		{
-			double posteriorError = 0.0;
-			if (!parseDoubleField(fields[idxPosteriorError], posteriorError))
-			{
-				++stats.invalidRows;
-				continue;
-			}
-			row.probability = 1.0 - std::clamp(posteriorError, 0.0, 1.0);
+			throw std::runtime_error(
+				"Invalid SVMscore in " + path.string() +
+				" for PSM " + row.psmId);
 		}
-		if (!parseDoubleField(fields[idxSvmScore], row.svmScore))
+		if (!parseDoubleField(fields[idxWdpScore], row.wdpScore) ||
+			!std::isfinite(row.wdpScore))
 		{
-			++stats.invalidRows;
-			continue;
+			throw std::runtime_error(
+				"Invalid WDPscores in " + path.string() +
+				" for PSM " + row.psmId);
 		}
 
 		const std::string modified = (idxModifiedPeptide != std::string::npos && fields.size() > idxModifiedPeptide)
@@ -1293,7 +1296,14 @@ bool isBetterPsm(const PsmRow &candidate, const PsmRow &current)
 		}
 		if (std::abs(candidate.svmScore - current.svmScore) <= eps)
 		{
-			return candidate.order < current.order;
+			if (candidate.wdpScore > current.wdpScore + eps)
+			{
+				return true;
+			}
+			if (std::abs(candidate.wdpScore - current.wdpScore) <= eps)
+			{
+				return candidate.order < current.order;
+			}
 		}
 	}
 	return false;
@@ -1930,7 +1940,7 @@ std::string peptideMassClassKey(const std::string &peptide)
 	std::string key = peptide;
 	for (char &c : key)
 	{
-		if (c == 'I')
+		if (c == 'I' || c == 'J')
 		{
 			c = 'L';
 		}
@@ -3193,6 +3203,42 @@ bool runOutputJobs(std::vector<OutputFileJob> &outputJobs,
 #endif
 }
 
+bool writePredictionCatalog(const fs::path &path,
+							const std::vector<PsmRow> &rows,
+							const std::vector<char> &baselineOk,
+							const std::vector<std::string> *decoyPeptides)
+{
+	std::ofstream output(path, std::ios::trunc);
+	if (!output)
+	{
+		std::cerr << "Cannot write prediction catalog: " << path << "\n";
+		return false;
+	}
+	output << "Peptide\tparentCharges\n";
+	size_t written = 0;
+	for (size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
+	{
+		if (!baselineOk[rowIndex])
+			continue;
+		const std::string &peptide = decoyPeptides == nullptr
+			? rows[rowIndex].peptide
+			: (*decoyPeptides)[rowIndex];
+		if (peptide.empty())
+			continue;
+		output << peptide << '\t' << rows[rowIndex].precursorCharge << '\n';
+		++written;
+	}
+	output.close();
+	if (!output)
+	{
+		std::cerr << "Failed while writing prediction catalog: " << path << "\n";
+		return false;
+	}
+	std::cerr << "Wrote " << written << " peptide-charge rows to "
+			  << path << "\n";
+	return true;
+}
+
 } // namespace
 
 int ExperimentalSpectraWorkflow::run(int argc, char **argv)
@@ -3310,7 +3356,7 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 	}
 
 	std::vector<PsmRow> rows;
-	timing.run("Select PSM", "select best peptide/charge", allRows.size(), "rows", [&]()
+	timing.run("Select PSM", "PEP/SVM/WDP peptide/charge", allRows.size(), "rows", [&]()
 	{
 		rows = selectBestRowsByPeptideCharge(allRows);
 	});
@@ -3557,6 +3603,32 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 	if (!allOutputSucceeded)
 	{
 		return 1;
+	}
+
+	if (!args.predictionCatalogDirectory.empty())
+	{
+		const fs::path catalogDirectory(args.predictionCatalogDirectory);
+		std::error_code directoryError;
+		fs::create_directories(catalogDirectory, directoryError);
+		if (directoryError)
+		{
+			std::cerr << "Cannot create temporary prediction catalog directory: "
+					  << catalogDirectory << "\n";
+			return 1;
+		}
+		if (!writePredictionCatalog(
+				catalogDirectory / "spectra_target_prediction_catalog.tsv",
+				rows, baselineOk, nullptr))
+		{
+			return 1;
+		}
+		if (args.writeDecoy &&
+			!writePredictionCatalog(
+				catalogDirectory / "spectra_decoy_prediction_catalog.tsv",
+				rows, baselineOk, &decoyPeptides))
+		{
+			return 1;
+		}
 	}
 
 	std::cerr << "Input peptide spectra: " << rows.size()

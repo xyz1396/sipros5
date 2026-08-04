@@ -420,11 +420,29 @@ void print_summary(std::ostream& output, const Summary& summary) {
                << std::setw(11) << speedup << "x\n";
         if (overlong) print_wrapped_timing_detail("Full stage: " + label);
     };
-    print_timing("Read, merge, and rerank PIN files", summary.read_timing);
-    if (std::find(summary.feature_names.begin(), summary.feature_names.end(),
-                  "unweighted_spectral_entropy") != summary.feature_names.end()) {
-        print_timing("Predict spectra and compute entropy",
-                     summary.spectrum_entropy_timing);
+    const auto displayed_seconds = [](double seconds) {
+        constexpr double scale = 1000000.0;
+        return std::round(seconds * scale) / scale;
+    };
+    StageTiming accounted_timing;
+    const auto print_top_level_timing = [&](const std::string& label,
+                                            const StageTiming& timing) {
+        print_timing(label, timing);
+        accounted_timing.wall_seconds += displayed_seconds(timing.wall_seconds);
+        accounted_timing.cpu_seconds += displayed_seconds(timing.cpu_seconds);
+    };
+    const bool has_spectrum_entropy =
+        std::find(summary.feature_names.begin(), summary.feature_names.end(),
+                  "unweighted_spectral_entropy") != summary.feature_names.end();
+    const bool has_predicted_rt =
+        std::find(summary.feature_names.begin(), summary.feature_names.end(),
+                  "delta_RT_loess") != summary.feature_names.end();
+    print_top_level_timing(
+        "Read, merge, and rerank PIN files", summary.read_timing);
+    if (has_spectrum_entropy) {
+        print_top_level_timing(
+            "Predict spectra and compute entropy",
+            summary.spectrum_entropy_timing);
         if (!summary.spectrum_prediction_device.empty()) {
             print_timing(
                 "  DIA-NN spectra prediction (" +
@@ -432,41 +450,52 @@ void print_summary(std::ostream& output, const Summary& summary) {
                 summary.spectrum_prediction_timing);
         }
     }
-    if (std::find(summary.feature_names.begin(), summary.feature_names.end(),
-                  "delta_RT_loess") != summary.feature_names.end()) {
-        print_timing("Predict RT and compute delta-RT",
-                     summary.predicted_rt_timing);
+    if (has_predicted_rt) {
+        print_top_level_timing(
+            "Predict RT and compute delta-RT",
+            summary.predicted_rt_timing);
         if (!summary.rt_prediction_device.empty()) {
             print_timing(
                 "  DIA-NN RT prediction (" + summary.rt_prediction_device + ")",
                 summary.rt_prediction_inference_timing);
         }
     }
-    print_timing("Assign folds and seed q-values", summary.fold_setup_timing);
+    print_top_level_timing(
+        "Assign folds and seed q-values", summary.fold_setup_timing);
     if (summary.used_internal_rt_model) {
-        print_timing("Fit nested RT models", summary.rt_model_timing);
+        print_top_level_timing("Fit nested RT models", summary.rt_model_timing);
     }
-    print_timing("Fit and score SVM folds", summary.svm_model_timing);
-    print_timing("Compute q-values and PEPs", summary.statistics_timing);
-    print_timing("Quantification total", summary.quantification_timing);
+    print_top_level_timing("Fit and score SVM folds", summary.svm_model_timing);
+    print_top_level_timing(
+        "Compute q-values and PEPs", summary.statistics_timing);
+    print_top_level_timing("Quantification total", summary.quantification_timing);
     for (const auto& stage : summary.quantification_stages) {
         print_timing("  " + stage.name, stage.timing);
         if (!stage.detail.empty()) {
             print_wrapped_timing_detail(stage.detail);
         }
     }
-    print_timing("Write result files", summary.write_timing);
+    print_top_level_timing("Write result files", summary.write_timing);
+    print_top_level_timing(
+        "Protein assembly total", summary.protein_assembly_timing);
     for (const auto& stage : summary.protein_assembly_stages) {
-        print_timing("Protein assembly: " + stage.name, stage.timing);
+        print_timing("  " + stage.name, stage.timing);
     }
     if (summary.negative_control_candidates > 0) {
-        print_timing(
+        print_top_level_timing(
             "SIP-Negative-control filtering total",
             summary.negative_control_timing);
         for (const auto& stage : summary.negative_control_stages) {
             print_timing("  " + stage.name, stage.timing);
         }
     }
+    const StageTiming coordination_timing{
+        displayed_seconds(summary.total_timing.wall_seconds) -
+            accounted_timing.wall_seconds,
+        displayed_seconds(summary.total_timing.cpu_seconds) -
+            accounted_timing.cpu_seconds};
+    print_timing(
+        "Workflow coordination and timing overhead", coordination_timing);
     print_timing("Total", summary.total_timing);
     output << "  Overall OpenMP efficiency: "
            << summary.omp_parallel_efficiency * 100.0 << "%\n";

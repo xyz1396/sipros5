@@ -139,6 +139,16 @@ private:
         Psm* destination, std::size_t expected_rows);
 };
 
+// Prediction discovery may encounter a decoy form before the same normalized
+// peptide/charge key appears as a target in a later sample.  Keep one
+// exemplar per model key, but always promote the target exemplar so a
+// targets-only cache cannot accidentally omit a real target prediction.
+void upsert_prediction_exemplar(
+    Dataset& catalog,
+    std::unordered_map<std::string, std::size_t>& key_to_row,
+    const std::string& key,
+    const Psm& exemplar);
+
 class SpectrumPredictionLibrary {
 public:
     struct Impl;

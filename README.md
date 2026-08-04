@@ -114,7 +114,11 @@ Generated spectra libraries record this contract in `chemistry_profile_id`, and
 Experimental spectra generation defaults to SIP abundances `0-100` at one
 percentage-point intervals. It writes one memory-mapped `spectra.sfi` target
 index and, with `--decoy`, one `spectra_Decoy.sfi` generated-decoy index; each
-record stores its own abundance and retention time. SFI v5 stores only the top
+record stores its own abundance and retention time. Input is strictly Aerith
+`*_filtered_psms.tsv`; legacy `psm.tsv` and missing confidence-column fallbacks
+are not supported. For every modified-peptide mass class and precursor charge,
+the representative PSM is selected by lowest `posterior_error_prob`, then
+highest `SVMscore`, then highest `WDPscores`. SFI v5 stores only the top
 three peaks by default in every precursor and product-ion isotope envelope
 (`--envelope-top-n` / workflow `--sfi-envelope-top-n`), and stores fragment m/z
 at 0.001-Da fixed-point resolution in a 16-byte fragment record and uses a
@@ -155,13 +159,23 @@ generation, spectra search, and final feature calculation.
 ```bash
 siproswf -i 'T01.h5,T02.h5,T03.h5,X1.h5,X2.h5,X3.h5' \
   -f yeast.fasta --fast-sip-search -e C13 -r 0-100 -p 1 -t 48 \
+  --aerith-sample-parallelism 3 \
   --negative_control X1,X2,X3 -o fast_sip_output
 ```
 
-Outputs are separated into `regular/`, `spectra_library/`, and
-`spectra_search/` below the requested output directory. The workflow logs the
-accepted regular-search target PSM count for each sample and emits a warning
-when a sample has zero accepted target PSMs.
+Regular-search reports, including peptide and protein TSVs, are written below
+`regular/`; SIP spectra-search reports are written below `spectra_search/`.
+The single target and generated-decoy SFI files are also written directly in
+`spectra_search/`. Fast mode keeps a keyed cache of the regular-search DIA-NN
+spectrum and RT predictions in `regular/`; regular-search decoy predictions
+are not persisted. SFI generation verifies that every target library peptide is
+already cached, predicts and caches only the newly generated SFI decoys before
+spectra search starts, and the final Aerith pass is cache-only. A
+missing downstream peptide therefore stops with an error instead of invoking
+either prediction model again. `--aerith-sample-parallelism` controls how many
+samples Aerith processes concurrently; larger values can use more RAM. The
+workflow logs the accepted regular-search target PSM count for each sample and
+emits a warning when a sample has zero accepted target PSMs.
 
 FASTA precursor estimates sum the expected exact isotope-mass shifts from all
 source-aware CHONPS atoms, divide by the expected nominal-neutron shift to get

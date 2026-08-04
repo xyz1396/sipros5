@@ -326,15 +326,17 @@ Dataset PinReader::read(
         }
     }
     // A decoy whose naked peptide is also observed as a target is not valid
-    // null evidence.  Remove these collisions before joint scan ranking, SVM
-    // training, and target-decoy FDR estimation.  The target set is global
+    // null evidence. I, J, and L have the same residue composition and cannot
+    // distinguish target from decoy by mass spectra, so they share one
+    // canonical identity. Remove these collisions before joint scan ranking,
+    // SVM training, and target-decoy FDR estimation. The target set is global
     // across the inputs because all samples use the same search database.
     std::unordered_set<std::string> local_target_peptides;
     const auto* target_peptides = global_target_peptides;
     if (target_peptides == nullptr) {
         for (const auto& row : combined.rows) {
             if (row.label != 1) continue;
-            const auto peptide = stripped_peptide(row.peptide);
+            const auto peptide = canonical_peptide_identity(row.peptide);
             if (!peptide.empty()) local_target_peptides.insert(peptide);
         }
         target_peptides = &local_target_peptides;
@@ -345,7 +347,7 @@ Dataset PinReader::read(
             combined.rows.begin(), combined.rows.end(),
             [&](const Psm& row) {
                 if (row.label != -1) return false;
-                const auto peptide = stripped_peptide(row.peptide);
+                const auto peptide = canonical_peptide_identity(row.peptide);
                 return !peptide.empty() &&
                     target_peptides->count(peptide) != 0;
             }),
@@ -458,11 +460,13 @@ Dataset PinReader::discover_predictions(
             const auto headers = split_tabs(line);
             std::size_t peptide_column = headers.size();
             std::size_t charge_column = headers.size();
+            std::size_t label_column = headers.size();
             for (std::size_t column = 0; column < headers.size(); ++column) {
                 if (headers[column] == "Peptide") peptide_column = column;
                 if (headers[column] == "parentCharges") {
                     charge_column = column;
                 }
+                if (headers[column] == "Label") label_column = column;
             }
             if (peptide_column == headers.size() ||
                 charge_column == headers.size()) {
@@ -485,16 +489,26 @@ Dataset PinReader::discover_predictions(
                 const std::string peptide(fields[peptide_column]);
                 const int charge = static_cast<int>(parse_number(
                     fields[charge_column], "parentCharges", line_number));
+                int label = target ? 1 : -1;
+                if (!paired && label_column != headers.size()) {
+                    label = static_cast<int>(parse_number(
+                        fields[label_column], "Label", line_number));
+                }
+                if (config.populate_prediction_cache &&
+                    config.prediction_cache_targets_only && label != 1) {
+                    continue;
+                }
                 const auto key = peptide + '\x1f' +
                     std::to_string(charge);
                 if (unique.insert(key).second) {
                     Psm exemplar;
                     exemplar.peptide = peptide;
                     exemplar.charge = charge;
+                    exemplar.label = label;
                     tasks[index].peptides.push_back(std::move(exemplar));
                 }
-                if (target) {
-                    const auto naked = stripped_peptide(peptide);
+                if (label == 1) {
+                    const auto naked = canonical_peptide_identity(peptide);
                     if (!naked.empty()) tasks[index].targets.insert(naked);
                 }
             }
@@ -519,6 +533,23 @@ Dataset PinReader::discover_predictions(
         }
     }
     return result;
+}
+
+void upsert_prediction_exemplar(
+    Dataset& catalog,
+    std::unordered_map<std::string, std::size_t>& key_to_row,
+    const std::string& key,
+    const Psm& exemplar) {
+    const auto [found, inserted] = key_to_row.emplace(
+        key, catalog.rows.size());
+    if (inserted) {
+        catalog.rows.push_back(exemplar);
+        return;
+    }
+    auto& retained = catalog.rows[found->second];
+    if (retained.label != 1 && exemplar.label == 1) {
+        retained = exemplar;
+    }
 }
 
 } // namespace aerith

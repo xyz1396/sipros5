@@ -2255,10 +2255,36 @@ QuantificationResult ChromatographicQuantifier::add(
 
         wall_begin = Clock::now();
         cpu_begin = std::clock();
-        std::vector<QuantTransferJob> jobs;
         // Trace every eligible donor. A peptide can align differently from
         // each run, so choose its donor only after scoring acceptor evidence.
-        for (const auto& alignment : alignments) {
+        // Count and fill each donor's stable output slice independently. This
+        // preserves the historical donor/key ordering while avoiding a
+        // single-threaded 10-way walk over millions of ions.
+        std::vector<std::size_t> job_offsets(alignments.size() + 1, 0);
+        #pragma omp parallel for schedule(dynamic, 1)
+        for (std::ptrdiff_t alignment_index = 0;
+             alignment_index < static_cast<std::ptrdiff_t>(alignments.size());
+             ++alignment_index) {
+            const auto& alignment = alignments[
+                static_cast<std::size_t>(alignment_index)];
+            std::size_t count = 0;
+            for (const auto& [key, donor_row] : ions[alignment.donor]) {
+                const auto acceptor_ion = ions[acceptor].find(key);
+                count += acceptor_ion == ions[acceptor].end() ? 5 : 1;
+            }
+            job_offsets[static_cast<std::size_t>(alignment_index) + 1] =
+                count;
+        }
+        std::partial_sum(
+            job_offsets.begin(), job_offsets.end(), job_offsets.begin());
+        std::vector<QuantTransferJob> jobs(job_offsets.back());
+        #pragma omp parallel for schedule(dynamic, 1)
+        for (std::ptrdiff_t alignment_index = 0;
+             alignment_index < static_cast<std::ptrdiff_t>(alignments.size());
+             ++alignment_index) {
+            const auto index = static_cast<std::size_t>(alignment_index);
+            const auto& alignment = alignments[index];
+            std::size_t output = job_offsets[index];
             for (const auto& [key, donor_row] : ions[alignment.donor]) {
                 const auto& donor_psm = data.rows[donor_row];
                 const auto region = quant_transfer_region(
@@ -2266,14 +2292,13 @@ QuantificationResult ChromatographicQuantifier::add(
                     donor_psm.apex_retention / 60.0);
                 const auto acceptor_ion = ions[acceptor].find(key);
                 if (acceptor_ion != ions[acceptor].end()) {
-                    QuantTransferJob job;
+                    auto& job = jobs[output++];
                     job.key = key;
                     job.donor_row = donor_row;
                     job.acceptor_row = acceptor_ion->second;
                     job.predicted_rt = region.first;
                     job.trace_rt = region.first;
                     job.rt_window = region.second;
-                    jobs.push_back(std::move(job));
                     continue;
                 }
                 // IonQuant enumerates chromatographic features throughout
@@ -2283,13 +2308,12 @@ QuantificationResult ChromatographicQuantifier::add(
                 static constexpr double offsets[] = {
                     -0.8, -0.4, 0.0, 0.4, 0.8};
                 for (const double offset : offsets) {
-                    QuantTransferJob job;
+                    auto& job = jobs[output++];
                     job.key = key;
                     job.donor_row = donor_row;
                     job.predicted_rt = region.first;
                     job.trace_rt = region.first + offset * region.second;
                     job.rt_window = std::max(0.025, region.second * 0.5);
-                    jobs.push_back(std::move(job));
                 }
             }
         }
