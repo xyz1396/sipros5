@@ -12,6 +12,7 @@ add_library(aerith_filter
   src/isotope.cpp
   src/output.cpp
   src/pin.cpp
+  src/prediction_cache.cpp
   src/protein_assembly.cpp
   src/predicted_rt.cpp
   src/quantification.cpp

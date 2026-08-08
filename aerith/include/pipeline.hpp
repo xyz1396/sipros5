@@ -97,7 +97,11 @@ struct Dataset {
     std::string spectrum_prediction_device;
     std::string rt_prediction_device;
     StageTiming spectrum_prediction_timing;
+    StageTiming spectrum_cache_read_timing;
+    StageTiming spectrum_cache_write_timing;
     StageTiming rt_prediction_timing;
+    StageTiming rt_cache_read_timing;
+    StageTiming rt_cache_write_timing;
     std::vector<TransferredIon> transferred_ions;
     std::size_t removed_decoy_peptide_collisions = 0;
 };
@@ -141,8 +145,8 @@ private:
 
 // Prediction discovery may encounter a decoy form before the same normalized
 // peptide/charge key appears as a target in a later sample.  Keep one
-// exemplar per model key, but always promote the target exemplar so a
-// targets-only cache cannot accidentally omit a real target prediction.
+// exemplar per model key, but always promote the target exemplar so the
+// persistent target cache cannot accidentally omit a real target prediction.
 void upsert_prediction_exemplar(
     Dataset& catalog,
     std::unordered_map<std::string, std::size_t>& key_to_row,
@@ -163,6 +167,8 @@ public:
 
     std::string device() const;
     StageTiming timing() const;
+    StageTiming cache_read_timing() const;
+    StageTiming cache_write_timing() const;
 
 private:
     std::unique_ptr<Impl> impl_;
@@ -191,6 +197,8 @@ public:
 
     std::string device() const;
     StageTiming timing() const;
+    StageTiming cache_read_timing() const;
+    StageTiming cache_write_timing() const;
 
 private:
     std::unique_ptr<Impl> impl_;

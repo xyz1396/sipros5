@@ -449,6 +449,12 @@ void print_summary(std::ostream& output, const Summary& summary) {
                     summary.spectrum_prediction_device + ")",
                 summary.spectrum_prediction_timing);
         }
+        print_timing(
+            "  Spectrum prediction cache .bin file read",
+            summary.spectrum_cache_read_timing);
+        print_timing(
+            "  Spectrum prediction cache .bin file merge/write",
+            summary.spectrum_cache_write_timing);
     }
     if (has_predicted_rt) {
         print_top_level_timing(
@@ -459,6 +465,12 @@ void print_summary(std::ostream& output, const Summary& summary) {
                 "  DIA-NN RT prediction (" + summary.rt_prediction_device + ")",
                 summary.rt_prediction_inference_timing);
         }
+        print_timing(
+            "  RT prediction cache .bin file read",
+            summary.rt_cache_read_timing);
+        print_timing(
+            "  RT prediction cache .bin file merge/write",
+            summary.rt_cache_write_timing);
     }
     print_top_level_timing(
         "Assign folds and seed q-values", summary.fold_setup_timing);
@@ -471,9 +483,6 @@ void print_summary(std::ostream& output, const Summary& summary) {
     print_top_level_timing("Quantification total", summary.quantification_timing);
     for (const auto& stage : summary.quantification_stages) {
         print_timing("  " + stage.name, stage.timing);
-        if (!stage.detail.empty()) {
-            print_wrapped_timing_detail(stage.detail);
-        }
     }
     print_top_level_timing("Write result files", summary.write_timing);
     print_top_level_timing(
@@ -499,6 +508,32 @@ void print_summary(std::ostream& output, const Summary& summary) {
     print_timing("Total", summary.total_timing);
     output << "  Overall OpenMP efficiency: "
            << summary.omp_parallel_efficiency * 100.0 << "%\n";
+    bool wrote_calibration_header = false;
+    for (const auto& stage : summary.quantification_stages) {
+        if (stage.detail.empty()) continue;
+        if (!wrote_calibration_header) {
+            output << "\nMBR calibration audit\n";
+            wrote_calibration_header = true;
+        }
+        output << "  " << stage.name << '\n';
+        constexpr std::size_t line_width = 104;
+        const std::string prefix = "    ";
+        std::size_t begin = 0;
+        while (begin < stage.detail.size()) {
+            const std::size_t available = line_width - prefix.size();
+            std::size_t end = std::min(
+                stage.detail.size(), begin + available);
+            if (end < stage.detail.size()) {
+                const std::size_t space = stage.detail.rfind(' ', end);
+                if (space != std::string::npos && space > begin) end = space;
+            }
+            output << prefix
+                   << stage.detail.substr(begin, end - begin) << '\n';
+            begin = end;
+            while (begin < stage.detail.size() &&
+                   stage.detail[begin] == ' ') ++begin;
+        }
+    }
     output << "\nSVM feature weights\n"
            << "  Positive raises the target score; negative lowers it.\n"
            << "  Values are calibrated weights on each fold's standardized scale.\n";

@@ -4,12 +4,16 @@
 #include "proNovoConfig.h"
 #include "proteindatabase.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -27,6 +31,32 @@ void check(bool condition, const std::string &message)
 	{
 		throw std::runtime_error(message);
 	}
+}
+
+std::string canonicalNakedPeptide(std::string_view decorated)
+{
+	const size_t open = decorated.find('[');
+	const size_t close = decorated.rfind(']');
+	if (open != std::string_view::npos && close > open)
+	{
+		decorated = decorated.substr(open + 1, close - open - 1);
+	}
+	std::string result;
+	for (char symbol : decorated)
+	{
+		if (std::isalpha(static_cast<unsigned char>(symbol)) == 0)
+		{
+			continue;
+		}
+		char residue = static_cast<char>(std::toupper(
+			static_cast<unsigned char>(symbol)));
+		if (residue == 'I' || residue == 'J')
+		{
+			residue = 'L';
+		}
+		result.push_back(residue);
+	}
+	return result;
 }
 
 } // namespace
@@ -200,10 +230,112 @@ int main()
 		check(!repaired.stats().loadedFromCache,
 			"corrupted cache passed payload validation");
 
+		const fs::path guardDirectory = fs::temp_directory_path() /
+			("sipros_fragment_index_guard_test_" +
+			 std::to_string(processId));
+		fs::create_directories(guardDirectory);
+		const fs::path targetFasta = guardDirectory / "target.fasta";
+		const fs::path decoyFasta = guardDirectory / "decoy.fasta";
+		const fs::path targetCache = guardDirectory / "target.sfi";
+		const fs::path legacyDecoyCache = guardDirectory / "legacy.sfi";
+		const fs::path decoyCache = guardDirectory / "decoy.sfi";
+		{
+			std::ofstream out(targetFasta);
+			out << ">target_collision\n"
+				<< "MPEPTIDERKACDEFGHIKLMNPQRSTVWYRK\n";
+		}
+		{
+			std::ofstream out(decoyFasta);
+			out << ">decoy_collision\n"
+				<< "MPEPTIDERKACDEFGHIKLMNPQRSTVWYRK\n"
+				<< ">decoy_unique\n"
+				<< "MYYYYYYYYKGGGGGGGGR\n";
+		}
+
+		ProNovoConfig::setFASTAfilename(targetFasta.string());
+		sipros::FragmentIndex targetGuardIndex;
+		check(targetGuardIndex.loadOrBuild(
+			targetCache.string(), true, error),
+			"could not build collision-guard target.sfi: " + error);
+		std::unordered_set<std::string> targetIdentities;
+		for (uint32_t peptideId = 0;
+			 peptideId < targetGuardIndex.peptideCount(); ++peptideId)
+		{
+			targetIdentities.insert(canonicalNakedPeptide(
+				targetGuardIndex.peptideSequence(peptideId)));
+		}
+
+		ProNovoConfig::setFASTAfilename(decoyFasta.string());
+		sipros::FragmentIndex legacyDecoyIndex;
+		check(legacyDecoyIndex.loadOrBuild(
+			legacyDecoyCache.string(), true, error),
+			"could not build legacy unguarded decoy cache: " + error);
+		const uint64_t legacyDecoyPeptideCount =
+			legacyDecoyIndex.peptideCount();
+		std::vector<std::string> expectedGuardedPeptides;
+		for (uint32_t peptideId = 0;
+			 peptideId < legacyDecoyIndex.peptideCount(); ++peptideId)
+		{
+			const std::string peptide(
+				legacyDecoyIndex.peptideSequence(peptideId));
+			if (targetIdentities.find(canonicalNakedPeptide(peptide)) ==
+				targetIdentities.end())
+			{
+				expectedGuardedPeptides.push_back(peptide);
+			}
+		}
+		std::sort(expectedGuardedPeptides.begin(),
+			expectedGuardedPeptides.end());
+		fs::rename(legacyDecoyCache, decoyCache);
+
+		sipros::FragmentIndex guardedDecoyIndex;
+		check(guardedDecoyIndex.loadOrBuild(
+			decoyCache.string(), false, error),
+			"could not build default guarded decoy.sfi: " + error);
+		check(!guardedDecoyIndex.stats().loadedFromCache,
+			"legacy unguarded decoy.sfi fingerprint was accepted");
+		check(guardedDecoyIndex.stats().collisionGuardTargetPeptides ==
+			targetIdentities.size(),
+			"guarded decoy.sfi reports the wrong target identity count");
+		check(guardedDecoyIndex.stats().collisionExcludedPeptides > 0,
+			"default decoy.sfi guard did not exclude a target collision");
+		check(legacyDecoyPeptideCount - guardedDecoyIndex.peptideCount() ==
+			guardedDecoyIndex.stats().collisionExcludedPeptides,
+			"guarded decoy.sfi peptide-count reduction does not match its audit count");
+		std::vector<std::string> actualGuardedPeptides;
+		actualGuardedPeptides.reserve(
+			static_cast<size_t>(guardedDecoyIndex.peptideCount()));
+		for (uint32_t peptideId = 0;
+			 peptideId < guardedDecoyIndex.peptideCount(); ++peptideId)
+		{
+			const std::string peptide(
+				guardedDecoyIndex.peptideSequence(peptideId));
+			check(targetIdentities.find(canonicalNakedPeptide(peptide)) ==
+				targetIdentities.end(),
+				"guarded decoy.sfi still contains a target-equivalent peptide");
+			actualGuardedPeptides.push_back(peptide);
+		}
+		std::sort(actualGuardedPeptides.begin(), actualGuardedPeptides.end());
+		check(actualGuardedPeptides == expectedGuardedPeptides,
+			"guarded decoy.sfi did not preserve the exact non-colliding peptide records");
+
+		sipros::FragmentIndex warmGuardedDecoyIndex;
+		check(warmGuardedDecoyIndex.loadOrBuild(
+			decoyCache.string(), false, error),
+			"could not reload guarded decoy.sfi: " + error);
+		check(warmGuardedDecoyIndex.stats().loadedFromCache,
+			"warm guarded decoy.sfi unexpectedly rebuilt");
+		check(warmGuardedDecoyIndex.stats().collisionGuardSeconds == 0.0,
+			"warm guarded decoy.sfi rebuilt the canonical target set");
+		check(warmGuardedDecoyIndex.stats().collisionExcludedPeptides ==
+			guardedDecoyIndex.stats().collisionExcludedPeptides,
+			"warm guarded decoy.sfi lost its collision audit count");
+
 		std::error_code ignored;
 		fs::remove(cache, ignored);
 		fs::remove(fasta, ignored);
-		std::cout << "ok: fragment index preserves universal neutral ions and mmap cache\n";
+		fs::remove_all(guardDirectory, ignored);
+		std::cout << "ok: fragment index preserves universal neutral ions, mmap cache, and default decoy collision guard\n";
 		return 0;
 	}
 	catch (const std::exception &ex)

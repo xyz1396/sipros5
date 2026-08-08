@@ -5,8 +5,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cstdint>
-#include <cstring>
 #include <ctime>
 #include <exception>
 #include <filesystem>
@@ -25,207 +23,9 @@
 
 #include <omp.h>
 
-#if defined(__unix__) || defined(__APPLE__)
-#include <unistd.h>
-#endif
-
 namespace aerith {
 
 using Clock = std::chrono::steady_clock;
-
-constexpr std::uint64_t kPredictionCacheMagic = 0x4145525052454431ULL;
-constexpr std::uint32_t kPredictionCacheVersion = 2;
-
-void prediction_hash_bytes(
-    std::uint64_t& hash, const void* bytes, std::size_t size) {
-    const auto* data = static_cast<const unsigned char*>(bytes);
-    for (std::size_t index = 0; index < size; ++index) {
-        hash ^= data[index];
-        hash *= 1099511628211ULL;
-    }
-}
-
-template <typename Value>
-void prediction_hash_value(std::uint64_t& hash, const Value& value) {
-    prediction_hash_bytes(hash, &value, sizeof(value));
-}
-
-void prediction_hash_string(std::uint64_t& hash, const std::string& value) {
-    prediction_hash_bytes(hash, value.data(), value.size());
-    constexpr unsigned char separator = 0xff;
-    prediction_hash_bytes(hash, &separator, 1);
-}
-
-std::uint64_t prediction_cache_fingerprint(
-    const Config& config, const Dataset& data) {
-    std::uint64_t hash = 1469598103934665603ULL;
-    prediction_hash_value(hash, config.fragment_ppm);
-    prediction_hash_value(hash, config.product_top_isotopes);
-    prediction_hash_value(hash, config.predict_rt);
-    prediction_hash_string(hash, config.spectrum_model_path);
-    prediction_hash_string(hash, config.rt_model_path);
-    prediction_hash_string(hash, config.sip_isotope);
-    for (const auto& path : config.spectrum_paths) {
-        prediction_hash_string(hash, path);
-    }
-    for (const auto& row : data.rows) {
-        prediction_hash_string(hash, row.id);
-        prediction_hash_string(hash, row.peptide);
-        prediction_hash_value(hash, row.file_id);
-        prediction_hash_value(hash, row.scan);
-        prediction_hash_value(hash, row.charge);
-        prediction_hash_value(hash, row.retention);
-    }
-    return hash;
-}
-
-template <typename Value>
-bool read_prediction_value(std::istream& input, Value& value) {
-    return static_cast<bool>(input.read(
-        reinterpret_cast<char*>(&value), sizeof(value)));
-}
-
-template <typename Value>
-void write_prediction_value(std::ostream& output, const Value& value) {
-    output.write(reinterpret_cast<const char*>(&value), sizeof(value));
-}
-
-bool load_prediction_cache(
-    const Config& config, Dataset& data, std::size_t base_feature_count) {
-    if (config.prediction_cache_path.empty() ||
-        !std::filesystem::is_regular_file(config.prediction_cache_path)) {
-        return false;
-    }
-    std::ifstream input(config.prediction_cache_path, std::ios::binary);
-    std::uint64_t magic = 0;
-    std::uint32_t version = 0;
-    std::uint64_t fingerprint = 0;
-    std::uint64_t row_count = 0;
-    std::uint64_t cached_base_features = 0;
-    std::uint32_t generated_count = 0;
-    std::uint8_t diagnostics = 0;
-    if (!read_prediction_value(input, magic) ||
-        !read_prediction_value(input, version) ||
-        !read_prediction_value(input, fingerprint) ||
-        !read_prediction_value(input, row_count) ||
-        !read_prediction_value(input, cached_base_features) ||
-        !read_prediction_value(input, generated_count) ||
-        !read_prediction_value(input, diagnostics) ||
-        magic != kPredictionCacheMagic ||
-        version != kPredictionCacheVersion ||
-        fingerprint != prediction_cache_fingerprint(config, data) ||
-        row_count != data.rows.size() ||
-        cached_base_features != base_feature_count ||
-        generated_count == 0 || generated_count > 16) {
-        return false;
-    }
-    std::vector<std::string> names;
-    names.reserve(generated_count);
-    for (std::uint32_t index = 0; index < generated_count; ++index) {
-        std::uint32_t length = 0;
-        if (!read_prediction_value(input, length) || length > 1024) {
-            return false;
-        }
-        std::string name(length, '\0');
-        if (!input.read(name.data(), length)) return false;
-        names.push_back(std::move(name));
-    }
-    const std::size_t values_per_row = generated_count + 2;
-    if (data.rows.size() >
-        std::numeric_limits<std::size_t>::max() / values_per_row) {
-        return false;
-    }
-    std::vector<float> values(data.rows.size() * values_per_row);
-    if (!input.read(
-            reinterpret_cast<char*>(values.data()),
-            static_cast<std::streamsize>(values.size() * sizeof(float)))) {
-        return false;
-    }
-    for (std::size_t row = 0; row < data.rows.size(); ++row) {
-        auto& psm = data.rows[row];
-        if (psm.features.size() != base_feature_count) return false;
-        const auto offset = row * values_per_row;
-        psm.features.insert(
-            psm.features.end(), values.begin() + offset,
-            values.begin() + offset + generated_count);
-        psm.delta_rt_loess_real = values[offset + generated_count];
-        psm.predicted_rt_real_units = values[offset + generated_count + 1];
-    }
-    data.feature_names.insert(
-        data.feature_names.end(), names.begin(), names.end());
-    data.generated_feature_names.insert(
-        data.generated_feature_names.end(), names.begin(), names.end());
-    data.has_predicted_rt_diagnostics = diagnostics != 0;
-    data.spectrum_prediction_device = "cache";
-    data.rt_prediction_device = "cache";
-    return true;
-}
-
-void save_prediction_cache(
-    const Config& config, const Dataset& data,
-    std::size_t base_feature_count) {
-    if (config.prediction_cache_path.empty()) return;
-    const std::size_t generated_count = data.generated_feature_names.size();
-    if (generated_count == 0 || generated_count > 16) return;
-    for (const auto& row : data.rows) {
-        if (row.features.size() != base_feature_count + generated_count) {
-            throw std::runtime_error(
-                "Cannot cache inconsistent generated prediction features");
-        }
-    }
-    const std::filesystem::path path(config.prediction_cache_path);
-    if (!path.parent_path().empty()) {
-        std::filesystem::create_directories(path.parent_path());
-    }
-    const auto temporary = path.string() + ".tmp";
-    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-    if (!output) {
-        throw std::runtime_error(
-            "Cannot write prediction cache: " + temporary);
-    }
-    write_prediction_value(output, kPredictionCacheMagic);
-    write_prediction_value(output, kPredictionCacheVersion);
-    write_prediction_value(
-        output, prediction_cache_fingerprint(config, data));
-    write_prediction_value(
-        output, static_cast<std::uint64_t>(data.rows.size()));
-    write_prediction_value(
-        output, static_cast<std::uint64_t>(base_feature_count));
-    write_prediction_value(
-        output, static_cast<std::uint32_t>(generated_count));
-    write_prediction_value(
-        output, static_cast<std::uint8_t>(
-            data.has_predicted_rt_diagnostics));
-    for (const auto& name : data.generated_feature_names) {
-        write_prediction_value(
-            output, static_cast<std::uint32_t>(name.size()));
-        output.write(name.data(), static_cast<std::streamsize>(name.size()));
-    }
-    for (const auto& row : data.rows) {
-        output.write(
-            reinterpret_cast<const char*>(
-                row.features.data() + base_feature_count),
-            static_cast<std::streamsize>(generated_count * sizeof(float)));
-        write_prediction_value(output, row.delta_rt_loess_real);
-        write_prediction_value(output, row.predicted_rt_real_units);
-    }
-    output.close();
-    if (!output) {
-        throw std::runtime_error(
-            "Failed while writing prediction cache: " + temporary);
-    }
-    std::error_code rename_error;
-    std::filesystem::rename(temporary, path, rename_error);
-    if (rename_error) {
-        std::filesystem::remove(path, rename_error);
-        rename_error.clear();
-        std::filesystem::rename(temporary, path, rename_error);
-    }
-    if (rename_error) {
-        throw std::runtime_error(
-            "Cannot install prediction cache: " + path.string());
-    }
-}
 
 std::string peptide_form(const std::string& peptide) {
     const auto open = peptide.find('[');
@@ -489,16 +289,7 @@ Summary run_monolithic(const Config& config) {
     // spectrum loading, fragment matching, and entropy calculation.
     const auto spectrum_entropy_begin = Clock::now();
     const std::clock_t spectrum_entropy_cpu_begin = std::clock();
-    const std::size_t base_feature_count = data.feature_names.size();
-    // The legacy row-wise feature cache cannot exclude regular decoys. Fast
-    // SIP target-only caching therefore uses only the keyed spectrum/RT
-    // stores, including for a one-sample monolithic run.
-    const bool predictions_cached =
-        !config.prediction_cache_targets_only &&
-        load_prediction_cache(config, data, base_feature_count);
-    if (!predictions_cached) {
-        SpectralEntropyFeature::add(config, data);
-    }
+    SpectralEntropyFeature::add(config, data);
     const std::clock_t spectrum_entropy_cpu_end = std::clock();
     const auto spectrum_entropy_end = Clock::now();
 
@@ -506,12 +297,7 @@ Summary run_monolithic(const Config& config) {
     // calibration are timed together as one generated-feature stage.
     const auto predicted_rt_begin = Clock::now();
     const std::clock_t predicted_rt_cpu_begin = std::clock();
-    if (!predictions_cached) {
-        PredictedRetentionTimeFeature::add(config, data);
-        if (!config.prediction_cache_targets_only) {
-            save_prediction_cache(config, data, base_feature_count);
-        }
-    }
+    PredictedRetentionTimeFeature::add(config, data);
     const std::clock_t predicted_rt_cpu_end = std::clock();
     const auto predicted_rt_end = Clock::now();
     const bool has_diann_rt = std::find(
@@ -530,7 +316,11 @@ Summary run_monolithic(const Config& config) {
     summary.spectrum_prediction_device = data.spectrum_prediction_device;
     summary.rt_prediction_device = data.rt_prediction_device;
     summary.spectrum_prediction_timing = data.spectrum_prediction_timing;
+    summary.spectrum_cache_read_timing = data.spectrum_cache_read_timing;
+    summary.spectrum_cache_write_timing = data.spectrum_cache_write_timing;
     summary.rt_prediction_inference_timing = data.rt_prediction_timing;
+    summary.rt_cache_read_timing = data.rt_cache_read_timing;
+    summary.rt_cache_write_timing = data.rt_cache_write_timing;
     if (use_internal_rt_model) {
         summary.feature_names.push_back("sqrtAbsDeltaRT");
     } else {
@@ -787,29 +577,19 @@ Config streamed_sample_config(const Config& config, std::size_t sample) {
     return result;
 }
 
-struct StreamSpool {
-    std::filesystem::path target;
-    std::filesystem::path decoy;
+struct StreamScoreRow {
+    std::size_t compact_index = std::numeric_limits<std::size_t>::max();
+    std::string psm_id;
+    double score = 0.0;
+    double primary_q = 1.0;
+    double pep = 1.0;
+    std::string peptide;
+    std::string proteins;
 };
 
-struct StreamTemporaryDirectory {
-    std::filesystem::path path;
-
-    StreamTemporaryDirectory() {
-        std::uint64_t discriminator = static_cast<std::uint64_t>(
-            std::chrono::steady_clock::now().time_since_epoch().count());
-#if defined(__unix__) || defined(__APPLE__)
-        discriminator ^= static_cast<std::uint64_t>(::getpid()) << 32;
-#endif
-        path = std::filesystem::path("/dev/shm") /
-            ("aerith-stream-" + std::to_string(discriminator));
-        std::filesystem::create_directories(path);
-    }
-
-    ~StreamTemporaryDirectory() {
-        std::error_code error;
-        std::filesystem::remove_all(path, error);
-    }
+struct StreamScoreBuffer {
+    std::vector<StreamScoreRow> target;
+    std::vector<StreamScoreRow> decoy;
 };
 
 struct StreamedSampleState {
@@ -857,8 +637,8 @@ void run_stream_sample_batch(
     if (failure) std::rethrow_exception(failure);
 }
 
-void write_stream_score_spool(
-    const std::filesystem::path& path, int label,
+std::vector<StreamScoreRow> buffer_stream_scores(
+    int label,
     const Dataset& data, const std::vector<double>& scores,
     const std::vector<double>& primary_q, const std::vector<double>& pep,
     const std::vector<std::size_t>& compact_indices) {
@@ -871,35 +651,22 @@ void write_stream_score_spool(
         order.begin(), order.end(), [&](std::size_t left, std::size_t right) {
             return scores[left] > scores[right];
         });
-    std::ofstream output(path);
-    if (!output) {
-        throw std::runtime_error(
-            "Cannot create streamed score spool: " + path.string());
-    }
-    output << std::setprecision(17);
+    std::vector<StreamScoreRow> buffered;
+    buffered.reserve(order.size());
     for (const auto row : order) {
-        const auto compact = compact_indices[row];
-        if (compact == std::numeric_limits<std::size_t>::max()) {
-            output << '-';
-        } else {
-            output << compact;
-        }
         const auto& psm = data.rows[row];
-        output << '\t' << psm.id << '\t' << scores[row] << '\t'
-               << primary_q[row] << '\t' << pep[row] << '\t'
-               << psm.peptide << '\t' << psm.proteins << '\n';
+        buffered.push_back({
+            compact_indices[row], psm.id, scores[row], primary_q[row],
+            pep[row], psm.peptide, psm.proteins});
     }
+    return buffered;
 }
 
 void write_stream_score_table(
-    const std::filesystem::path& spool, const std::string& output_path,
+    const std::vector<StreamScoreRow>& buffered,
+    const std::string& output_path,
     const std::vector<double>& final_q, bool protein_filtered,
     bool fixed_cam) {
-    std::ifstream input(spool);
-    if (!input) {
-        throw std::runtime_error(
-            "Cannot read streamed score spool: " + spool.string());
-    }
     const std::filesystem::path output_file(output_path);
     if (output_file.has_parent_path()) {
         std::filesystem::create_directories(output_file.parent_path());
@@ -912,45 +679,32 @@ void write_stream_score_table(
     output << "PSMId\tSVMscore\tq-value\tposterior_error_prob"
            << "\tpeptide\tmodifiedPeptide\tassignedModifications"
            << "\tproteinIds\n" << std::setprecision(10);
-    std::string line;
-    while (std::getline(input, line)) {
-        std::array<std::string_view, 7> fields{};
-        std::size_t begin = 0;
-        for (std::size_t field = 0; field < fields.size(); ++field) {
-            const auto tab = line.find('\t', begin);
-            const auto end = tab == std::string::npos ? line.size() : tab;
-            fields[field] = std::string_view(line).substr(begin, end - begin);
-            begin = tab == std::string::npos ? line.size() : tab + 1;
-        }
-        double qvalue = std::stod(std::string(fields[3]));
-        if (fields[0] != "-") {
-            const auto compact = static_cast<std::size_t>(
-                std::stoull(std::string(fields[0])));
-            if (compact >= final_q.size()) {
+    for (const auto& row : buffered) {
+        double qvalue = row.primary_q;
+        if (row.compact_index !=
+            std::numeric_limits<std::size_t>::max()) {
+            if (row.compact_index >= final_q.size()) {
                 throw std::runtime_error(
-                    "Invalid compact PSM index in streamed score spool");
+                    "Invalid compact PSM index in streamed score buffer");
             }
-            qvalue = final_q[compact];
+            qvalue = final_q[row.compact_index];
         } else if (protein_filtered) {
             qvalue = 1.0;
         }
-        const std::string compact_peptide(fields[5]);
         const auto modifications = modification_info(
-            compact_peptide, fixed_cam);
+            row.peptide, fixed_cam);
         std::ostringstream assigned;
         for (std::size_t index = 0;
              index < modifications.assigned.size(); ++index) {
             if (index != 0) assigned << ", ";
             assigned << modifications.assigned[index];
         }
-        output << fields[1] << '\t'
-               << std::stod(std::string(fields[2])) << '\t' << qvalue
-               << '\t' << std::stod(std::string(fields[4])) << '\t'
-               << compact_peptide << '\t'
+        output << row.psm_id << '\t' << row.score << '\t' << qvalue
+               << '\t' << row.pep << '\t' << row.peptide << '\t'
                << (modifications.modified_peptide.empty()
                        ? modifications.sequence
                        : modifications.modified_peptide)
-               << '\t' << assigned.str() << '\t' << fields[6] << '\n';
+               << '\t' << assigned.str() << '\t' << row.proteins << '\n';
     }
 }
 
@@ -999,6 +753,10 @@ Summary run_streamed(const Config& config) {
         SpectralEntropyFeature::predict(config, prediction_catalog);
     summary.spectrum_prediction_device = spectrum_predictions.device();
     summary.spectrum_prediction_timing = spectrum_predictions.timing();
+    summary.spectrum_cache_read_timing =
+        spectrum_predictions.cache_read_timing();
+    summary.spectrum_cache_write_timing =
+        spectrum_predictions.cache_write_timing();
     const StageTiming spectrum_inference_outer{
         std::chrono::duration<double>(
             Clock::now() - spectrum_stage_begin).count(),
@@ -1011,6 +769,8 @@ Summary run_streamed(const Config& config) {
         PredictedRetentionTimeFeature::predict(config, prediction_catalog);
     summary.rt_prediction_device = rt_predictions.device();
     summary.rt_prediction_inference_timing = rt_predictions.timing();
+    summary.rt_cache_read_timing = rt_predictions.cache_read_timing();
+    summary.rt_cache_write_timing = rt_predictions.cache_write_timing();
     const StageTiming rt_inference_outer{
         std::chrono::duration<double>(
             Clock::now() - rt_prediction_begin).count(),
@@ -1026,8 +786,7 @@ Summary run_streamed(const Config& config) {
     std::vector<double> scores;
     std::vector<double> q;
     std::vector<double> pep;
-    StreamTemporaryDirectory temporary;
-    std::vector<StreamSpool> spools(summary.files);
+    std::vector<StreamScoreBuffer> score_buffers(summary.files);
     StageTiming entropy_scoring;
     StageTiming rt_calibration;
     StageTiming fold_setup;
@@ -1163,23 +922,16 @@ Summary run_streamed(const Config& config) {
                           << "); reporting 0 accepted PSMs for this sample.\n";
             }
             summary.sample_models[state.file] = std::move(state.model);
-            if (!config.filtered_only) {
-                spools[state.file] = {
-                    temporary.path /
-                        (std::to_string(state.file) + ".target.tsv"),
-                    temporary.path /
-                        (std::to_string(state.file) + ".decoy.tsv")};
-            }
         }
         add_timing(primary_statistics, merge_begin, merge_cpu_begin);
 
         if (!config.filtered_only) {
             run_phase(primary_statistics, [&](StreamedSampleState& state) {
-                write_stream_score_spool(
-                    spools[state.file].target, 1, state.data, state.scores,
+                score_buffers[state.file].target = buffer_stream_scores(
+                    1, state.data, state.scores,
                     state.q, state.pep, state.compact_indices);
-                write_stream_score_spool(
-                    spools[state.file].decoy, -1, state.data, state.scores,
+                score_buffers[state.file].decoy = buffer_stream_scores(
+                    -1, state.data, state.scores,
                     state.q, state.pep, state.compact_indices);
             });
         }
@@ -1283,10 +1035,12 @@ Summary run_streamed(const Config& config) {
                     const auto file = batch_begin + local;
                     const auto& prefix = config.output_prefixes[file];
                     write_stream_score_table(
-                        spools[file].target, prefix + "_target_psms.tsv",
+                        score_buffers[file].target,
+                        prefix + "_target_psms.tsv",
                         q, protein_filtered, config.fixed_cam);
                     write_stream_score_table(
-                        spools[file].decoy, prefix + "_decoy_psms.tsv",
+                        score_buffers[file].decoy,
+                        prefix + "_decoy_psms.tsv",
                         q, protein_filtered, config.fixed_cam);
                 });
         }
@@ -1354,39 +1108,6 @@ Summary run(const Config& config) {
         spectra_match_samples &&
         config.predict_rt;
     return can_stream ? run_streamed(config) : run_monolithic(config);
-}
-
-PredictionCacheSummary populate_prediction_cache(const Config& config) {
-    const auto total_begin = Clock::now();
-    const auto total_cpu_begin = std::clock();
-    initialize_sip_isotope_model(config);
-    const auto discovery_begin = Clock::now();
-    const auto discovery_cpu_begin = std::clock();
-    std::unordered_set<std::string> target_peptides;
-    auto catalog = PinReader::discover_predictions(config, target_peptides);
-
-    PredictionCacheSummary summary;
-    summary.peptide_charge_forms = catalog.rows.size();
-    add_timing(
-        summary.discovery_timing, discovery_begin, discovery_cpu_begin);
-    const auto spectrum_begin = Clock::now();
-    const auto spectrum_cpu_begin = std::clock();
-    auto spectra = SpectralEntropyFeature::predict(config, catalog);
-    add_timing(
-        summary.spectrum_stage_timing, spectrum_begin, spectrum_cpu_begin);
-    summary.spectrum_device = spectra.device();
-    summary.spectrum_timing = spectra.timing();
-    const auto rt_begin = Clock::now();
-    const auto rt_cpu_begin = std::clock();
-    auto rt = PredictedRetentionTimeFeature::predict(config, catalog);
-    add_timing(summary.rt_stage_timing, rt_begin, rt_cpu_begin);
-    summary.rt_device = rt.device();
-    summary.rt_timing = rt.timing();
-    summary.total_timing = {
-        std::chrono::duration<double>(Clock::now() - total_begin).count(),
-        static_cast<double>(std::clock() - total_cpu_begin) /
-            CLOCKS_PER_SEC};
-    return summary;
 }
 
 } // namespace aerith

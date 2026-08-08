@@ -45,9 +45,6 @@ struct Config {
     std::string spectrum_model_path;
     std::string rt_model_path;
     std::string prediction_cache_path;
-    bool populate_prediction_cache = false;
-    bool prediction_cache_only = false;
-    bool prediction_cache_targets_only = false;
     std::string sip_isotope;
     std::vector<std::string> fixed_ptm_selectors;
     std::vector<std::string> ptm_selectors;
@@ -128,8 +125,12 @@ struct Summary {
     std::string rt_prediction_device;
     StageTiming read_timing;
     StageTiming spectrum_prediction_timing;
+    StageTiming spectrum_cache_read_timing;
+    StageTiming spectrum_cache_write_timing;
     StageTiming spectrum_entropy_timing;
     StageTiming rt_prediction_inference_timing;
+    StageTiming rt_cache_read_timing;
+    StageTiming rt_cache_write_timing;
     StageTiming predicted_rt_timing;
     StageTiming fold_setup_timing;
     StageTiming rt_model_timing;
@@ -150,20 +151,7 @@ struct Summary {
     std::vector<SampleModelSummary> sample_models;
 };
 
-struct PredictionCacheSummary {
-    std::size_t peptide_charge_forms = 0;
-    std::string spectrum_device;
-    std::string rt_device;
-    StageTiming discovery_timing;
-    StageTiming spectrum_stage_timing;
-    StageTiming spectrum_timing;
-    StageTiming rt_stage_timing;
-    StageTiming rt_timing;
-    StageTiming total_timing;
-};
-
 Summary run(const Config& config);
-PredictionCacheSummary populate_prediction_cache(const Config& config);
 void print_summary(std::ostream& output, const Summary& summary);
 
 std::vector<double> target_decoy_qvalues(const std::vector<double>& scores,

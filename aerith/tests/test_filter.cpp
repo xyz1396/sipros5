@@ -1,6 +1,7 @@
 #include "filter.hpp"
 #include "isotope.hpp"
 #include "pipeline.hpp"
+#include "prediction_cache.hpp"
 #include "quantification.hpp"
 
 #include <algorithm>
@@ -16,6 +17,41 @@
 
 int main() {
     assert(aerith::Config{}.sample_parallelism == 3);
+    const auto cache_root = std::filesystem::temp_directory_path() /
+        "aerith_combined_prediction_cache_test";
+    std::filesystem::remove_all(cache_root);
+    std::filesystem::create_directories(cache_root);
+    aerith::Config cache_config;
+    cache_config.prediction_cache_path =
+        (cache_root / "regular_search_predictions").string();
+    cache_config.spectrum_model_path = "spectrum-model";
+    cache_config.rt_model_path = "rt-model";
+    const auto cache_key = aerith::prediction_cache_key(
+        "K[PEPTIDEK]R", 2);
+    aerith::PredictionCacheEntry spectrum_update;
+    spectrum_update.has_spectrum = true;
+    spectrum_update.fragments.push_back({500.25f, 0.75f, 'y', 4, 1});
+    aerith::update_prediction_cache(
+        cache_config, {{cache_key, spectrum_update}});
+    aerith::PredictionCacheEntry rt_update;
+    rt_update.has_rt = true;
+    rt_update.rt = 12.5f;
+    aerith::update_prediction_cache(cache_config, {{cache_key, rt_update}});
+    const auto combined_cache = aerith::read_prediction_cache(
+        cache_config, true);
+    assert(combined_cache.compatible);
+    assert(combined_cache.entries.size() == 1);
+    assert(combined_cache.entries.at(cache_key).has_spectrum);
+    assert(combined_cache.entries.at(cache_key).has_rt);
+    assert(combined_cache.entries.at(cache_key).fragments.size() == 1);
+    assert(std::abs(combined_cache.entries.at(cache_key).rt - 12.5f) < 1e-6f);
+    assert(std::filesystem::is_regular_file(
+        cache_config.prediction_cache_path + ".bin"));
+    assert(!std::filesystem::exists(
+        cache_config.prediction_cache_path + ".spectrum"));
+    assert(!std::filesystem::exists(
+        cache_config.prediction_cache_path + ".rt"));
+    std::filesystem::remove_all(cache_root);
     const auto split_tabs = [](const std::string& line) {
         std::vector<std::string> fields;
         std::size_t begin = 0;
@@ -779,6 +815,10 @@ int main() {
         {1.0, 4.0}, true, false,
         "four-population per-run calibration: 10 +2, 5 -2; "
         "SIP-bin FDR audit b0=2/post:0.01/null:0.00"});
+    summary.spectrum_cache_read_timing = {0.2, 0.2};
+    summary.spectrum_cache_write_timing = {0.3, 0.3};
+    summary.rt_cache_read_timing = {0.1, 0.1};
+    summary.rt_cache_write_timing = {0.15, 0.15};
     summary.protein_assembly_stages = assembly.stages;
     std::ostringstream log;
     aerith::print_summary(log, summary);
@@ -856,6 +896,21 @@ int main() {
     assert(log_text.find("Trace identified XICs + detect peaks/intensity") !=
            std::string::npos);
     assert(log_text.find("four-population per-run calibration") !=
+           std::string::npos);
+    assert(log_text.find("MBR calibration audit") != std::string::npos);
+    assert(log_text.find("Spectrum prediction cache .bin file read") !=
+           std::string::npos);
+    assert(log_text.find("Spectrum prediction cache .bin file merge/write") !=
+           std::string::npos);
+    assert(log_text.find("RT prediction cache .bin file read") !=
+           std::string::npos);
+    assert(log_text.find("RT prediction cache .bin file merge/write") !=
+           std::string::npos);
+    assert(log_text.find("MBR calibration audit") >
+           log_text.find("Overall OpenMP efficiency"));
+    assert(log_text.find("four-population per-run calibration") >
+           log_text.find("MBR calibration audit"));
+    assert(log_text.find("Detail: four-population per-run calibration") ==
            std::string::npos);
     assert(log_line(
         "Fit covariance MBR LDA + probability/global ion FDR").find(

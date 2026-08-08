@@ -1,4 +1,5 @@
 #include "pipeline.hpp"
+#include "prediction_cache.hpp"
 #include "torch_device.hpp"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -39,6 +41,8 @@ RtPredictionLibrary& RtPredictionLibrary::operator=(
     RtPredictionLibrary&&) noexcept = default;
 std::string RtPredictionLibrary::device() const { return {}; }
 StageTiming RtPredictionLibrary::timing() const { return {}; }
+StageTiming RtPredictionLibrary::cache_read_timing() const { return {}; }
+StageTiming RtPredictionLibrary::cache_write_timing() const { return {}; }
 
 RtPredictionLibrary PredictedRetentionTimeFeature::predict(
     const Config& config, const Dataset&) {
@@ -84,6 +88,8 @@ struct RtPredictionLibrary::Impl {
     std::unordered_map<std::string, float> predictions;
     std::string device;
     StageTiming timing;
+    StageTiming cache_read_timing;
+    StageTiming cache_write_timing;
 };
 
 RtPredictionLibrary::RtPredictionLibrary()
@@ -98,6 +104,12 @@ std::string RtPredictionLibrary::device() const {
 }
 StageTiming RtPredictionLibrary::timing() const {
     return impl_->timing;
+}
+StageTiming RtPredictionLibrary::cache_read_timing() const {
+    return impl_->cache_read_timing;
+}
+StageTiming RtPredictionLibrary::cache_write_timing() const {
+    return impl_->cache_write_timing;
 }
 
 struct TrainingPoint {
@@ -346,149 +358,70 @@ std::vector<float> predict_irt(const std::filesystem::path& model_path,
 #pragma GCC diagnostic pop
 #endif
 
-constexpr std::uint64_t kRtLibraryMagic = 0x4145525254505232ULL;
-
-void rt_cache_hash_bytes(
-    std::uint64_t& hash, const void* bytes, std::size_t size) {
-    const auto* value = static_cast<const unsigned char*>(bytes);
-    for (std::size_t index = 0; index < size; ++index) {
-        hash ^= value[index];
-        hash *= 1099511628211ULL;
-    }
-}
-
-void rt_cache_hash_string(std::uint64_t& hash, const std::string& value) {
-    rt_cache_hash_bytes(hash, value.data(), value.size());
-    constexpr unsigned char separator = 0xff;
-    rt_cache_hash_bytes(hash, &separator, 1);
-}
-
-std::uint64_t rt_library_fingerprint(const Config& config) {
-    std::uint64_t hash = 1469598103934665603ULL;
-    rt_cache_hash_string(hash, config.rt_model_path);
-    return hash;
-}
-
-std::filesystem::path rt_library_cache_path(const Config& config) {
-    return config.prediction_cache_path.empty()
-        ? std::filesystem::path{}
-        : std::filesystem::path(
-              config.prediction_cache_path + ".rt");
-}
-
-template <typename Value>
-bool read_rt_cache_value(std::istream& input, Value& value) {
-    return static_cast<bool>(input.read(
-        reinterpret_cast<char*>(&value), sizeof(value)));
-}
-
-template <typename Value>
-void write_rt_cache_value(std::ostream& output, const Value& value) {
-    output.write(reinterpret_cast<const char*>(&value), sizeof(value));
-}
-
 struct RtCacheLoad {
     bool compatible = false;
     std::size_t hits = 0;
-    std::uint64_t entries = 0;
+    std::unordered_set<std::string> exact_keys;
 };
 
 RtCacheLoad load_rt_library_cache(
     const Config& config, const Dataset& unique_peptides,
     RtPredictionLibrary::Impl& library) {
+    const auto timing_begin = std::chrono::steady_clock::now();
+    const auto timing_cpu_begin = std::clock();
     RtCacheLoad result;
-    const auto path = rt_library_cache_path(config);
-    if (path.empty() || !std::filesystem::is_regular_file(path)) {
-        return result;
-    }
-    std::ifstream input(path, std::ios::binary);
-    std::uint64_t magic = 0;
-    std::uint64_t fingerprint = 0;
-    std::uint64_t count = 0;
-    if (!read_rt_cache_value(input, magic) ||
-        !read_rt_cache_value(input, fingerprint) ||
-        !read_rt_cache_value(input, count) ||
-        magic != kRtLibraryMagic ||
-        fingerprint != rt_library_fingerprint(config) ||
-        count > 1000000000ULL) {
-        return result;
-    }
-    result.compatible = true;
-    result.entries = count;
-    std::unordered_set<std::string> requested;
-    requested.reserve(unique_peptides.rows.size());
-    for (const auto& psm : unique_peptides.rows) {
-        requested.insert(token_key(encode_peptide(psm).tokens));
-    }
-    std::unordered_map<std::string, float> predictions;
-    predictions.reserve(requested.size());
-    for (std::uint64_t entry = 0; entry < count; ++entry) {
-        std::uint32_t key_size = 0;
-        float prediction = 0.0f;
-        if (!read_rt_cache_value(input, key_size) || key_size > 65536) {
-            return {};
-        }
-        std::string key(key_size, '\0');
-        if (!input.read(key.data(), key.size()) ||
-            !read_rt_cache_value(input, prediction)) return {};
-        if (requested.find(key) != requested.end()) {
-            predictions.emplace(std::move(key), prediction);
+    auto cache = read_prediction_cache(config, false);
+    result.compatible = cache.compatible;
+    if (cache.compatible) {
+        result.exact_keys.reserve(unique_peptides.rows.size());
+        for (const auto& psm : unique_peptides.rows) {
+            const auto exact = prediction_cache_key(psm.peptide, psm.charge);
+            const auto found = cache.entries.find(exact);
+            if (found == cache.entries.end() || !found->second.has_rt ||
+                !result.exact_keys.insert(exact).second) {
+                continue;
+            }
+            library.predictions.emplace(
+                token_key(encode_peptide(psm).tokens), found->second.rt);
+            ++result.hits;
         }
     }
-    if (!input) return {};
-    result.hits = predictions.size();
-    library.predictions = std::move(predictions);
     if (result.hits != 0) library.device = "cache";
     library.timing = {};
+    library.cache_read_timing = {
+        std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - timing_begin).count(),
+        static_cast<double>(std::clock() - timing_cpu_begin) /
+            CLOCKS_PER_SEC};
     return result;
 }
 
-void append_rt_library_cache(
+StageTiming append_rt_library_cache(
     const Config& config,
+    const Dataset& unique_peptides,
     const std::unordered_map<std::string, float>& predictions,
-    const RtCacheLoad& loaded,
-    const std::unordered_set<std::string>* allowed) {
-    const auto path = rt_library_cache_path(config);
-    if (path.empty() || predictions.empty()) return;
-    const auto append_count = allowed == nullptr
-        ? predictions.size()
-        : static_cast<std::size_t>(std::count_if(
-              predictions.begin(), predictions.end(),
-              [&](const auto& entry) {
-                  return allowed->find(entry.first) != allowed->end();
-              }));
-    if (append_count == 0) return;
-    if (path.has_parent_path()) {
-        std::filesystem::create_directories(path.parent_path());
+    const RtCacheLoad& loaded) {
+    const auto timing_begin = std::chrono::steady_clock::now();
+    const auto timing_cpu_begin = std::clock();
+    std::unordered_map<std::string, PredictionCacheEntry> updates;
+    updates.reserve(unique_peptides.rows.size());
+    for (const auto& psm : unique_peptides.rows) {
+        if (psm.label != 1) continue;
+        const auto exact = prediction_cache_key(psm.peptide, psm.charge);
+        if (loaded.exact_keys.find(exact) != loaded.exact_keys.end()) continue;
+        const auto prediction = predictions.find(
+            token_key(encode_peptide(psm).tokens));
+        if (prediction == predictions.end()) continue;
+        auto& update = updates[exact];
+        update.has_rt = true;
+        update.rt = prediction->second;
     }
-    std::uint64_t original_count = loaded.compatible ? loaded.entries : 0;
-    if (!loaded.compatible) {
-        std::ofstream reset(path, std::ios::binary | std::ios::trunc);
-        if (!reset) return;
-        write_rt_cache_value(reset, kRtLibraryMagic);
-        write_rt_cache_value(reset, rt_library_fingerprint(config));
-        write_rt_cache_value(reset, original_count);
-        reset.close();
-        if (!reset) return;
-    }
-    std::fstream output(
-        path, std::ios::binary | std::ios::in | std::ios::out);
-    if (!output) return;
-    output.seekp(0, std::ios::end);
-    for (const auto& [key, prediction] : predictions) {
-        if (allowed != nullptr && allowed->find(key) == allowed->end()) {
-            continue;
-        }
-        write_rt_cache_value(
-            output, static_cast<std::uint32_t>(key.size()));
-        output.write(key.data(), key.size());
-        write_rt_cache_value(output, prediction);
-    }
-    if (!output) return;
-    const auto updated_count = original_count + append_count;
-    output.seekp(static_cast<std::streamoff>(sizeof(std::uint64_t) * 2));
-    write_rt_cache_value(
-        output, static_cast<std::uint64_t>(updated_count));
+    update_prediction_cache(config, updates);
+    return {
+        std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - timing_begin).count(),
+        static_cast<double>(std::clock() - timing_cpu_begin) /
+            CLOCKS_PER_SEC};
 }
 
 double median(std::vector<double> values) {
@@ -930,25 +863,39 @@ RtPredictionLibrary PredictedRetentionTimeFeature::predict(
             upsert_prediction_exemplar(missing, missing_keys, key, psm);
         }
     }
-    if (missing.rows.empty()) {
-        return library;
-    }
-    if (config.prediction_cache_only) {
-        std::ostringstream message;
-        message << "DIA-NN RT prediction cache is missing "
-                << missing.rows.size()
-                << " peptide forms; cache-only mode forbids model inference";
-        const std::size_t shown = std::min<std::size_t>(missing.rows.size(), 8);
-        if (shown != 0) {
-            message << ": ";
-            for (std::size_t index = 0; index < shown; ++index) {
-                if (index != 0) message << ", ";
-                message << missing.rows[index].peptide << '/'
-                        << missing.rows[index].charge;
-            }
-            if (shown != missing.rows.size()) message << ", ...";
+    if (!config.prediction_cache_path.empty()) {
+        std::unordered_map<std::string, int> requested_labels;
+        requested_labels.reserve(unique_peptides.rows.size());
+        for (const auto& psm : unique_peptides.rows) {
+            const auto key = prediction_cache_key(
+                psm.peptide, psm.charge);
+            const auto [found, inserted] = requested_labels.emplace(
+                key, psm.label);
+            if (!inserted && psm.label == 1) found->second = 1;
         }
-        throw std::runtime_error(message.str());
+        std::size_t target_reused = 0;
+        std::size_t target_predict = 0;
+        std::size_t decoy_reused = 0;
+        std::size_t decoy_predict = 0;
+        for (const auto& [key, label] : requested_labels) {
+            const bool reused =
+                loaded.exact_keys.find(key) != loaded.exact_keys.end();
+            if (label == 1) {
+                reused ? ++target_reused : ++target_predict;
+            } else {
+                reused ? ++decoy_reused : ++decoy_predict;
+            }
+        }
+        std::cerr << "DIA-NN RT cache: target reused="
+                  << target_reused << ", predict=" << target_predict
+                  << "; decoy reused=" << decoy_reused
+                  << ", predict=" << decoy_predict << '\n';
+    }
+    if (missing.rows.empty()) {
+        library.impl_->cache_write_timing = append_rt_library_cache(
+            config, unique_peptides,
+            library.impl_->predictions, loaded);
+        return library;
     }
     const auto prediction_begin = std::chrono::steady_clock::now();
     const std::clock_t prediction_cpu_begin = std::clock();
@@ -968,19 +915,9 @@ RtPredictionLibrary PredictedRetentionTimeFeature::predict(
         inferred.emplace(
             token_key(encoded.tokens), predicted[row]);
     }
-    std::unordered_set<std::string> target_keys;
-    const std::unordered_set<std::string>* cache_keys = nullptr;
-    if (config.prediction_cache_targets_only) {
-        target_keys.reserve(missing.rows.size());
-        for (const auto& psm : missing.rows) {
-            if (psm.label == 1) {
-                target_keys.insert(token_key(encode_peptide(psm).tokens));
-            }
-        }
-        cache_keys = &target_keys;
-    }
-    append_rt_library_cache(config, inferred, loaded, cache_keys);
     library.impl_->predictions.merge(inferred);
+    library.impl_->cache_write_timing = append_rt_library_cache(
+        config, unique_peptides, library.impl_->predictions, loaded);
     library.impl_->device = loaded.hits == 0
         ? prediction_device : "cache+" + prediction_device;
     return library;
@@ -1012,6 +949,8 @@ void PredictedRetentionTimeFeature::add(
     }
     data.rt_prediction_device = library.impl_->device;
     data.rt_prediction_timing = library.impl_->timing;
+    data.rt_cache_read_timing = library.impl_->cache_read_timing;
+    data.rt_cache_write_timing = library.impl_->cache_write_timing;
     std::vector<std::array<float, 3>> features(data.rows.size());
     std::vector<std::vector<std::size_t>> rows_by_file(data.input_paths.size());
     for (std::size_t i = 0; i < data.rows.size(); ++i) {

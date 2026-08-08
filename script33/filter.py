@@ -34,9 +34,7 @@ class filter:
                  productTopIsotopes: int = 5,
                  quantTopIsotopes: int = 6,
                  sampleParallelism: int = 3,
-                 predictionCachePath: str = "",
-                 predictionCacheOnly: bool = False,
-                 predictionCacheTargetsOnly: bool = False) -> None:
+                 predictionCachePath: str = "") -> None:
         self.aerithPath = aerithPath
         self.baseNames = baseNames
         self.outputPath = outputPath
@@ -62,8 +60,6 @@ class filter:
         self.quantTopIsotopes = quantTopIsotopes
         self.sampleParallelism = sampleParallelism
         self.predictionCachePath = predictionCachePath
-        self.predictionCacheOnly = predictionCacheOnly
-        self.predictionCacheTargetsOnly = predictionCacheTargetsOnly
         if self.sampleParallelism <= 0:
             raise ValueError("Aerith sample parallelism must be positive")
         if self.spectraPaths and len(self.spectraPaths) != len(self.baseNames):
@@ -87,10 +83,6 @@ class filter:
         prediction_cache = getattr(self, "predictionCachePath", "")
         if prediction_cache:
             arguments.extend(["--prediction-cache", prediction_cache])
-        if getattr(self, "predictionCacheOnly", False):
-            arguments.append("--prediction-cache-only")
-        if getattr(self, "predictionCacheTargetsOnly", False):
-            arguments.append("--prediction-cache-targets-only")
         if self.assembleProteins:
             arguments.extend([
                 "--database", self.fastaPath,
@@ -136,72 +128,6 @@ class filter:
             if self.spectraPaths:
                 arguments.extend(["--spectra", self.spectraPaths[index]])
         return shlex.join(arguments)
-
-    def prediction_cache_command(
-            self, inputPaths: list[str] | None = None,
-            cacheOnly: bool = False,
-            targetsOnly: bool | None = None) -> str:
-        prediction_cache = getattr(self, "predictionCachePath", "")
-        if not prediction_cache:
-            raise ValueError("Aerith prediction cache population requires a path")
-        arguments = [
-            self.aerithPath,
-            "--populate-prediction-cache",
-            "--prediction-cache", prediction_cache,
-        ]
-        if cacheOnly:
-            arguments.append("--prediction-cache-only")
-        if targetsOnly is None:
-            targetsOnly = getattr(
-                self, "predictionCacheTargetsOnly", False
-            )
-        if targetsOnly:
-            arguments.append("--prediction-cache-targets-only")
-        sip_isotope = getattr(self, "sipIsotope", "")
-        if sip_isotope and sip_isotope != "R":
-            arguments.extend(["--sip-isotope", sip_isotope])
-        for fixed_ptm in getattr(self, "fixedPtms", []):
-            arguments.extend(["--fixed-ptm", fixed_ptm])
-        for ptm in getattr(self, "ptms", []):
-            arguments.extend(["--ptm", ptm])
-        max_ptm_count = getattr(self, "maxPtmCount", None)
-        if max_ptm_count is not None:
-            arguments.extend(["--max-ptm-count", str(max_ptm_count)])
-        arguments.extend([
-            "--product-top-isotopes",
-            str(getattr(self, "productTopIsotopes", 5)),
-        ])
-        if inputPaths is None:
-            for index, base_name in enumerate(self.baseNames):
-                sample = f"{self.outputPath}/{base_name}/{base_name}"
-                arguments.extend([
-                    "--target-pin", f"{sample}_target.pin",
-                    "--decoy-pin", f"{sample}_decoy.pin",
-                ])
-                if self.spectraPaths:
-                    arguments.extend(["--spectra", self.spectraPaths[index]])
-        else:
-            if self.spectraPaths and len(inputPaths) != len(self.spectraPaths):
-                raise ValueError(
-                    "Aerith cache population requires one spectra path per input"
-                )
-            for index, path in enumerate(inputPaths):
-                arguments.extend(["--input", path])
-                if self.spectraPaths:
-                    arguments.extend(["--spectra", self.spectraPaths[index]])
-        return shlex.join(arguments)
-
-    def populate_prediction_cache(
-            self, inputPaths: list[str] | None = None,
-            cacheOnly: bool = False,
-            targetsOnly: bool | None = None) -> None:
-        command = self.prediction_cache_command(
-            inputPaths, cacheOnly, targetsOnly
-        )
-        self.logger.info(command)
-        if self.dryrun:
-            return
-        self.run_command(command)
 
     def run_command(self, command: str) -> None:
         environment = thread_env_updates(self.threadNumber)

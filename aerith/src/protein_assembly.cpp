@@ -51,6 +51,7 @@ struct ProteinScore {
     std::string protein;
     double score = 0.0;
     double probability = 0.0;
+    double evidence_score = 0.0;
     double qvalue = 1.0;
     bool decoy = false;
     bool picked = true;
@@ -2592,6 +2593,8 @@ void ProteinAssembler::sequential_filter(
         value.protein = protein;
         value.decoy = starts_with(protein, config.decoy_prefix);
         for (const auto& peptide : assigned) {
+            value.evidence_score += -std::log(std::max(
+                1e-18, 1.0 - peptides.at(peptide).probability));
             if (peptide.size() >= 7) {
                 value.score =
                     std::max(value.score, peptides.at(peptide).probability);
@@ -2623,6 +2626,9 @@ void ProteinAssembler::sequential_filter(
             if (left->score != right->score) {
                 return left->score > right->score;
             }
+            if (left->evidence_score != right->evidence_score) {
+                return left->evidence_score > right->evidence_score;
+            }
             return left->protein < right->protein;
         });
     std::size_t targets = 0;
@@ -2631,7 +2637,9 @@ void ProteinAssembler::sequential_filter(
     for (std::size_t begin = 0; begin < ordered.size();) {
         std::size_t end = begin;
         while (end < ordered.size() &&
-               ordered[end]->score == ordered[begin]->score) {
+               ordered[end]->score == ordered[begin]->score &&
+               ordered[end]->evidence_score ==
+                   ordered[begin]->evidence_score) {
             ordered[end]->decoy ? ++decoys : ++targets;
             ++end;
         }
@@ -2789,6 +2797,8 @@ ProteinAssemblyResult ProteinAssembler::write(
         value.protein = protein;
         value.decoy = starts_with(protein, config.decoy_prefix);
         for (const auto& peptide : assigned) {
+            value.evidence_score += -std::log(std::max(
+                1e-18, 1.0 - peptides.at(peptide).probability));
             if (peptide.size() >= 7) {
                 value.score =
                     std::max(value.score, peptides.at(peptide).probability);
@@ -2813,6 +2823,9 @@ ProteinAssemblyResult ProteinAssembler::write(
     }
     std::sort(ordered.begin(), ordered.end(), [](const auto* left, const auto* right) {
         if (left->score != right->score) return left->score > right->score;
+        if (left->evidence_score != right->evidence_score) {
+            return left->evidence_score > right->evidence_score;
+        }
         return left->protein < right->protein;
     });
     std::size_t targets = 0;
@@ -2821,7 +2834,9 @@ ProteinAssemblyResult ProteinAssembler::write(
     std::vector<double> raw_fdr(ordered.size(), 1.0);
     for (std::size_t begin = 0; begin < ordered.size();) {
         std::size_t end = begin;
-        while (end < ordered.size() && ordered[end]->score == ordered[begin]->score) {
+        while (end < ordered.size() &&
+               ordered[end]->score == ordered[begin]->score &&
+               ordered[end]->evidence_score == ordered[begin]->evidence_score) {
             ordered[end]->decoy ? ++decoys : ++targets;
             ++end;
         }

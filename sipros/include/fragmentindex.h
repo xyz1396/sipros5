@@ -6,6 +6,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -82,6 +83,10 @@ struct FragmentIndexStats
 	double loadCpuSeconds = 0.0;
 	double generateSeconds = 0.0;
 	double generateCpuSeconds = 0.0;
+	double collisionGuardSeconds = 0.0;
+	double collisionGuardCpuSeconds = 0.0;
+	uint64_t collisionGuardTargetPeptides = 0;
+	uint64_t collisionExcludedPeptides = 0;
 	bool loadedFromCache = false;
 };
 
@@ -135,12 +140,16 @@ public:
 private:
 	struct CacheHeader;
 
-	bool build(std::string &error);
+	bool build(std::string &error,
+			   const std::unordered_set<std::string> *forbiddenPeptides);
 	bool save(const std::string &path, uint64_t fingerprint,
 			  std::string &error);
 	bool load(const std::string &path, uint64_t fingerprint,
-			  std::string &error);
-	uint64_t computeFingerprint(std::string &error) const;
+			  std::string &error, bool enforceFingerprint = true);
+	bool readCacheIdentity(const std::string &path, uint64_t &identity,
+					   std::string &error) const;
+	uint64_t computeFingerprint(
+		std::string &error, uint64_t collisionGuardFingerprint) const;
 	static uint64_t computeHeaderChecksum(const CacheHeader &header);
 	void releaseMapping();
 	void bindOwnedStorage();

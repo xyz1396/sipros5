@@ -3,7 +3,6 @@ import sys
 import argparse
 import csv
 import logging
-import tempfile
 from logging import Logger
 import time
 from argparse import Namespace
@@ -262,9 +261,7 @@ citation:
                     assemble_proteins: bool, sip_isotope: str,
                     negative_control: str = "",
                     include_spectra: bool = False,
-                    prediction_cache_path: str = "",
-                    prediction_cache_only: bool = False,
-                    prediction_cache_targets_only: bool = False) -> filter:
+                    prediction_cache_path: str = "") -> filter:
         spectra_paths = None
         if include_spectra:
             spectra_paths = [
@@ -299,10 +296,7 @@ citation:
                       quantTopIsotopes=self.args.nPrecursor,
                       sampleParallelism=self.args.aerith_sample_parallelism,
                       spectraPaths=spectra_paths,
-                      predictionCachePath=prediction_cache_path,
-                      predictionCacheOnly=prediction_cache_only,
-                      predictionCacheTargetsOnly=
-                          prediction_cache_targets_only)
+                      predictionCachePath=prediction_cache_path)
 
     def report_filtered_psms(self, regular_search: search,
                              regular_output: str) -> None:
@@ -346,21 +340,24 @@ citation:
         regular_search.run()
 
         self.logger.info('Fast SIP phase 2/4: Aerith filtering of regular PSMs')
+        if not self.args.dryrun:
+            for suffix in ('.bin', '.spectrum', '.rt'):
+                cache_file = prediction_cache + suffix
+                if os.path.exists(cache_file):
+                    os.remove(cache_file)
+        self.logger.info(
+            'Aerith regular filtering predicts DIA-NN spectra and RT once and '
+            'caches every unique target PIN peptide-charge form in the same run'
+        )
         regular_filter = self.make_filter(
             regular_search, regular_output,
             assemble_proteins=True, sip_isotope='',
             include_spectra=True,
             prediction_cache_path=prediction_cache,
-            prediction_cache_targets_only=True,
         )
         regular_filter.run()
         if not self.args.dryrun:
             self.report_filtered_psms(regular_search, regular_output)
-
-        self.logger.info(
-            'Regular Aerith filtering cached target DIA-NN spectra and RT; '
-            'no post-filter prediction pass is required'
-        )
 
         self.logger.info(
             'Fast SIP phase 3/4: filtered-PSM SFI generation and spectra search'
@@ -377,46 +374,8 @@ citation:
         spectra_search.generatedSpectraDir = spectra_output
         spectra_search.reverse_fasta_sequences()
         generated = spectra_output
-        with tempfile.TemporaryDirectory(
-            prefix='sipros5-prediction-catalog-', dir='/dev/shm'
-        ) as prediction_catalog_dir:
-            spectra_search.predictionCatalogDir = prediction_catalog_dir
-            if not self.args.dryrun:
-                generated = spectra_search.generate_or_reuse_spectra_library()
-
-            regular_filter.sipIsotope = self.args.element
-            regular_filter.spectraPaths = [
-                next(iter(spectra_search.hdf5_paths.values()))
-            ]
-            target_catalog = os.path.join(
-                prediction_catalog_dir,
-                'spectra_target_prediction_catalog.tsv'
-            )
-            decoy_catalog = os.path.join(
-                prediction_catalog_dir,
-                'spectra_decoy_prediction_catalog.tsv'
-            )
-            self.logger.info(
-                'Verifying every target SFI peptide has cached regular-search '
-                'spectrum and RT predictions'
-            )
-            regular_filter.populate_prediction_cache(
-                [target_catalog], cacheOnly=True
-            )
-            self.logger.info(
-                'Caching predictions for generated SFI decoys before spectra search'
-            )
-            regular_filter.populate_prediction_cache(
-                [decoy_catalog], targetsOnly=False
-            )
         if not self.args.dryrun:
-            self.logger.info(
-                'Removed temporary SFI prediction catalog directory; all '
-                'target and decoy predictions are persisted only in '
-                'regular_search_predictions.spectrum and '
-                'regular_search_predictions.rt'
-            )
-        if not self.args.dryrun:
+            generated = spectra_search.generate_or_reuse_spectra_library()
             spectra_search.search_spectra_samples(generated)
 
         self.logger.info('Fast SIP phase 4/4: Aerith filtering and reporting')
@@ -427,11 +386,11 @@ citation:
             negative_control=self.args.negative_control or '',
             include_spectra=True,
             prediction_cache_path=prediction_cache,
-            prediction_cache_only=True,
         )
         self.logger.info(
-            'Aerith spectra-search filtering uses prediction cache only; '
-            'model inference is disabled'
+            'Aerith spectra-search filtering reuses cached target predictions; '
+            'generated-decoy spectra and RT are predicted in memory and are '
+            'not written to the target-only cache'
         )
         spectra_filter.run()
         return spectra_search

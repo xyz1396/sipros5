@@ -24,6 +24,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <type_traits>
+#include <unordered_set>
 
 #include <omp.h>
 
@@ -164,6 +165,33 @@ struct FastaEntry
 	std::string name;
 	std::string sequence;
 };
+
+std::string canonicalNakedPeptide(std::string_view decorated)
+{
+	const size_t open = decorated.find('[');
+	const size_t close = decorated.rfind(']');
+	if (open != std::string_view::npos && close > open)
+	{
+		decorated = decorated.substr(open + 1, close - open - 1);
+	}
+	std::string result;
+	result.reserve(decorated.size());
+	for (char symbol : decorated)
+	{
+		if (std::isalpha(static_cast<unsigned char>(symbol)) == 0)
+		{
+			continue;
+		}
+		char residue = static_cast<char>(std::toupper(
+			static_cast<unsigned char>(symbol)));
+		if (residue == 'I' || residue == 'J')
+		{
+			residue = 'L';
+		}
+		result.push_back(residue);
+	}
+	return result;
+}
 
 bool readFastaEntries(const std::string &path,
 					  std::vector<FastaEntry> &entries,
@@ -343,6 +371,53 @@ uint64_t FragmentIndex::computeHeaderChecksum(const CacheHeader &header)
 	return mix64(hash);
 }
 
+bool FragmentIndex::readCacheIdentity(
+	const std::string &path, uint64_t &identity, std::string &error) const
+{
+	identity = 0;
+	error.clear();
+	std::ifstream input(path, std::ios::binary);
+	CacheHeader header{};
+	if (!input || !input.read(
+			reinterpret_cast<char *>(&header), sizeof(header)))
+	{
+		error = "cannot read fragment-index cache header: " + path;
+		return false;
+	}
+	if (std::memcmp(header.magic, CacheMagic.data(), CacheMagic.size()) != 0 ||
+		header.version != CacheVersion ||
+		header.endian != EndianMarker ||
+		header.headerSize != sizeof(CacheHeader) ||
+		header.peptideRecordSize != sizeof(IndexedPeptideRecord) ||
+		header.fragmentRecordSize != sizeof(FragmentPosting) ||
+		header.fragmentBinRecordSize != sizeof(FragmentBin) ||
+		header.peptidesPerBlock != PeptidesPerBlock ||
+		header.fragmentBinWidth != FragmentBinWidth)
+	{
+		error = "file does not use the current v5 peptide-cache schema: " + path;
+		return false;
+	}
+	std::error_code sizeError;
+	const uint64_t actualSize = fs::file_size(path, sizeError);
+	if (sizeError || header.fileSize != actualSize)
+	{
+		error = "fragment-index cache size does not match its header: " + path;
+		return false;
+	}
+	identity = FnvOffsetBasis;
+	hashString(identity, "target-fragment-index-identity-v1");
+	hashValue(identity, header.fingerprint);
+	hashValue(identity, header.payloadChecksum);
+	hashValue(identity, header.fileSize);
+	hashValue(identity, header.peptideCount);
+	identity = mix64(identity);
+	if (identity == 0)
+	{
+		identity = 1;
+	}
+	return true;
+}
+
 FragmentIndex::FragmentIndex() = default;
 
 FragmentIndex::~FragmentIndex()
@@ -387,7 +462,8 @@ void FragmentIndex::bindOwnedStorage()
 	fragmentBinCount_ = ownedFragmentBins_.size();
 }
 
-uint64_t FragmentIndex::computeFingerprint(std::string &error) const
+uint64_t FragmentIndex::computeFingerprint(
+	std::string &error, uint64_t collisionGuardFingerprint) const
 {
 	error.clear();
 	uint64_t hash = FnvOffsetBasis;
@@ -414,6 +490,11 @@ uint64_t FragmentIndex::computeFingerprint(std::string &error) const
 	{
 		error = "failed while reading FASTA for index fingerprint: " + fastaPath;
 		return 0;
+	}
+	if (collisionGuardFingerprint != 0)
+	{
+		hashString(hash, "target-sfi-collision-guard-v2");
+		hashValue(hash, collisionGuardFingerprint);
 	}
 
 	hashString(hash, ProNovoConfig::getSearchType());
@@ -465,8 +546,40 @@ bool FragmentIndex::loadOrBuild(const std::string &cachePath,
 								std::string &error)
 {
 	stats_ = FragmentIndexStats{};
+	std::unordered_set<std::string> forbiddenTargetPeptides;
+	uint64_t collisionGuardFingerprint = 0;
+	bool guardedDecoyCache = false;
+	fs::path collisionTargetPath;
+	if (!cachePath.empty())
+	{
+		std::string cacheName = fs::path(cachePath).filename().string();
+		std::transform(cacheName.begin(), cacheName.end(), cacheName.begin(),
+			[](unsigned char symbol)
+			{
+				return static_cast<char>(std::tolower(symbol));
+			});
+		if (cacheName == "decoy.sfi")
+		{
+			guardedDecoyCache = true;
+			collisionTargetPath =
+				fs::path(cachePath).parent_path() / "target.sfi";
+			if (!fs::exists(collisionTargetPath))
+			{
+				error = "decoy.sfi collision guard requires sibling target.sfi: " +
+					collisionTargetPath.string();
+				return false;
+			}
+			if (!readCacheIdentity(collisionTargetPath.string(),
+					collisionGuardFingerprint, error))
+			{
+				error = "cannot read sibling target.sfi identity: " + error;
+				return false;
+			}
+		}
+	}
 	std::string fingerprintError;
-	const uint64_t fingerprint = computeFingerprint(fingerprintError);
+	const uint64_t fingerprint = computeFingerprint(
+		fingerprintError, collisionGuardFingerprint);
 	if (!fingerprintError.empty())
 	{
 		error = fingerprintError;
@@ -533,8 +646,59 @@ bool FragmentIndex::loadOrBuild(const std::string &cachePath,
 		}
 	}
 
+	if (guardedDecoyCache)
+	{
+		const PerformanceTimer collisionTimer;
+		FragmentIndex targetIndex;
+		std::string targetError;
+		if (!targetIndex.load(
+				collisionTargetPath.string(), 0, targetError, false))
+		{
+			error = "cannot load sibling target.sfi collision guard: " +
+				targetError;
+			return false;
+		}
+		forbiddenTargetPeptides.reserve(
+			static_cast<size_t>(targetIndex.peptideCount()));
+		for (uint64_t peptideId = 0;
+			 peptideId < targetIndex.peptideCount(); ++peptideId)
+		{
+			std::string identity = canonicalNakedPeptide(
+				targetIndex.peptideSequence(
+					static_cast<uint32_t>(peptideId)));
+			if (!identity.empty())
+			{
+				forbiddenTargetPeptides.insert(std::move(identity));
+			}
+		}
+		if (forbiddenTargetPeptides.empty())
+		{
+			error = "sibling target.sfi collision guard contains no peptides: " +
+				collisionTargetPath.string();
+			return false;
+		}
+		uint64_t verifiedTargetIdentity = 0;
+		if (!readCacheIdentity(collisionTargetPath.string(),
+				verifiedTargetIdentity, error))
+		{
+			error = "cannot verify sibling target.sfi identity: " + error;
+			return false;
+		}
+		if (verifiedTargetIdentity != collisionGuardFingerprint)
+		{
+			error = "sibling target.sfi changed while building decoy collision guard; retry";
+			return false;
+		}
+		stats_.collisionGuardTargetPeptides =
+			forbiddenTargetPeptides.size();
+		const PerformanceTiming collisionTiming = collisionTimer.elapsed();
+		stats_.collisionGuardSeconds = collisionTiming.wallSeconds;
+		stats_.collisionGuardCpuSeconds = collisionTiming.cpuSeconds;
+	}
+
 	const PerformanceTimer generateTimer;
-	if (!build(error))
+	if (!build(error, forbiddenTargetPeptides.empty()
+		? nullptr : &forbiddenTargetPeptides))
 	{
 		return false;
 	}
@@ -570,7 +734,9 @@ bool FragmentIndex::loadOrBuild(const std::string &cachePath,
 	return true;
 }
 
-bool FragmentIndex::build(std::string &error)
+bool FragmentIndex::build(
+	std::string &error,
+	const std::unordered_set<std::string> *forbiddenPeptides)
 {
 	error.clear();
 	releaseMapping();
@@ -600,6 +766,12 @@ bool FragmentIndex::build(std::string &error)
 		return false;
 	}
 
+	static const std::unordered_set<std::string> EmptyForbiddenPeptides;
+	const std::unordered_set<std::string> &forbiddenTargetPeptides =
+		forbiddenPeptides == nullptr
+			? EmptyForbiddenPeptides
+			: *forbiddenPeptides;
+
 	const PerformanceTimer enumerateTimer;
 	std::vector<FastaEntry> fastaEntries;
 	const PerformanceTimer parseTimer;
@@ -621,9 +793,10 @@ bool FragmentIndex::build(std::string &error)
 	};
 	std::vector<ProteinLayout> layouts(fastaEntries.size());
 	int digestFailed = 0;
+	uint64_t collisionExcludedPeptides = 0;
 	std::string digestError;
 	const PerformanceTimer countTimer;
-#pragma omp parallel for schedule(dynamic, 4) reduction(| : digestFailed)
+#pragma omp parallel for schedule(dynamic, 4) reduction(| : digestFailed) reduction(+ : collisionExcludedPeptides)
 	for (int64_t entryIndex = 0;
 		 entryIndex < static_cast<int64_t>(fastaEntries.size());
 		 ++entryIndex)
@@ -640,6 +813,14 @@ bool FragmentIndex::build(std::string &error)
 				while (database.getNextPeptide(&current))
 				{
 					const std::string &peptide = current.sPeptide;
+					if (!forbiddenTargetPeptides.empty() &&
+						forbiddenTargetPeptides.find(
+							canonicalNakedPeptide(peptide)) !=
+							forbiddenTargetPeptides.end())
+					{
+						++collisionExcludedPeptides;
+						continue;
+					}
 					const std::string &original = current.sOriginalPeptide;
 					const std::string &protein = current.sProteinName;
 					const std::string scoring =
@@ -692,6 +873,7 @@ bool FragmentIndex::build(std::string &error)
 		error = "failed while counting parallel FASTA digest: " + digestError;
 		return false;
 	}
+	stats_.collisionExcludedPeptides = collisionExcludedPeptides;
 
 	uint64_t totalPeptides = 0;
 	uint64_t totalStringBytes = 0;
@@ -754,6 +936,13 @@ bool FragmentIndex::build(std::string &error)
 				while (database.getNextPeptide(&current))
 				{
 					const std::string &peptide = current.sPeptide;
+					if (!forbiddenTargetPeptides.empty() &&
+						forbiddenTargetPeptides.find(
+							canonicalNakedPeptide(peptide)) !=
+							forbiddenTargetPeptides.end())
+					{
+						continue;
+					}
 					const std::string &original = current.sOriginalPeptide;
 					const std::string &protein = current.sProteinName;
 					const uint64_t recordIndex =
@@ -1227,6 +1416,8 @@ bool FragmentIndex::save(const std::string &path,
 	header.minimumNeutronMass = minimumNeutronMass_;
 	header.maximumNeutronMass = maximumNeutronMass_;
 	header.maximumPeptideMass = maximumPeptideMass_;
+	header.reserved[0] = stats_.collisionGuardTargetPeptides;
+	header.reserved[1] = stats_.collisionExcludedPeptides;
 	uint64_t peptideBytes = 0;
 	uint64_t blockIndexBytes = 0;
 	uint64_t binBytes = 0;
@@ -1389,7 +1580,8 @@ bool FragmentIndex::save(const std::string &path,
 
 bool FragmentIndex::load(const std::string &path,
 						 uint64_t fingerprint,
-						 std::string &error)
+						 std::string &error,
+						 bool enforceFingerprint)
 {
 	error.clear();
 	releaseMapping();
@@ -1457,7 +1649,7 @@ bool FragmentIndex::load(const std::string &path,
 		releaseMapping();
 		return false;
 	}
-	if (header->fingerprint != fingerprint)
+	if (enforceFingerprint && header->fingerprint != fingerprint)
 	{
 		error = "fragment-index cache fingerprint does not match FASTA/search chemistry";
 		releaseMapping();
@@ -1671,10 +1863,13 @@ bool FragmentIndex::load(const std::string &path,
 	minimumNeutronMass_ = header->minimumNeutronMass;
 	maximumNeutronMass_ = header->maximumNeutronMass;
 	maximumPeptideMass_ = header->maximumPeptideMass;
+	stats_.collisionGuardTargetPeptides = header->reserved[0];
+	stats_.collisionExcludedPeptides = header->reserved[1];
 	return true;
 #else
 	(void)path;
 	(void)fingerprint;
+	(void)enforceFingerprint;
 	error = "memory-mapped fragment-index caches are not implemented on this platform";
 	return false;
 #endif

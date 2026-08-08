@@ -362,32 +362,34 @@ class WorkflowAllocationTests(unittest.TestCase):
             prepare_calls = captured[:2]
             search_calls = captured[2:]
             self.assertEqual(
-                sorted(threads for _, threads in prepare_calls), [12, 12]
-            )
-            self.assertEqual(
-                sum(threads for _, threads in prepare_calls), 24
+                [threads for _, threads in prepare_calls], [24, 24]
             )
             self.assertEqual(
                 sorted(threads for _, threads in search_calls), [12] * 6
             )
             cache_paths: set[str] = set()
             output_paths: set[str] = set()
+            prepare_fastas: list[str] = []
             for command, _ in prepare_calls:
                 arguments = shlex.split(command)
                 self.assertIn("--prepare-only", arguments)
                 self.assertNotIn("-f", arguments)
                 self.assertNotIn("-o", arguments)
+                self.assertNotIn("--exclude-target-fasta", arguments)
+                prepare_fastas.append(arguments[arguments.index("-fasta") + 1])
                 cache_index = arguments.index("--fragment-index-cache")
                 cache_paths.add(arguments[cache_index + 1])
                 self.assertEqual(
                     Path(arguments[cache_index + 1]).parent, Path(output)
                 )
+            self.assertEqual(prepare_fastas, ["target.fasta", "decoy.fasta"])
             for command, _ in search_calls:
                 self.assertNotIn(" -c ", command)
                 self.assertNotRegex(command, r"(?:^| )-t \d+(?: |$)")
                 self.assertIn("--tolerance-ms1 0.01", command)
                 self.assertIn("--tolerance-ms2 0.02", command)
                 arguments = shlex.split(command)
+                self.assertNotIn("--exclude-target-fasta", arguments)
                 self.assertNotIn("--prepare-only", arguments)
                 scan_files = [
                     arguments[index + 1]
@@ -610,6 +612,7 @@ class WorkflowAllocationTests(unittest.TestCase):
             self.assertEqual(
                 arguments[arguments.index("--envelope-top-n") + 1], "3"
             )
+            self.assertNotIn("--prediction-catalog-dir", arguments)
 
     def test_fast_mode_caches_predictions_and_writes_sfi_in_spectra_dir(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -656,43 +659,6 @@ class WorkflowAllocationTests(unittest.TestCase):
             spectra.reverse_fasta_sequences.assert_called_once_with()
             for post_filter in post_filters:
                 post_filter.run.assert_called_once_with()
-            self.assertEqual(
-                post_filters[0].populate_prediction_cache.call_count, 2
-            )
-            post_filters[1].populate_prediction_cache.assert_not_called()
-            target_catalog = Path(
-                post_filters[0].populate_prediction_cache
-                .call_args_list[0].args[0][0]
-            )
-            decoy_catalog = Path(
-                post_filters[0].populate_prediction_cache
-                .call_args_list[1].args[0][0]
-            )
-            self.assertEqual(
-                target_catalog.name,
-                "spectra_target_prediction_catalog.tsv",
-            )
-            self.assertEqual(
-                decoy_catalog.name,
-                "spectra_decoy_prediction_catalog.tsv",
-            )
-            self.assertEqual(target_catalog.parent, decoy_catalog.parent)
-            self.assertTrue(
-                target_catalog.parent.name.startswith(
-                    "sipros5-prediction-catalog-"
-                )
-            )
-            self.assertFalse(target_catalog.parent.exists())
-            self.assertEqual(
-                post_filters[0].populate_prediction_cache.call_args_list[0]
-                .kwargs,
-                {"cacheOnly": True},
-            )
-            self.assertEqual(
-                post_filters[0].populate_prediction_cache.call_args_list[1]
-                .kwargs,
-                {"targetsOnly": False},
-            )
             cache_path = str(
                 Path(output, "regular", "regular_search_predictions")
             )
@@ -702,10 +668,9 @@ class WorkflowAllocationTests(unittest.TestCase):
                 ],
                 cache_path,
             )
-            self.assertTrue(
-                workflow.make_filter.call_args_list[0].kwargs[
-                    "prediction_cache_targets_only"
-                ]
+            self.assertNotIn(
+                "prediction_cache_targets_only",
+                workflow.make_filter.call_args_list[0].kwargs,
             )
             self.assertEqual(
                 workflow.make_filter.call_args_list[1].kwargs[
@@ -713,10 +678,13 @@ class WorkflowAllocationTests(unittest.TestCase):
                 ],
                 cache_path,
             )
-            self.assertTrue(
-                workflow.make_filter.call_args_list[1].kwargs[
-                    "prediction_cache_only"
-                ]
+            self.assertNotIn(
+                "prediction_cache_only",
+                workflow.make_filter.call_args_list[1].kwargs,
+            )
+            self.assertNotIn(
+                "prediction_cache_targets_only",
+                workflow.make_filter.call_args_list[1].kwargs,
             )
 
     def test_spectra_generation_accepts_recursive_hdf5_directory(self) -> None:
@@ -807,7 +775,7 @@ class WorkflowAllocationTests(unittest.TestCase):
 
             workflow.sipros_search()
 
-            self.assertEqual(captured, [8, 8, 8, 8])
+            self.assertEqual(captured, [16, 16, 8, 8])
             self.assertEqual(completed.read_bytes(), b"new target")
             self.assertEqual(
                 (completed.parent / "sample_decoy.pin").read_bytes(),
@@ -877,6 +845,7 @@ class WorkflowAllocationTests(unittest.TestCase):
         self.assertEqual(arguments.count("--decoy-pin"), 3)
         self.assertEqual(arguments.count("--output-prefix"), 3)
         self.assertEqual(arguments.count("--protein-output-dir"), 1)
+        self.assertNotIn("--protein-evidence-tiebreak", arguments)
         self.assertEqual(
             arguments[arguments.index("--product-top-isotopes") + 1], "5"
         )
@@ -929,8 +898,6 @@ class WorkflowAllocationTests(unittest.TestCase):
         workflow.negative_control = ""
         workflow.spectraPaths = []
         workflow.predictionCachePath = "/output/predictions"
-        workflow.predictionCacheOnly = True
-        workflow.predictionCacheTargetsOnly = False
 
         arguments = shlex.split(workflow.command())
         self.assertEqual(arguments.count("--input"), 0)
@@ -945,31 +912,9 @@ class WorkflowAllocationTests(unittest.TestCase):
             arguments[arguments.index("--prediction-cache") + 1],
             "/output/predictions",
         )
-        self.assertIn("--prediction-cache-only", arguments)
-
-    def test_prediction_cache_population_uses_filtered_psms_and_spectra(self) -> None:
-        workflow = object.__new__(filter_module.filter)
-        workflow.aerithPath = "aerith"
-        workflow.predictionCachePath = "/output/predictions"
-        workflow.sipIsotope = "C13"
-        workflow.fixedPtms = []
-        workflow.ptms = []
-        workflow.maxPtmCount = None
-        workflow.productTopIsotopes = 3
-        workflow.spectraPaths = ["one.h5", "two.h5"]
-
-        arguments = shlex.split(workflow.prediction_cache_command([
-            "one_filtered_psms.tsv", "two_filtered_psms.tsv"
-        ]))
-
-        self.assertIn("--populate-prediction-cache", arguments)
+        self.assertNotIn("--populate-prediction-cache", arguments)
         self.assertNotIn("--prediction-cache-only", arguments)
-        self.assertEqual(arguments.count("--input"), 2)
-        self.assertEqual(arguments.count("--spectra"), 2)
-        self.assertEqual(
-            arguments[arguments.index("--prediction-cache") + 1],
-            "/output/predictions",
-        )
+        self.assertNotIn("--prediction-cache-targets-only", arguments)
 
     def test_negative_control_is_passed_to_native_aerith(self) -> None:
         workflow = object.__new__(filter_module.filter)
@@ -1026,6 +971,13 @@ class WorkflowAllocationTests(unittest.TestCase):
 
 
 class NativeProteinAssemblyOwnershipTests(unittest.TestCase):
+    def test_aerith_streaming_scores_are_buffered_without_temp_files(self) -> None:
+        source = Path(ROOT, "aerith", "src", "filter.cpp").read_text()
+        self.assertIn("std::vector<StreamScoreBuffer> score_buffers", source)
+        self.assertIn("buffer_stream_scores", source)
+        self.assertNotIn("StreamTemporaryDirectory", source)
+        self.assertNotIn("/dev/shm", source)
+
     def test_python_workflow_has_one_aerith_post_search_stage(self) -> None:
         self.assertFalse(Path(SCRIPT_DIR, "quant.py").exists())
         main_source = Path(SCRIPT_DIR, "main.py").read_text()

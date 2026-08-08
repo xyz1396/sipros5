@@ -340,10 +340,8 @@ class search:
         target_cache = output_root / 'target.sfi'
         decoy_cache = output_root / 'decoy.sfi'
 
-        # Build/load both persistent caches first.  Unlike search jobs, these
-        # two preparation processes may receive fewer than eight cores when
-        # -t is small so they can remain concurrent while using the full
-        # requested CPU budget.
+        # The decoy cache automatically guards against naked-peptide collisions
+        # with its sibling target.sfi, so target preparation must finish first.
         prepare_commands = [
             (
                 f'{self.q(self.siprosPath)} search-fasta '
@@ -358,23 +356,12 @@ class search:
                 f'{self.q(decoy_cache)}'
             ),
         ]
-        prepare_allocation = allocate_threads(
-            self.threadNumber,
-            len(prepare_commands),
+        self.logger.info(
+            'Sipros Regular FASTA cache preparation: target then guarded '
+            f'decoy; 1 process x {self.threadNumber} threads'
         )
-        self.log_thread_allocation(
-            'Sipros Regular FASTA cache preparation', prepare_allocation
-        )
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=prepare_allocation.worker_count) as executor:
-            futures = [
-                executor.submit(self.run_command_sipros, cmd, threads)
-                for cmd, threads in zip(
-                    prepare_commands, prepare_allocation.task_threads
-                )
-            ]
-            for future in concurrent.futures.as_completed(futures):
-                future.result()
+        for command in prepare_commands:
+            self.run_command_sipros(command, self.threadNumber)
 
         common_search_args = (
             f' --top-psms-per-scan {self.topPsmsPerScan}'
@@ -565,7 +552,6 @@ class search:
                f'-b {self.q(sip_range)} -s {self.q(sip_step)} '
                f'--decoy -t {self.threadNumber}'
                f' --envelope-top-n {getattr(self, "sfiEnvelopeTopN", 3)}'
-               f'{(" --prediction-catalog-dir " + self.q(self.predictionCatalogDir)) if getattr(self, "predictionCatalogDir", "") else ""}'
                f'{self.fixed_ptm_args()}')
         if not self.dryrun:
             self.run_command(cmd, threads=self.threadNumber)

@@ -214,7 +214,6 @@ struct Args
 	std::string inputPath;
 	std::string hdf5Path;
 	std::string outputPath;
-	std::string predictionCatalogDirectory;
 	char sipAtom = '\0';
 	int sipIsotopeMassNumber = -1;
 	double fixedSipAbundancePct = 0.0;
@@ -417,7 +416,6 @@ void printUsage(const char *prog)
 			  << " [-p <prob cutoff, default 0.01>]"
 			  << " [--ppm <match tolerance, default 10>] [--min-matched-envelopes <N, default 3>]"
 			  << " [--envelope-top-n <N, default 3>]"
-			  << " [--prediction-catalog-dir <temporary directory>]"
 			  << " [--decoy] [--decoy-seed <N, default 1>]"
 			  << " [--fixed-ptm <name|default|none|all>] [-t <threads>]\n";
 	std::cerr << "HDF5 MS2 matching is always performed at the natural-abundance C13 baseline; -b controls shifted output abundance(s).\n";
@@ -622,14 +620,6 @@ bool parseArgs(int argc, char **argv, Args &args)
 				std::cerr << "Invalid SFI envelope top-N peak count.\n";
 				return false;
 			}
-		}
-		else if (opt == "--prediction-catalog-dir")
-		{
-			if (!requireValue(opt))
-			{
-				return false;
-			}
-			args.predictionCatalogDirectory = argv[++i];
 		}
 		else if (opt == "--fixed-ptm")
 		{
@@ -3203,42 +3193,6 @@ bool runOutputJobs(std::vector<OutputFileJob> &outputJobs,
 #endif
 }
 
-bool writePredictionCatalog(const fs::path &path,
-							const std::vector<PsmRow> &rows,
-							const std::vector<char> &baselineOk,
-							const std::vector<std::string> *decoyPeptides)
-{
-	std::ofstream output(path, std::ios::trunc);
-	if (!output)
-	{
-		std::cerr << "Cannot write prediction catalog: " << path << "\n";
-		return false;
-	}
-	output << "Peptide\tparentCharges\n";
-	size_t written = 0;
-	for (size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
-	{
-		if (!baselineOk[rowIndex])
-			continue;
-		const std::string &peptide = decoyPeptides == nullptr
-			? rows[rowIndex].peptide
-			: (*decoyPeptides)[rowIndex];
-		if (peptide.empty())
-			continue;
-		output << peptide << '\t' << rows[rowIndex].precursorCharge << '\n';
-		++written;
-	}
-	output.close();
-	if (!output)
-	{
-		std::cerr << "Failed while writing prediction catalog: " << path << "\n";
-		return false;
-	}
-	std::cerr << "Wrote " << written << " peptide-charge rows to "
-			  << path << "\n";
-	return true;
-}
-
 } // namespace
 
 int ExperimentalSpectraWorkflow::run(int argc, char **argv)
@@ -3456,7 +3410,7 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 					}
 					bool addedResidue = false;
 					if (generateDecoyPeptide(rows[rowIndex].peptide, experimentalPeptideMassClasses,
-											 args.decoySeed, rowIndex, decoyPeptides[rowIndex],
+										 args.decoySeed, rowIndex, decoyPeptides[rowIndex],
 											 addedResidue))
 					{
 						decoyAddedResidues[rowIndex] = addedResidue ? 1 : 0;
@@ -3603,32 +3557,6 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 	if (!allOutputSucceeded)
 	{
 		return 1;
-	}
-
-	if (!args.predictionCatalogDirectory.empty())
-	{
-		const fs::path catalogDirectory(args.predictionCatalogDirectory);
-		std::error_code directoryError;
-		fs::create_directories(catalogDirectory, directoryError);
-		if (directoryError)
-		{
-			std::cerr << "Cannot create temporary prediction catalog directory: "
-					  << catalogDirectory << "\n";
-			return 1;
-		}
-		if (!writePredictionCatalog(
-				catalogDirectory / "spectra_target_prediction_catalog.tsv",
-				rows, baselineOk, nullptr))
-		{
-			return 1;
-		}
-		if (args.writeDecoy &&
-			!writePredictionCatalog(
-				catalogDirectory / "spectra_decoy_prediction_catalog.tsv",
-				rows, baselineOk, &decoyPeptides))
-		{
-			return 1;
-		}
 	}
 
 	std::cerr << "Input peptide spectra: " << rows.size()

@@ -1041,8 +1041,26 @@ int SiprosSearchRunner::prepare(const DatabaseSearchArguments &args)
 			std::cout << ", " << formatMebibytes(stats.cacheBytes);
 		}
 		std::cout << "\n";
+		if (!stats.loadedFromCache &&
+			stats.collisionGuardTargetPeptides > 0)
+		{
+			std::cout << "  Target collision guard: "
+					  << formatPerformanceCount(
+						 stats.collisionGuardTargetPeptides)
+					  << " canonical naked target peptides; removed "
+					  << formatPerformanceCount(
+						 stats.collisionExcludedPeptides)
+					  << " colliding decoy peptide records\n";
+		}
 		printPerformanceHeader(
 			std::cout, "Peptide-cache timing", omp_get_max_threads());
+		if (stats.collisionGuardSeconds > 0.0)
+		{
+			printPerformanceStage(
+				std::cout, "Build target collision guard",
+				performanceTiming(stats.collisionGuardSeconds,
+					stats.collisionGuardCpuSeconds));
+		}
 		if (stats.loadedFromCache)
 		{
 			printPerformanceStage(

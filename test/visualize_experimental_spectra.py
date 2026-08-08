@@ -55,8 +55,9 @@ class PredictedSpectrum:
     ion_charges: np.ndarray
 
 
-SPECTRUM_CACHE_MAGIC = 0x4145525350454332
-RT_CACHE_MAGIC = 0x4145525254505232
+PREDICTION_CACHE_MAGIC = 0x4145525052454433
+PREDICTION_HAS_SPECTRUM = 1
+PREDICTION_HAS_RT = 2
 
 
 class SfiHeader(ctypes.Structure):
@@ -142,7 +143,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Visualize a Sipros SFI library together with its mandatory Aerith "
-            "predicted-spectrum and RT caches and mandatory real-sample Raxport HDF5. "
+            "combined prediction cache and mandatory real-sample Raxport HDF5. "
             "The script never substitutes a theoretical-spectra HDF5 file for SFI or "
             "reruns prediction when a cache entry is missing."
         )
@@ -152,12 +153,8 @@ def parse_args():
         help="SFI file, or a directory containing target/decoy .sfi files.",
     )
     parser.add_argument(
-        "--spectrum-cache", required=True,
-        help="Aerith regular_search_predictions.spectrum file.",
-    )
-    parser.add_argument(
-        "--rt-cache", required=True,
-        help="Aerith regular_search_predictions.rt file.",
+        "--prediction-cache", required=True,
+        help="Aerith regular_search_predictions.bin file.",
     )
     parser.add_argument(
         "--sample-hdf5", required=True,
@@ -412,76 +409,6 @@ def _spectrum_key(record):
     return (_peptide_body(record.peptide) + "\x1f" + str(record.charge)).encode()
 
 
-def _numeric_modification(body, position):
-    if position >= len(body) or body[position] != "[":
-        return None, position
-    close = body.find("]", position + 1)
-    if close < 0:
-        return None, position
-    try:
-        return float(body[position + 1:close]), close + 1
-    except ValueError:
-        return None, position
-
-
-def _rt_token_key(peptide):
-    body = _peptide_body(peptide)
-    residue_tokens = {
-        "G": 3, "A": 4, "V": 5, "I": 6, "L": 7, "P": 8,
-        "F": 9, "W": 10, "M": 11, "X": 11, "S": 13, "T": 14,
-        "Y": 15, "Q": 16, "E": 17, "N": 18, "D": 19, "K": 20,
-        "O": 20, "R": 21, "H": 22, "C": 24, "U": 24,
-    }
-    modification_symbols = set("~!@><%^&*()/$")
-    position = 0
-    acetylated = body.startswith("%")
-    if acetylated:
-        position = 1
-    else:
-        shift, next_position = _numeric_modification(body, position)
-        if shift is not None and abs(shift - 42.0106) < 0.02:
-            acetylated = True
-            position = next_position
-    tokens = [29 if acetylated else 1]
-    residues = 0
-    while position < len(body):
-        residue = body[position]
-        position += 1
-        if not ("A" <= residue <= "Z"):
-            continue
-        if residue not in residue_tokens:
-            raise ValueError(f"Unsupported DIA-NN RT residue in {peptide}: {residue}")
-        modification = ""
-        if position < len(body) and body[position] in modification_symbols:
-            modification = body[position]
-            position += 1
-        numeric, next_position = _numeric_modification(body, position)
-        if numeric is not None:
-            position = next_position
-        token = residue_tokens[residue]
-        if residue == "C" and modification != "(" and (
-                numeric is None or abs(numeric - 57.0215) < 0.02):
-            token = 25
-        elif residue == "M" and (
-                modification == "~" or
-                (numeric is not None and abs(numeric - 15.9949) < 0.02)):
-            token = 26
-        elif residue in "STY" and (
-                modification in "@><" or
-                (numeric is not None and abs(numeric - 79.9663) < 0.02)):
-            token = {"S": 31, "T": 32, "Y": 33}[residue]
-        elif residue == "K" and (
-                modification == "&" or
-                (numeric is not None and abs(numeric - 28.0313) < 0.02)):
-            token = 39
-        tokens.append(token)
-        residues += 1
-    if residues < 5:
-        raise ValueError(f"DIA-NN RT prediction requires five residues: {peptide}")
-    tokens.append(2)
-    return bytes(tokens)
-
-
 def _read_cache_header(stream, expected_magic, path):
     header = stream.read(24)
     if len(header) != 24:
@@ -494,25 +421,26 @@ def _read_cache_header(stream, expected_magic, path):
     return count
 
 
-def load_spectrum_cache(path, requested):
-    result = {}
+def load_prediction_cache(path, requested):
+    spectra = {}
+    retention = {}
     with Path(path).open("rb") as stream:
-        count = _read_cache_header(stream, SPECTRUM_CACHE_MAGIC, path)
+        count = _read_cache_header(stream, PREDICTION_CACHE_MAGIC, path)
         fragment_struct = struct.Struct("<ffcIi")
         for _ in range(count):
             raw = stream.read(4)
             if len(raw) != 4:
-                raise ValueError(f"{path}: truncated spectrum-cache key size")
+                raise ValueError(f"{path}: truncated prediction-cache key size")
             key_size, = struct.unpack("<I", raw)
             if key_size > 65536:
-                raise ValueError(f"{path}: invalid spectrum-cache key size")
+                raise ValueError(f"{path}: invalid prediction-cache key size")
             key = stream.read(key_size)
-            raw = stream.read(4)
-            if len(key) != key_size or len(raw) != 4:
-                raise ValueError(f"{path}: truncated spectrum-cache entry")
-            fragment_count, = struct.unpack("<I", raw)
+            raw = stream.read(9)
+            if len(key) != key_size or len(raw) != 9:
+                raise ValueError(f"{path}: truncated prediction-cache entry")
+            flags, predicted_rt, fragment_count = struct.unpack("<BfI", raw)
             if fragment_count > 10000:
-                raise ValueError(f"{path}: invalid spectrum-cache fragment count")
+                raise ValueError(f"{path}: invalid prediction-cache fragment count")
             if key not in requested:
                 stream.seek(fragment_count * fragment_struct.size, 1)
                 continue
@@ -522,53 +450,37 @@ def load_spectrum_cache(path, requested):
                 if len(raw) != fragment_struct.size:
                     raise ValueError(f"{path}: truncated predicted fragment")
                 fragments.append(fragment_struct.unpack(raw))
-            result[key] = PredictedSpectrum(
-                mz=np.asarray([value[0] for value in fragments], dtype=float),
-                intensity=np.asarray([value[1] for value in fragments], dtype=float),
-                ion_kinds=[value[2].decode("ascii") for value in fragments],
-                ion_positions=np.asarray([value[3] for value in fragments], dtype=int),
-                ion_charges=np.asarray([value[4] for value in fragments], dtype=int),
-            )
-    missing = requested.difference(result)
-    if missing:
+            if flags & PREDICTION_HAS_SPECTRUM:
+                spectra[key] = PredictedSpectrum(
+                    mz=np.asarray([value[0] for value in fragments], dtype=float),
+                    intensity=np.asarray([value[1] for value in fragments], dtype=float),
+                    ion_kinds=[value[2].decode("ascii") for value in fragments],
+                    ion_positions=np.asarray([value[3] for value in fragments], dtype=int),
+                    ion_charges=np.asarray([value[4] for value in fragments], dtype=int),
+                )
+            if flags & PREDICTION_HAS_RT:
+                retention[key] = predicted_rt
+    missing_spectra = requested.difference(spectra)
+    if missing_spectra:
         raise ValueError(
-            f"{path}: {len(missing)} selected SFI peptide-charge forms are absent; "
+            f"{path}: {len(missing_spectra)} selected SFI peptide-charge forms "
+            "lack predicted spectra; prediction fallback is disabled"
+        )
+    missing_rt = requested.difference(retention)
+    if missing_rt:
+        raise ValueError(
+            f"{path}: {len(missing_rt)} selected SFI peptide-charge forms "
+            "lack predicted RT; "
             "prediction fallback is disabled"
         )
-    return result
+    return spectra, retention
 
 
-def load_rt_cache(path, requested):
-    result = {}
-    with Path(path).open("rb") as stream:
-        count = _read_cache_header(stream, RT_CACHE_MAGIC, path)
-        for _ in range(count):
-            raw = stream.read(4)
-            if len(raw) != 4:
-                raise ValueError(f"{path}: truncated RT-cache key size")
-            key_size, = struct.unpack("<I", raw)
-            if key_size > 65536:
-                raise ValueError(f"{path}: invalid RT-cache key size")
-            key = stream.read(key_size)
-            raw = stream.read(4)
-            if len(key) != key_size or len(raw) != 4:
-                raise ValueError(f"{path}: truncated RT-cache entry")
-            if key in requested:
-                result[key] = struct.unpack("<f", raw)[0]
-    missing = requested.difference(result)
-    if missing:
-        raise ValueError(
-            f"{path}: {len(missing)} selected SFI peptides lack predicted RT; "
-            "prediction fallback is disabled"
-        )
-    return result
-
-
-def attach_predictions(records, spectrum_cache_path, rt_cache_path):
+def attach_predictions(records, prediction_cache_path):
     spectrum_keys = {_spectrum_key(record) for record in records}
-    rt_keys = {_rt_token_key(record.peptide) for record in records}
-    spectra = load_spectrum_cache(spectrum_cache_path, spectrum_keys)
-    retention = load_rt_cache(rt_cache_path, rt_keys)
+    spectra, retention = load_prediction_cache(
+        prediction_cache_path, spectrum_keys
+    )
     for record in records:
         predicted = spectra[_spectrum_key(record)]
         record.predicted_fragment_mz = predicted.mz
@@ -576,7 +488,7 @@ def attach_predictions(records, spectrum_cache_path, rt_cache_path):
         record.predicted_ion_kinds = predicted.ion_kinds
         record.predicted_ion_positions = predicted.ion_positions
         record.predicted_ion_charges = predicted.ion_charges
-        record.predicted_rt = retention[_rt_token_key(record.peptide)]
+        record.predicted_rt = retention[_spectrum_key(record)]
 
 
 def _sample_name_and_scan(psm_id):
@@ -1138,8 +1050,7 @@ def _plot_records(records, input_path, output_path, args):
 def main():
     args = parse_args()
     input_path = Path(args.sfi).resolve()
-    spectrum_cache_path = Path(args.spectrum_cache).resolve()
-    rt_cache_path = Path(args.rt_cache).resolve()
+    prediction_cache_path = Path(args.prediction_cache).resolve()
     sample_hdf5_path = Path(args.sample_hdf5).resolve()
     output_path = Path(args.output).resolve()
     tsv_output_path = Path(args.tsv_output).resolve() if args.tsv_output else output_path.with_suffix(".tsv")
@@ -1154,8 +1065,7 @@ def main():
         raise SystemExit("--mz-min must be smaller than --mz-max.")
     for label, path in (
         ("SFI", input_path),
-        ("spectrum cache", spectrum_cache_path),
-        ("RT cache", rt_cache_path),
+        ("prediction cache", prediction_cache_path),
         ("real-sample HDF5", sample_hdf5_path),
     ):
         if not path.exists():
@@ -1174,7 +1084,7 @@ def main():
     if not selected:
         raise SystemExit("No records matched the requested filters.")
     try:
-        attach_predictions(selected, spectrum_cache_path, rt_cache_path)
+        attach_predictions(selected, prediction_cache_path)
         attach_raw_spectra(selected, sample_hdf5_path)
     except (OSError, ValueError, KeyError) as error:
         raise SystemExit(str(error)) from error
@@ -1189,8 +1099,7 @@ def main():
     print(f"sfi_files={sfi_file_count}")
     print(f"total_sfi_records={total_sfi_records}")
     print(f"sampled_sfi_records={len(records)}")
-    print(f"spectrum_cache={spectrum_cache_path}")
-    print(f"rt_cache={rt_cache_path}")
+    print(f"prediction_cache={prediction_cache_path}")
     print(f"real_sample_hdf5={sample_hdf5_path}")
     for label, summary in (
         ("matched_envelope_count", matched_envelope_summary),

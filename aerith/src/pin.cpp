@@ -494,10 +494,6 @@ Dataset PinReader::discover_predictions(
                     label = static_cast<int>(parse_number(
                         fields[label_column], "Label", line_number));
                 }
-                if (config.populate_prediction_cache &&
-                    config.prediction_cache_targets_only && label != 1) {
-                    continue;
-                }
                 const auto key = peptide + '\x1f' +
                     std::to_string(charge);
                 if (unique.insert(key).second) {

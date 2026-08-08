@@ -168,11 +168,17 @@ Regular-search reports, including peptide and protein TSVs, are written below
 The single target and generated-decoy SFI files are also written directly in
 `spectra_search/`. Fast mode keeps a keyed cache of the regular-search DIA-NN
 spectrum and RT predictions in `regular/`; regular-search decoy predictions
-are not persisted. SFI generation verifies that every target library peptide is
-already cached, predicts and caches only the newly generated SFI decoys before
-spectra search starts, and the final Aerith pass is cache-only. A
-missing downstream peptide therefore stops with an error instead of invoking
-either prediction model again. `--aerith-sample-parallelism` controls how many
+are not persisted. Aerith writes every unique target PIN peptide-charge form
+to that cache during the regular-filtering prediction pass, so cache population
+does not invoke the spectrum or RT model a second time. Regular cache
+preparation writes `target.sfi` first. When
+the sibling `decoy.sfi` is built, Sipros automatically loads `target.sfi` and
+omits every canonical naked-peptide overlap (with I/J/L equivalence) before
+building precursor and fragment postings. The target-index identity is part of
+the decoy cache fingerprint, so a stale unguarded decoy cache is rebuilt. The
+final Aerith pass reuses target predictions and predicts generated spectra-search
+decoys in memory without persisting them or writing prediction catalog TSVs.
+`--aerith-sample-parallelism` controls how many
 samples Aerith processes concurrently; larger values can use more RAM. The
 workflow logs the accepted regular-search target PSM count for each sample and
 emits a warning when a sample has zero accepted target PSMs.

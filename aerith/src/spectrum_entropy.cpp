@@ -1,5 +1,6 @@
 #include "pipeline.hpp"
 #include "isotope.hpp"
+#include "prediction_cache.hpp"
 #include "torch_device.hpp"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -41,6 +43,8 @@ SpectrumPredictionLibrary& SpectrumPredictionLibrary::operator=(
     SpectrumPredictionLibrary&&) noexcept = default;
 std::string SpectrumPredictionLibrary::device() const { return {}; }
 StageTiming SpectrumPredictionLibrary::timing() const { return {}; }
+StageTiming SpectrumPredictionLibrary::cache_read_timing() const { return {}; }
+StageTiming SpectrumPredictionLibrary::cache_write_timing() const { return {}; }
 
 SpectrumPredictionLibrary SpectralEntropyFeature::predict(
     const Config& config, const Dataset&) {
@@ -113,188 +117,80 @@ struct SpectrumPredictionLibrary::Impl {
     std::unordered_map<std::string, std::vector<Fragment>> predictions;
     std::string device;
     StageTiming timing;
+    StageTiming cache_read_timing;
+    StageTiming cache_write_timing;
 };
-
-std::string spectrum_peptide_body(const std::string& peptide);
-
-constexpr std::uint64_t kSpectrumLibraryMagic = 0x4145525350454332ULL;
-
-void spectrum_cache_hash_bytes(
-    std::uint64_t& hash, const void* bytes, std::size_t size) {
-    const auto* value = static_cast<const unsigned char*>(bytes);
-    for (std::size_t index = 0; index < size; ++index) {
-        hash ^= value[index];
-        hash *= 1099511628211ULL;
-    }
-}
-
-void spectrum_cache_hash_string(
-    std::uint64_t& hash, const std::string& value) {
-    spectrum_cache_hash_bytes(hash, value.data(), value.size());
-    constexpr unsigned char separator = 0xff;
-    spectrum_cache_hash_bytes(hash, &separator, 1);
-}
-
-std::uint64_t spectrum_library_fingerprint(const Config& config) {
-    std::uint64_t hash = 1469598103934665603ULL;
-    spectrum_cache_hash_string(hash, config.spectrum_model_path);
-    return hash;
-}
-
-std::filesystem::path spectrum_library_cache_path(const Config& config) {
-    return config.prediction_cache_path.empty()
-        ? std::filesystem::path{}
-        : std::filesystem::path(
-              config.prediction_cache_path + ".spectrum");
-}
-
-template <typename Value>
-bool read_spectrum_cache_value(std::istream& input, Value& value) {
-    return static_cast<bool>(input.read(
-        reinterpret_cast<char*>(&value), sizeof(value)));
-}
-
-template <typename Value>
-void write_spectrum_cache_value(std::ostream& output, const Value& value) {
-    output.write(reinterpret_cast<const char*>(&value), sizeof(value));
-}
 
 struct SpectrumCacheLoad {
     bool compatible = false;
     std::size_t hits = 0;
-    std::uint64_t entries = 0;
 };
 
 SpectrumCacheLoad load_spectrum_library_cache(
     const Config& config, const Dataset& unique_peptides,
     SpectrumPredictionLibrary::Impl& library) {
+    const auto timing_begin = std::chrono::steady_clock::now();
+    const auto timing_cpu_begin = std::clock();
     SpectrumCacheLoad result;
-    const auto path = spectrum_library_cache_path(config);
-    if (path.empty() || !std::filesystem::is_regular_file(path)) {
-        return result;
-    }
-    std::ifstream input(path, std::ios::binary);
-    std::uint64_t magic = 0;
-    std::uint64_t fingerprint = 0;
-    std::uint64_t count = 0;
-    if (!read_spectrum_cache_value(input, magic) ||
-        !read_spectrum_cache_value(input, fingerprint) ||
-        !read_spectrum_cache_value(input, count) ||
-        magic != kSpectrumLibraryMagic ||
-        fingerprint != spectrum_library_fingerprint(config) ||
-        count > 1000000000ULL) {
-        return result;
-    }
-    result.compatible = true;
-    result.entries = count;
-    std::unordered_set<std::string> requested;
-    requested.reserve(unique_peptides.rows.size());
-    for (const auto& psm : unique_peptides.rows) {
-        requested.insert(
-            spectrum_peptide_body(psm.peptide) + '\x1f' +
-            std::to_string(psm.charge));
-    }
-    std::unordered_map<std::string, std::vector<Fragment>> predictions;
-    predictions.reserve(requested.size());
-    for (std::uint64_t entry = 0; entry < count; ++entry) {
-        std::uint32_t key_size = 0;
-        std::uint32_t fragment_count = 0;
-        if (!read_spectrum_cache_value(input, key_size) ||
-            key_size > 65536) return {};
-        std::string key(key_size, '\0');
-        if (!input.read(key.data(), key.size()) ||
-            !read_spectrum_cache_value(input, fragment_count) ||
-            fragment_count > 10000) return {};
-        if (requested.find(key) == requested.end()) {
-            constexpr std::streamoff encoded_fragment_bytes =
-                sizeof(float) * 2 + sizeof(char) +
-                sizeof(std::uint32_t) + sizeof(std::int32_t);
-            input.seekg(
-                static_cast<std::streamoff>(fragment_count) *
-                    encoded_fragment_bytes,
-                std::ios::cur);
-            if (!input) return {};
-            continue;
+    auto cache = read_prediction_cache(config, true);
+    result.compatible = cache.compatible;
+    if (cache.compatible) {
+        for (const auto& psm : unique_peptides.rows) {
+            const auto key = prediction_cache_key(psm.peptide, psm.charge);
+            const auto found = cache.entries.find(key);
+            if (found == cache.entries.end() || !found->second.has_spectrum ||
+                library.predictions.find(key) != library.predictions.end()) {
+                continue;
+            }
+            std::vector<Fragment> fragments;
+            fragments.reserve(found->second.fragments.size());
+            for (const auto& cached : found->second.fragments) {
+                fragments.push_back({
+                    cached.mz, cached.intensity, cached.ion_kind,
+                    cached.ion_position, cached.charge});
+            }
+            library.predictions.emplace(key, std::move(fragments));
+            ++result.hits;
         }
-        std::vector<Fragment> fragments(fragment_count);
-        for (auto& fragment : fragments) {
-            std::uint32_t position = 0;
-            std::int32_t charge = 0;
-            if (!read_spectrum_cache_value(input, fragment.mz) ||
-                !read_spectrum_cache_value(input, fragment.intensity) ||
-                !read_spectrum_cache_value(input, fragment.ion_kind) ||
-                !read_spectrum_cache_value(input, position) ||
-                !read_spectrum_cache_value(input, charge)) return {};
-            fragment.ion_position = position;
-            fragment.charge = charge;
-        }
-        predictions.emplace(std::move(key), std::move(fragments));
     }
-    if (!input) return {};
-    result.hits = predictions.size();
-    library.predictions = std::move(predictions);
     if (result.hits != 0) library.device = "cache";
     library.timing = {};
+    library.cache_read_timing = {
+        std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - timing_begin).count(),
+        static_cast<double>(std::clock() - timing_cpu_begin) /
+            CLOCKS_PER_SEC};
     return result;
 }
 
-void append_spectrum_library_cache(
+StageTiming append_spectrum_library_cache(
     const Config& config,
     const std::unordered_map<std::string, std::vector<Fragment>>& predictions,
-    const SpectrumCacheLoad& loaded,
     const std::unordered_set<std::string>* allowed) {
-    const auto path = spectrum_library_cache_path(config);
-    if (path.empty() || predictions.empty()) return;
-    const auto append_count = allowed == nullptr
-        ? predictions.size()
-        : static_cast<std::size_t>(std::count_if(
-              predictions.begin(), predictions.end(),
-              [&](const auto& entry) {
-                  return allowed->find(entry.first) != allowed->end();
-              }));
-    if (append_count == 0) return;
-    if (path.has_parent_path()) {
-        std::filesystem::create_directories(path.parent_path());
-    }
-    std::uint64_t original_count = loaded.compatible ? loaded.entries : 0;
-    if (!loaded.compatible) {
-        std::ofstream reset(path, std::ios::binary | std::ios::trunc);
-        if (!reset) return;
-        write_spectrum_cache_value(reset, kSpectrumLibraryMagic);
-        write_spectrum_cache_value(reset, spectrum_library_fingerprint(config));
-        write_spectrum_cache_value(reset, original_count);
-        reset.close();
-        if (!reset) return;
-    }
-    std::fstream output(
-        path, std::ios::binary | std::ios::in | std::ios::out);
-    if (!output) return;
-    output.seekp(0, std::ios::end);
+    const auto timing_begin = std::chrono::steady_clock::now();
+    const auto timing_cpu_begin = std::clock();
+    std::unordered_map<std::string, PredictionCacheEntry> updates;
+    updates.reserve(predictions.size());
     for (const auto& [key, fragments] : predictions) {
         if (allowed != nullptr && allowed->find(key) == allowed->end()) {
             continue;
         }
-        write_spectrum_cache_value(
-            output, static_cast<std::uint32_t>(key.size()));
-        output.write(key.data(), key.size());
-        write_spectrum_cache_value(
-            output, static_cast<std::uint32_t>(fragments.size()));
+        auto& update = updates[key];
+        update.has_spectrum = true;
+        update.fragments.reserve(fragments.size());
         for (const auto& fragment : fragments) {
-            write_spectrum_cache_value(output, fragment.mz);
-            write_spectrum_cache_value(output, fragment.intensity);
-            write_spectrum_cache_value(output, fragment.ion_kind);
-            write_spectrum_cache_value(
-                output, static_cast<std::uint32_t>(
-                    fragment.ion_position));
-            write_spectrum_cache_value(
-                output, static_cast<std::int32_t>(fragment.charge));
+            update.fragments.push_back({
+                fragment.mz, fragment.intensity, fragment.ion_kind,
+                static_cast<std::uint32_t>(fragment.ion_position),
+                static_cast<std::int32_t>(fragment.charge)});
         }
     }
-    if (!output) return;
-    const auto updated_count = original_count + append_count;
-    output.seekp(static_cast<std::streamoff>(sizeof(std::uint64_t) * 2));
-    write_spectrum_cache_value(
-        output, static_cast<std::uint64_t>(updated_count));
+    update_prediction_cache(config, updates);
+    return {
+        std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - timing_begin).count(),
+        static_cast<double>(std::clock() - timing_cpu_begin) /
+            CLOCKS_PER_SEC};
 }
 
 SpectrumPredictionLibrary::SpectrumPredictionLibrary()
@@ -309,6 +205,12 @@ std::string SpectrumPredictionLibrary::device() const {
 }
 StageTiming SpectrumPredictionLibrary::timing() const {
     return impl_->timing;
+}
+StageTiming SpectrumPredictionLibrary::cache_read_timing() const {
+    return impl_->cache_read_timing;
+}
+StageTiming SpectrumPredictionLibrary::cache_write_timing() const {
+    return impl_->cache_write_timing;
 }
 
 struct Spectrum {
@@ -442,7 +344,7 @@ std::string_view spectrum_peptide_body_view(std::string_view peptide) {
 }
 
 std::string spectrum_peptide_body(const std::string& peptide) {
-    return std::string(spectrum_peptide_body_view(peptide));
+    return prediction_cache_peptide_body(peptide);
 }
 
 std::string token_for(char residue, char modification, bool fixed_cam) {
@@ -730,8 +632,8 @@ std::unordered_map<std::string, std::vector<Fragment>> predict_fragments(
     std::unordered_map<std::string, ParsedPeptide> unique;
     unique.reserve(data.rows.size() / 2);
     for (const auto& row : data.rows) {
-        const std::string key = spectrum_peptide_body(row.peptide) + '\x1f' +
-                                std::to_string(row.charge);
+        const std::string key = prediction_cache_key(
+            row.peptide, row.charge);
         if (unique.find(key) != unique.end()) continue;
         auto parsed = parse_peptide(row.peptide, row.charge, dictionary);
         unique.emplace(std::move(key), std::move(parsed));
@@ -1013,32 +915,42 @@ SpectrumPredictionLibrary SpectralEntropyFeature::predict(
     std::unordered_map<std::string, std::size_t> missing_keys;
     missing_keys.reserve(unique_peptides.rows.size());
     for (const auto& psm : unique_peptides.rows) {
-        const auto key = spectrum_peptide_body(psm.peptide) + '\x1f' +
-            std::to_string(psm.charge);
+        const auto key = prediction_cache_key(psm.peptide, psm.charge);
         if (library.impl_->predictions.find(key) ==
                 library.impl_->predictions.end()) {
             upsert_prediction_exemplar(missing, missing_keys, key, psm);
         }
     }
+    if (!config.prediction_cache_path.empty()) {
+        std::unordered_map<std::string, int> requested_labels;
+        requested_labels.reserve(unique_peptides.rows.size());
+        for (const auto& psm : unique_peptides.rows) {
+            const auto key = prediction_cache_key(psm.peptide, psm.charge);
+            const auto [found, inserted] = requested_labels.emplace(
+                key, psm.label);
+            if (!inserted && psm.label == 1) found->second = 1;
+        }
+        std::size_t target_reused = 0;
+        std::size_t target_predict = 0;
+        std::size_t decoy_reused = 0;
+        std::size_t decoy_predict = 0;
+        for (const auto& [key, label] : requested_labels) {
+            const bool reused =
+                library.impl_->predictions.find(key) !=
+                library.impl_->predictions.end();
+            if (label == 1) {
+                reused ? ++target_reused : ++target_predict;
+            } else {
+                reused ? ++decoy_reused : ++decoy_predict;
+            }
+        }
+        std::cerr << "DIA-NN spectrum cache: target reused="
+                  << target_reused << ", predict=" << target_predict
+                  << "; decoy reused=" << decoy_reused
+                  << ", predict=" << decoy_predict << '\n';
+    }
     if (missing.rows.empty()) {
         return library;
-    }
-    if (config.prediction_cache_only) {
-        std::ostringstream message;
-        message << "DIA-NN spectrum prediction cache is missing "
-                << missing.rows.size()
-                << " peptide-charge forms; cache-only mode forbids model inference";
-        const std::size_t shown = std::min<std::size_t>(missing.rows.size(), 8);
-        if (shown != 0) {
-            message << ": ";
-            for (std::size_t index = 0; index < shown; ++index) {
-                if (index != 0) message << ", ";
-                message << spectrum_peptide_body(missing.rows[index].peptide)
-                        << '/' << missing.rows[index].charge;
-            }
-            if (shown != missing.rows.size()) message << ", ...";
-        }
-        throw std::runtime_error(message.str());
     }
     const auto prediction_begin = std::chrono::steady_clock::now();
     const std::clock_t prediction_cpu_begin = std::clock();
@@ -1052,19 +964,15 @@ SpectrumPredictionLibrary SpectralEntropyFeature::predict(
         static_cast<double>(prediction_cpu_end - prediction_cpu_begin) /
             CLOCKS_PER_SEC};
     std::unordered_set<std::string> target_keys;
-    const std::unordered_set<std::string>* cache_keys = nullptr;
-    if (config.prediction_cache_targets_only) {
-        target_keys.reserve(missing.rows.size());
-        for (const auto& psm : missing.rows) {
-            if (psm.label == 1) {
-                target_keys.insert(
-                    spectrum_peptide_body(psm.peptide) + '\x1f' +
-                    std::to_string(psm.charge));
-            }
+    target_keys.reserve(missing.rows.size());
+    for (const auto& psm : missing.rows) {
+        if (psm.label == 1) {
+            target_keys.insert(prediction_cache_key(
+                psm.peptide, psm.charge));
         }
-        cache_keys = &target_keys;
     }
-    append_spectrum_library_cache(config, inferred, loaded, cache_keys);
+    library.impl_->cache_write_timing =
+        append_spectrum_library_cache(config, inferred, &target_keys);
     library.impl_->predictions.merge(inferred);
     library.impl_->device = loaded.hits == 0
         ? prediction_device : "cache+" + prediction_device;
@@ -1083,6 +991,8 @@ void SpectralEntropyFeature::add(
     const auto& predictions = library.impl_->predictions;
     data.spectrum_prediction_device = library.impl_->device;
     data.spectrum_prediction_timing = library.impl_->timing;
+    data.spectrum_cache_read_timing = library.impl_->cache_read_timing;
+    data.spectrum_cache_write_timing = library.impl_->cache_write_timing;
     data.feature_names.push_back("unweighted_spectral_entropy");
     data.generated_feature_names.push_back("unweighted_spectral_entropy");
 
@@ -1153,9 +1063,8 @@ void SpectralEntropyFeature::add(
                     const std::size_t end =
                         group_starts[static_cast<std::size_t>(task) + 1];
                     const auto& exemplar = data.rows[file_rows[begin]];
-                    const std::string key =
-                        spectrum_peptide_body(exemplar.peptide) + '\x1f' +
-                        std::to_string(exemplar.charge);
+                    const std::string key = prediction_cache_key(
+                        exemplar.peptide, exemplar.charge);
                     const auto base = predictions.find(key);
                     if (base == predictions.end()) {
                         throw std::runtime_error(
@@ -1190,9 +1099,8 @@ void SpectralEntropyFeature::add(
                     auto& row = data.rows[
                         file_rows[static_cast<std::size_t>(index)]];
                     const auto spectrum = spectra.find(row.scan);
-                    const std::string key =
-                        spectrum_peptide_body(row.peptide) + '\x1f' +
-                        std::to_string(row.charge);
+                    const std::string key = prediction_cache_key(
+                        row.peptide, row.charge);
                     const auto prediction = predictions.find(key);
                     if (prediction == predictions.end()) {
                         throw std::runtime_error(
