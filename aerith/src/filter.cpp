@@ -554,12 +554,6 @@ Summary run_monolithic(const Config& config) {
     summary.total_timing = {
         elapsed_seconds(total_begin, completion_end),
         cpu_seconds(cpu_begin, cpu_end)};
-    if (summary.total_timing.wall_seconds > 0.0) {
-        summary.omp_speedup_ratio =
-            summary.total_timing.cpu_seconds / summary.total_timing.wall_seconds;
-        summary.omp_parallel_efficiency =
-            summary.omp_speedup_ratio / std::max(1u, summary.threads);
-    }
     return summary;
 }
 
@@ -1089,12 +1083,6 @@ Summary run_streamed(const Config& config) {
         std::chrono::duration<double>(Clock::now() - total_begin).count(),
         static_cast<double>(std::clock() - total_cpu_begin) /
             CLOCKS_PER_SEC};
-    if (summary.total_timing.wall_seconds > 0.0) {
-        summary.omp_speedup_ratio = summary.total_timing.cpu_seconds /
-            summary.total_timing.wall_seconds;
-        summary.omp_parallel_efficiency = summary.omp_speedup_ratio /
-            std::max(1u, summary.threads);
-    }
     return summary;
 }
 

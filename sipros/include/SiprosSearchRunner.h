@@ -47,7 +47,6 @@ struct DatabaseSearchArguments
 	bool listPtms = false;
 	bool rebuildFragmentIndex = false;
 	bool prepareOnly = false;
-	bool precursorSourceProvided = false;
 	bool showHelp = false;
 };
 

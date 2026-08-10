@@ -29,7 +29,7 @@ const std::vector<ProNovoConfig::PtmDefinition> &compiledPtmCatalog()
 		{"deamidation", "!", "NQ",
 		 "Deamidation of asparagine or glutamine; removed H/N are "
 		 "biosynthetic and incorporated O is reagent-natural.",
-		 0.984016, true, true},
+		 0.984016, true, false},
 		{"phosphorylation", "@", "STYHD",
 		 "Phosphorylation (+HPO3) without forced fragment neutral loss.",
 		 79.966332, true, false},
@@ -114,8 +114,8 @@ double reportedMassMatchError(double reportedMass,
 	const double absoluteError = std::abs(
 		reportedMass - (unmodifiedResidueMass + modificationShift));
 	double best = -1.0;
-	// Delta masses in FragPipe's Modified Peptide column retain decimals;
-	// absolute residue masses are commonly rounded to an integer.
+	// Reported delta masses retain decimals; absolute residue masses are
+	// commonly rounded to an integer.
 	if (deltaError <= 0.05)
 		best = deltaError;
 	if (absoluteError <= 0.5)
@@ -363,7 +363,7 @@ public:
 			config.searchType = "Regular";
 			config.searchName = "SE";
 			config.defaultMaxPtmCount = 3;
-			config.defaultVariablePtms = {{"!", "NQ"}, {"~", "M"}};
+			config.defaultVariablePtms = {{"~", "M"}};
 			break;
 		case ProNovoConfig::Profile::Sip:
 			config.searchType = "SIP";
@@ -1145,7 +1145,7 @@ bool ProNovoConfig::translatePsmPeptide(
 				return false;
 			}
 
-			// FragPipe may collapse several positioned deltas into one nominal
+			// A report may collapse several positioned deltas into one nominal
 			// bracketed mass. Match every nonempty subset so fixed CAM plus a
 			// variable PTM is reconciled once rather than duplicated or rejected.
 			std::vector<size_t> currentAssigned;

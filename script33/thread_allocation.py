@@ -23,7 +23,7 @@ class ThreadAllocation:
 
 
 def available_cpu_count() -> int:
-    """Return CPUs available to this process, respecting CPU affinity."""
+    """Return the logical-CPU allowance inherited by this process."""
     process_cpu_count = getattr(os, "process_cpu_count", None)
     if process_cpu_count is not None:
         count = process_cpu_count()

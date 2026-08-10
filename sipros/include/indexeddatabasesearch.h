@@ -22,7 +22,8 @@ struct IndexedCandidate
 
 struct IndexedSearchCounters
 {
-	uint64_t precursorHypotheses = 0;
+	uint64_t isolationWindowRanges = 0;
+	uint64_t isolationWindowCandidates = 0;
 	uint64_t exactMassCandidates = 0;
 	uint64_t uniquePeptideChargeCandidates = 0;
 	uint64_t fragmentPostingsVisited = 0;
@@ -36,9 +37,7 @@ struct IndexedSearchCounters
 class IndexedSearchScratch
 {
 public:
-	std::vector<IndexedCandidate> candidates;
-	std::vector<uint64_t> candidatePositions;
-	uint32_t candidateEpoch = 0;
+	std::vector<double> gatePeakMzs;
 };
 
 // Query one already-MVH-preprocessed scan. The preliminary neutral-fragment
@@ -47,7 +46,6 @@ public:
 void queryIndexedScan(
 	const FragmentIndex &index,
 	MS2Scan &scan,
-	const std::vector<std::pair<double, int>> &precursorMassCharges,
 	IndexedSearchScratch &scratch,
 	std::vector<IndexedCandidate> &survivors,
 	IndexedSearchCounters &counters);

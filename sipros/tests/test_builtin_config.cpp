@@ -572,7 +572,7 @@ void checkRegularProfile()
 	std::map<std::string, std::string> ptms;
 	require(ProNovoConfig::getPTMinfo(ptms), "failed to read Regular PTMs");
 	require(ptms == std::map<std::string, std::string>(
-					{{"!", "NQ"}, {"~", "M"}}),
+					{{"~", "M"}}),
 			"wrong Regular variable PTMs");
 	checkCommonChemistry();
 
@@ -705,7 +705,7 @@ void checkPtmCatalogAndSelectors()
 				std::string("wrong internal PTM shift for ") + entry.token);
 	}
 	require(ptmByToken("~").regularDefault &&
-			ptmByToken("!").regularDefault &&
+			!ptmByToken("!").regularDefault &&
 			!ptmByToken("@").regularDefault,
 			"Regular PTM default flags are wrong");
 	require(!ptmByToken("/").selectable,
@@ -786,7 +786,7 @@ void checkPtmCatalogAndSelectors()
 	require(ProNovoConfig::configureVariablePtms({"default"}, -1, error), error);
 	require(ProNovoConfig::getPTMinfo(ptms) &&
 			ptms == std::map<std::string, std::string>(
-					{{"!", "NQ"}, {"~", "M"}}),
+					{{"~", "M"}}),
 			"PTM selector 'default' did not restore Regular defaults");
 	require(ProNovoConfig::configureVariablePtms({"all"}, -1, error), error);
 	require(ProNovoConfig::getPTMinfo(ptms) && ptms.size() == 12 &&
@@ -801,7 +801,7 @@ void checkPtmCatalogAndSelectors()
 			"failed to reload Regular PTM defaults");
 	require(ProNovoConfig::getPTMinfo(ptms) &&
 			ptms == std::map<std::string, std::string>(
-					{{"!", "NQ"}, {"~", "M"}}) &&
+					{{"~", "M"}}) &&
 			ProNovoConfig::getMaxPTMcount() == 3 &&
 			ProNovoConfig::getNeutralLossList().empty(),
 			"profile reload did not reset variable PTMs");
@@ -1046,7 +1046,7 @@ void checkPsmPtmTranslation()
 			"C", "C[160]", translated, error),
 		error);
 	require(translated == "[C/]",
-			"FragPipe CAM did not become variable IAA with fixed CAM disabled");
+			"Bracketed CAM did not become variable IAA with fixed CAM disabled");
 	require(ProNovoConfig::translatePsmPeptide(
 			"C", "C[132]", translated, error),
 		error);

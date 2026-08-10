@@ -10,7 +10,6 @@
 #include <array>
 #include <cmath>
 #include <limits>
-#include <map>
 #include <tuple>
 
 namespace sipros
@@ -19,32 +18,298 @@ namespace sipros
 namespace
 {
 
+// Validated DDA first-gate settings. Square-root transformation does not
+// change which experimental peaks belong to the top-N set.
+constexpr uint16_t DdaWindowMinMatchedFragments = 4;
+constexpr size_t DdaWindowTopPeaks = 200;
+
 bool candidateIdentityLess(const IndexedCandidate &left,
-							   const IndexedCandidate &right)
+	const IndexedCandidate &right)
 {
-	return std::tie(left.peptideId, left.charge, left.measuredMass) <
-		std::tie(right.peptideId, right.charge, right.measuredMass);
+	return std::tie(left.peptideId, left.charge, left.hypothesisOrdinal) <
+		std::tie(right.peptideId, right.charge, right.hypothesisOrdinal);
 }
 
 bool mergeIndexedPeptideIfPresent(
 	const FragmentIndex &index,
 	uint32_t peptideId,
-	MS2Scan &scan)
+	int precursorCharge,
+	std::vector<PeptideUnit *> &topPeptides)
 {
 	const std::string_view sequence = index.peptideSequence(peptideId);
-	for (const PeptideUnit *top : scan.vpWeightSumTopPeptides)
+	const std::string proteins(index.proteinNames(peptideId));
+	for (PeptideUnit *top : topPeptides)
 	{
-		if (std::string_view(top->sIdentifiedPeptide) == sequence)
+		if (top->iMeasuredParentCharge != precursorCharge ||
+			std::string_view(top->sIdentifiedPeptide) != sequence)
 		{
-			// Preserve the existing protein-name merge behavior, but only create
-			// owning strings for the rare candidate that is already in the top N.
-			return scan.mergePeptide(
-				scan.vpWeightSumTopPeptides,
-				std::string(sequence),
-				std::string(index.proteinNames(peptideId)));
+			continue;
 		}
+		if (top->sProteinNames != proteins &&
+			top->sProteinNames.find("," + proteins) == std::string::npos)
+		{
+			top->sProteinNames += "," + proteins;
+		}
+		return true;
 	}
 	return false;
+}
+
+struct ResidualEvidence
+{
+	PeptideUnit *peptide = nullptr;
+	std::vector<size_t> peakIndices;
+	double totalPeakWeight = 0.0;
+};
+
+ResidualEvidence collectResidualEvidence(
+	PeptideUnit *peptide,
+	MS2Scan &scan,
+	std::vector<double> &sequenceIonMasses,
+	std::vector<double> &aaForward,
+	std::vector<double> &aaReverse,
+	std::vector<char> &residues)
+{
+	ResidualEvidence evidence;
+	evidence.peptide = peptide;
+	if (peptide == nullptr || scan.pPeakList == nullptr ||
+		scan.pPeakList->pPeaks.empty() ||
+		!MVH::CalculateSequenceIons(
+			peptide->sPeptideForScoring,
+			peptide->iMeasuredParentCharge,
+			MVH::bUseSmartPlusThreeModel,
+			&sequenceIonMasses,
+			&aaForward,
+			&aaReverse,
+			&residues))
+	{
+		return evidence;
+	}
+
+	const double tolerance = ProNovoConfig::getMassAccuracyFragmentIon();
+	const auto &peaks = scan.pPeakList->pPeaks;
+	const auto &classes = scan.pPeakList->pClasses;
+	for (double ionMz : sequenceIonMasses)
+	{
+		auto peak = std::lower_bound(peaks.begin(), peaks.end(), ionMz - tolerance);
+		size_t best = std::numeric_limits<size_t>::max();
+		unsigned char bestClass = std::numeric_limits<unsigned char>::max();
+		for (; peak != peaks.end() && *peak <= ionMz + tolerance; ++peak)
+		{
+			const size_t index = static_cast<size_t>(peak - peaks.begin());
+			const unsigned char intensityClass = index < classes.size()
+				? static_cast<unsigned char>(classes[index])
+				: std::numeric_limits<unsigned char>::max();
+			if (intensityClass < bestClass)
+			{
+				best = index;
+				bestClass = intensityClass;
+			}
+		}
+		if (best != std::numeric_limits<size_t>::max())
+			evidence.peakIndices.push_back(best);
+	}
+	std::sort(evidence.peakIndices.begin(), evidence.peakIndices.end());
+	evidence.peakIndices.erase(
+		std::unique(evidence.peakIndices.begin(), evidence.peakIndices.end()),
+		evidence.peakIndices.end());
+	for (size_t index : evidence.peakIndices)
+	{
+		const int intensityClass = static_cast<unsigned char>(classes[index]);
+		evidence.totalPeakWeight += std::max(
+			1, ProNovoConfig::NumIntensityClasses + 1 - intensityClass);
+	}
+	return evidence;
+}
+
+void assignDdaResidualRanks(
+	MS2Scan &scan,
+	std::vector<double> &sequenceIonMasses,
+	std::vector<double> &aaForward,
+	std::vector<double> &aaReverse,
+	std::vector<char> &residues)
+{
+	if (scan.pPeakList == nullptr || scan.vpWeightSumTopPeptides.empty())
+		return;
+	std::vector<ResidualEvidence> evidence;
+	evidence.reserve(scan.vpWeightSumTopPeptides.size());
+	for (PeptideUnit *peptide : scan.vpWeightSumTopPeptides)
+	{
+		evidence.push_back(collectResidualEvidence(
+			peptide, scan, sequenceIonMasses, aaForward, aaReverse, residues));
+	}
+	std::vector<unsigned char> active(scan.pPeakList->pPeaks.size(), 1);
+	for (int rank = 1; rank <= PeptideUnit::DdaResidualTopN; ++rank)
+	{
+		size_t bestIndex = std::numeric_limits<size_t>::max();
+		double bestScore = -std::numeric_limits<double>::infinity();
+		for (size_t i = 0; i < evidence.size(); ++i)
+		{
+			ResidualEvidence &candidate = evidence[i];
+			if (candidate.peptide == nullptr ||
+				candidate.peptide->iDdaResidualRank != 0 ||
+				candidate.totalPeakWeight <= 0.0)
+			{
+				continue;
+			}
+			size_t activeMatches = 0;
+			double activeWeight = 0.0;
+			for (size_t peakIndex : candidate.peakIndices)
+			{
+				if (!active[peakIndex])
+					continue;
+				++activeMatches;
+				const int intensityClass = static_cast<unsigned char>(
+					scan.pPeakList->pClasses[peakIndex]);
+				activeWeight += std::max(
+					1, ProNovoConfig::NumIntensityClasses + 1 - intensityClass);
+			}
+			if (activeMatches < static_cast<size_t>(
+					ProNovoConfig::MinMatchedFragments))
+			{
+				continue;
+			}
+			const double residualFraction =
+				activeWeight / candidate.totalPeakWeight;
+			const double score =
+				candidate.peptide->vdScores[2] * residualFraction;
+			if (score > bestScore ||
+				(score == bestScore &&
+				 bestIndex != std::numeric_limits<size_t>::max() &&
+				 candidate.peptide->sIdentifiedPeptide <
+					evidence[bestIndex].peptide->sIdentifiedPeptide))
+			{
+				bestIndex = i;
+				bestScore = score;
+			}
+		}
+		if (bestIndex == std::numeric_limits<size_t>::max())
+			break;
+		ResidualEvidence &winner = evidence[bestIndex];
+		winner.peptide->iDdaResidualRank = rank;
+		winner.peptide->dDdaResidualScore = bestScore;
+		for (size_t peakIndex : winner.peakIndices)
+			active[peakIndex] = 0;
+	}
+}
+
+void selectDdaWindowGatePeaks(
+	const MS2Scan &scan,
+	std::vector<double> &gatePeakMzs)
+{
+	gatePeakMzs.clear();
+	if (scan.pPeakList == nullptr)
+		return;
+	const std::vector<double> &filteredMzs = scan.pPeakList->pPeaks;
+	if (filteredMzs.size() <= DdaWindowTopPeaks)
+	{
+		gatePeakMzs = filteredMzs;
+		return;
+	}
+
+	// MVH preprocessing keeps at most 300 peaks. Recover their raw intensities
+	// with a monotone merge, retain the top 200, then restore m/z order.
+	std::vector<std::pair<double, double>> intensityMz;
+	intensityMz.reserve(filteredMzs.size());
+	size_t rawIndex = 0;
+	for (double mz : filteredMzs)
+	{
+		while (rawIndex < scan.vdMZ.size() && scan.vdMZ[rawIndex] < mz)
+			++rawIndex;
+		const double intensity = rawIndex < scan.vdMZ.size() &&
+			rawIndex < scan.vdIntensity.size() && scan.vdMZ[rawIndex] == mz
+				? scan.vdIntensity[rawIndex]
+				: 0.0;
+		intensityMz.push_back({intensity, mz});
+	}
+	std::partial_sort(
+		intensityMz.begin(),
+		intensityMz.begin() + static_cast<std::ptrdiff_t>(DdaWindowTopPeaks),
+		intensityMz.end(),
+		[](const auto &left, const auto &right)
+		{
+			if (left.first != right.first)
+				return left.first > right.first;
+			return left.second < right.second;
+		});
+	gatePeakMzs.reserve(DdaWindowTopPeaks);
+	for (size_t i = 0; i < DdaWindowTopPeaks; ++i)
+		gatePeakMzs.push_back(intensityMz[i].second);
+	std::sort(gatePeakMzs.begin(), gatePeakMzs.end());
+}
+
+// Gate one contiguous isolation-window range without materializing it, using
+// singly charged b/y ions and four matches.
+void gateIsolationWindowBlock(
+	const FragmentIndex &index,
+	uint32_t block,
+	uint32_t windowBegin,
+	uint32_t windowEnd,
+	int precursorCharge,
+	uint32_t windowHypothesisOrdinal,
+	const std::vector<double> &gatePeakMzs,
+	double fragmentTolerance,
+	uint16_t hitThreshold,
+	std::vector<IndexedCandidate> &survivors,
+	IndexedSearchCounters &counters)
+{
+	const uint32_t peptideBegin = index.precursorBlockPeptideBegin(block);
+	const uint32_t peptideEnd = static_cast<uint32_t>(std::min<uint64_t>(
+		index.peptideCount(),
+		static_cast<uint64_t>(peptideBegin) +
+			FragmentIndex::peptideBlockCapacity()));
+	windowBegin = std::max(windowBegin, peptideBegin);
+	windowEnd = std::min(windowEnd, peptideEnd);
+	if (windowBegin >= windowEnd)
+		return;
+
+	std::array<uint16_t, FragmentIndex::peptideBlockCapacity()> hitCounts{};
+	size_t candidatesBelowThreshold = windowEnd - windowBegin;
+	if (hitThreshold > 0)
+	{
+		for (double observedMz : gatePeakMzs)
+		{
+			const double neutralMass = observedMz - Proton;
+			const auto postings = index.fragmentRange(
+				block,
+				neutralMass - fragmentTolerance,
+				neutralMass + fragmentTolerance);
+			if (postings.first == nullptr)
+				continue;
+			counters.fragmentPostingsVisited +=
+				static_cast<uint64_t>(postings.second - postings.first);
+			for (const FragmentPosting *posting = postings.first;
+				 posting != postings.second; ++posting)
+			{
+				const uint32_t localId = posting->localPeptideId;
+				const uint32_t peptideId = peptideBegin + localId;
+				uint16_t &state = hitCounts[localId];
+				if (peptideId >= windowBegin && peptideId < windowEnd &&
+					state < hitThreshold)
+				{
+					++state;
+					if (state == hitThreshold)
+						--candidatesBelowThreshold;
+				}
+			}
+			if (candidatesBelowThreshold == 0)
+				break;
+		}
+	}
+
+	for (uint32_t peptideId = windowBegin; peptideId < windowEnd; ++peptideId)
+	{
+		const size_t localId = peptideId - peptideBegin;
+		if (hitCounts[localId] < hitThreshold)
+			continue;
+		const IndexedPeptideRecord &record = index.peptide(peptideId);
+		survivors.push_back({
+			peptideId,
+			record.precursorMass,
+			precursorCharge,
+			windowHypothesisOrdinal});
+		++counters.fragmentGateSurvivors;
+	}
 }
 
 } // namespace
@@ -52,7 +317,8 @@ bool mergeIndexedPeptideIfPresent(
 IndexedSearchCounters &IndexedSearchCounters::operator+=(
 	const IndexedSearchCounters &other)
 {
-	precursorHypotheses += other.precursorHypotheses;
+	isolationWindowRanges += other.isolationWindowRanges;
+	isolationWindowCandidates += other.isolationWindowCandidates;
 	exactMassCandidates += other.exactMassCandidates;
 	uniquePeptideChargeCandidates += other.uniquePeptideChargeCandidates;
 	fragmentPostingsVisited += other.fragmentPostingsVisited;
@@ -65,202 +331,85 @@ IndexedSearchCounters &IndexedSearchCounters::operator+=(
 void queryIndexedScan(
 	const FragmentIndex &index,
 	MS2Scan &scan,
-	const std::vector<std::pair<double, int>> &precursorMassCharges,
 	IndexedSearchScratch &scratch,
 	std::vector<IndexedCandidate> &survivors,
 	IndexedSearchCounters &counters)
 {
 	survivors.clear();
 	if (scan.bSkip || scan.pPeakList == nullptr ||
-		precursorMassCharges.empty() || index.peptideCount() == 0)
+		scan.vIsolationWindowsMz.empty() || index.peptideCount() == 0)
 	{
 		return;
 	}
-	struct Hypothesis
-	{
-		double mass = 0.0;
-		uint32_t ordinal = 0;
-	};
-	std::map<int, std::vector<Hypothesis>> hypothesesByCharge;
-	for (size_t i = 0; i < precursorMassCharges.size(); ++i)
-	{
-		const double mass = precursorMassCharges[i].first;
-		const int charge = precursorMassCharges[i].second;
-		if (mass > 0.0 && std::isfinite(mass) && charge > 0)
-		{
-			hypothesesByCharge[charge].push_back(
-				{mass, static_cast<uint32_t>(i)});
-			++counters.precursorHypotheses;
-		}
-	}
 
-	const double precursorTolerance = ProNovoConfig::getMassAccuracyParentIon();
+	selectDdaWindowGatePeaks(scan, scratch.gatePeakMzs);
+	if (scratch.gatePeakMzs.empty())
+		return;
 	const double fragmentTolerance = ProNovoConfig::getMassAccuracyFragmentIon();
-	const auto &isotopeWindows = ProNovoConfig::getParentMassWindows();
-	const uint16_t hitThreshold = static_cast<uint16_t>(
-		std::min(ProNovoConfig::MinMatchedFragments,
-			static_cast<int>(std::numeric_limits<uint16_t>::max())));
+	const uint16_t hitThreshold = static_cast<uint16_t>(std::min(
+		std::max(ProNovoConfig::MinMatchedFragments,
+			static_cast<int>(DdaWindowMinMatchedFragments)),
+		static_cast<int>(std::numeric_limits<uint16_t>::max())));
+	const double protonMass = ProNovoConfig::getProtonMass();
 
-	for (const auto &chargeEntry : hypothesesByCharge)
+	// Fragment-first DDA+: the database candidate set is defined only by each
+	// acquisition window and the configured charge range, never by an MS1 peak.
+	for (int precursorCharge = 1; precursorCharge <= 4; ++precursorCharge)
 	{
-		const int precursorCharge = chargeEntry.first;
-		std::vector<IndexedCandidate> &candidates = scratch.candidates;
-		candidates.clear();
-		if (scratch.candidatePositions.size() != index.peptideCount())
+		for (size_t windowIndex = 0;
+			 windowIndex < scan.vIsolationWindowsMz.size(); ++windowIndex)
 		{
-			scratch.candidatePositions.assign(index.peptideCount(), 0);
-			scratch.candidateEpoch = 0;
-		}
-		++scratch.candidateEpoch;
-		if (scratch.candidateEpoch == 0)
-		{
-			std::fill(
-				scratch.candidatePositions.begin(),
-				scratch.candidatePositions.end(), 0);
-			scratch.candidateEpoch = 1;
-		}
-		const uint64_t epoch =
-			static_cast<uint64_t>(scratch.candidateEpoch) << 32;
+			const double centerMz = scan.vIsolationWindowsMz[windowIndex].first;
+			const double widthMz = scan.vIsolationWindowsMz[windowIndex].second;
+			if (!(centerMz > 0.0) || !(widthMz > 0.0) ||
+				!std::isfinite(centerMz) || !std::isfinite(widthMz))
+			{
+				continue;
+			}
+			const double lower =
+				(centerMz - widthMz / 2.0) * precursorCharge -
+				static_cast<double>(precursorCharge) * protonMass;
+			const double upper =
+				(centerMz + widthMz / 2.0) * precursorCharge -
+				static_cast<double>(precursorCharge) * protonMass;
+			const auto range = index.peptideMassRange(lower, upper);
+			++counters.isolationWindowRanges;
+			const uint64_t candidateCount =
+				static_cast<uint64_t>(range.second - range.first);
+			counters.isolationWindowCandidates += candidateCount;
+			counters.exactMassCandidates += candidateCount;
+			counters.uniquePeptideChargeCandidates += candidateCount;
+			if (range.first == range.second)
+				continue;
 
-		for (const Hypothesis &hypothesis : chargeEntry.second)
-		{
-			for (int isotopeWindow : isotopeWindows)
+			const uint32_t firstBlock =
+				index.precursorBlockForPeptide(range.first);
+			const uint32_t lastBlock =
+				index.precursorBlockForPeptide(range.second - 1);
+			for (uint32_t block = firstBlock; block <= lastBlock; ++block)
 			{
-				const double endpointA = hypothesis.mass -
-					static_cast<double>(isotopeWindow) * index.minimumNeutronMass();
-				const double endpointB = hypothesis.mass -
-					static_cast<double>(isotopeWindow) * index.maximumNeutronMass();
-				const double lower = std::min(endpointA, endpointB) - precursorTolerance;
-				const double upper = std::max(endpointA, endpointB) + precursorTolerance;
-				const auto range = index.peptideMassRange(lower, upper);
-				for (uint32_t peptideId = range.first; peptideId < range.second; ++peptideId)
-				{
-					const IndexedPeptideRecord &record = index.peptide(peptideId);
-					const double expected = record.precursorMass +
-						static_cast<double>(isotopeWindow) *
-							record.precursorNeutronMass;
-					if (std::abs(hypothesis.mass - expected) > precursorTolerance)
-					{
-						continue;
-					}
-					const IndexedCandidate candidate{
-						peptideId, hypothesis.mass, precursorCharge,
-						hypothesis.ordinal};
-					uint64_t &positionState =
-						scratch.candidatePositions[peptideId];
-					if ((positionState & 0xffffffff00000000ULL) != epoch)
-					{
-						const uint64_t position =
-							static_cast<uint64_t>(candidates.size());
-						positionState = epoch | (position + 1);
-						candidates.push_back(candidate);
-					}
-					else
-					{
-						const size_t position = static_cast<size_t>(
-							(positionState & 0xffffffffULL) - 1);
-						IndexedCandidate &representative =
-							candidates[position];
-						if (std::tie(candidate.hypothesisOrdinal,
-								candidate.measuredMass) <
-							std::tie(representative.hypothesisOrdinal,
-								representative.measuredMass))
-						{
-							representative = candidate;
-						}
-					}
-				}
+				gateIsolationWindowBlock(
+					index, block, range.first, range.second,
+					precursorCharge, static_cast<uint32_t>(windowIndex),
+					scratch.gatePeakMzs, fragmentTolerance, hitThreshold,
+					survivors, counters);
 			}
-		}
-
-		std::sort(candidates.begin(), candidates.end(), candidateIdentityLess);
-		counters.exactMassCandidates += candidates.size();
-		if (candidates.empty())
-		{
-			continue;
-		}
-		counters.uniquePeptideChargeCandidates += candidates.size();
-
-		const int maximumFragmentCharge = precursorCharge <= 2
-			? 1
-			: precursorCharge - 1;
-		// Candidate records are peptide-id ordered, so each bounded precursor
-		// block can be scored with a small counter array that remains in L1.
-		// UINT32_MAX denotes a peptide that is not an exact precursor candidate.
-		for (size_t candidateBegin = 0; candidateBegin < candidates.size();)
-		{
-			const uint32_t block = index.precursorBlockForPeptide(
-				candidates[candidateBegin].peptideId);
-			const uint32_t peptideBegin =
-				index.precursorBlockPeptideBegin(block);
-			size_t candidateEnd = candidateBegin + 1;
-			while (candidateEnd < candidates.size() &&
-				index.precursorBlockForPeptide(candidates[candidateEnd].peptideId) ==
-					block)
-			{
-				++candidateEnd;
-			}
-			std::array<uint32_t, FragmentIndex::peptideBlockCapacity()> hitCounts;
-			hitCounts.fill(std::numeric_limits<uint32_t>::max());
-			for (size_t i = candidateBegin; i < candidateEnd; ++i)
-			{
-				hitCounts[candidates[i].peptideId - peptideBegin] = 0;
-			}
-			size_t candidatesBelowThreshold = hitThreshold == 0
-				? 0
-				: candidateEnd - candidateBegin;
-			for (int fragmentCharge = 1;
-				 fragmentCharge <= maximumFragmentCharge &&
-				 candidatesBelowThreshold != 0;
-				 ++fragmentCharge)
-			{
-				const double tolerance =
-					static_cast<double>(fragmentCharge) * fragmentTolerance;
-				for (double observedMz : scan.pPeakList->pPeaks)
-				{
-					const double neutralMass =
-						static_cast<double>(fragmentCharge) *
-						(observedMz - Proton);
-					const auto postings = index.fragmentRange(
-						block, neutralMass - tolerance, neutralMass + tolerance);
-					if (postings.first == nullptr)
-					{
-						continue;
-					}
-					counters.fragmentPostingsVisited +=
-						static_cast<uint64_t>(postings.second - postings.first);
-					for (const FragmentPosting *posting = postings.first;
-						 posting != postings.second;
-						 ++posting)
-					{
-						uint32_t &state = hitCounts[posting->localPeptideId];
-						if (state != std::numeric_limits<uint32_t>::max() &&
-							state < hitThreshold)
-						{
-							++state;
-							if (state == hitThreshold)
-								--candidatesBelowThreshold;
-						}
-					}
-					if (candidatesBelowThreshold == 0)
-						break;
-				}
-			}
-			for (size_t i = candidateBegin; i < candidateEnd; ++i)
-			{
-				const IndexedCandidate &candidate = candidates[i];
-				if (hitCounts[candidate.peptideId - peptideBegin] >= hitThreshold)
-				{
-					survivors.push_back(candidate);
-					++counters.fragmentGateSurvivors;
-				}
-			}
-			candidateBegin = candidateEnd;
 		}
 	}
 
+	// Multiple reaction records can overlap. Score each peptide/charge once.
+	std::sort(survivors.begin(), survivors.end(), candidateIdentityLess);
+	survivors.erase(
+		std::unique(
+			survivors.begin(), survivors.end(),
+			[](const IndexedCandidate &left, const IndexedCandidate &right)
+			{
+				return left.peptideId == right.peptideId &&
+					left.charge == right.charge;
+			}),
+		survivors.end());
 	std::sort(survivors.begin(), survivors.end(),
-			[&](const IndexedCandidate &left, const IndexedCandidate &right)
+		[&](const IndexedCandidate &left, const IndexedCandidate &right)
 		{
 			const uint32_t leftOrdinal =
 				index.peptide(left.peptideId).generationOrdinal;
@@ -271,7 +420,6 @@ void queryIndexedScan(
 				std::tie(rightOrdinal, right.hypothesisOrdinal,
 					right.measuredMass, right.charge);
 		});
-
 }
 
 void scoreIndexedScanMvh(
@@ -286,7 +434,9 @@ void scoreIndexedScanMvh(
 {
 	for (const IndexedCandidate &candidate : survivors)
 	{
-		if (mergeIndexedPeptideIfPresent(index, candidate.peptideId, scan))
+		if (mergeIndexedPeptideIfPresent(
+				index, candidate.peptideId, candidate.charge,
+				scan.vpWeightSumTopPeptides))
 		{
 			continue;
 		}
@@ -312,11 +462,12 @@ void scoreIndexedScanMvh(
 					mvh,
 					{candidate.measuredMass, candidate.charge, &peptide},
 					scan.vpWeightSumTopPeptides,
-					"MVH",
-					2);
+					"MVH", 2);
 			}
 		}
 	}
+	assignDdaResidualRanks(
+		scan, sequenceIonMasses, aaForward, aaReverse, residues);
 }
 
 } // namespace sipros

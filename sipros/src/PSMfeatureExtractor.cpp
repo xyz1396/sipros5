@@ -421,9 +421,9 @@ std::vector<isotopicPeak> PSMfeatureExtractor::findMs1IsotopicPeaks(
     const size_t parentScanIdx = scanIt->second;
     size_t anchorIdx = std::numeric_limits<size_t>::max();
     const sipros::RaxportMs1Scan *anchorScan = nullptr;
-    // Candidate assignment uses every MS1 scan in the parent +/-2
-    // neighborhood.  Search the same neighborhood here so a candidate found
-    // only in a following MS1 scan is not assigned zero-valued features.
+    // The precursor scan comes from the post-score parent +/-5 lookup. Search
+    // it first, then adjacent scans, so an isotope envelope split across MS1
+    // acquisitions is not assigned zero-valued features.
     for (const int offset : {0, -1, 1, -2, 2})
     {
         const int64_t candidateIndex =
@@ -1022,6 +1022,73 @@ static NominalEnvelopeModel theoreticalSipEnvelope(
     return model;
 }
 
+double PSMfeatureExtractor::estimateSIPelementAbundanceFromIsolationCenter(
+    const std::string &peptide,
+    int precursorCharge,
+    double isolationCenterMz,
+    const std::string &sipAtom,
+    double referenceEnrichmentPct)
+{
+    SupportedSipIsotope spec;
+    if (precursorCharge <= 0 || !(isolationCenterMz > 0.0) ||
+        !std::isfinite(isolationCenterMz) ||
+        !std::isfinite(referenceEnrichmentPct) ||
+        !resolveSupportedSipIsotope(sipAtom, spec))
+        return 0.0;
+
+    PeptideIsotopeCalculator calculator;
+    const double baseMass = calculator.calPrecursorBaseMass(
+        peptideBodyWithPtms(peptide));
+    const int targetAtomCount =
+        calculator.pepComposition[sipros::IsotopeSource::Biosynthetic]
+                                 [static_cast<size_t>(spec.atomIndex)];
+    if (!(baseMass > 0.0) || targetAtomCount <= 0 ||
+        spec.nominalShift <= 0)
+        return 0.0;
+
+    const double referenceFraction = std::max(
+        0.0, std::min(1.0, referenceEnrichmentPct / 100.0));
+    const NominalEnvelopeModel model = theoreticalSipEnvelope(
+        calculator.pepComposition, spec, referenceFraction);
+    if (model.probability.empty() ||
+        model.probability.size() != model.massDelta.size())
+        return 0.0;
+
+    const double maximumProbability = *std::max_element(
+        model.probability.begin(), model.probability.end());
+    const double probabilityFloor = maximumProbability * 1e-12;
+    const double proton = ProNovoConfig::getProtonMass();
+    size_t closestIndex = model.probability.size();
+    double closestMzError = std::numeric_limits<double>::infinity();
+    for (size_t index = 0; index < model.probability.size(); ++index)
+    {
+        if (model.probability[index] < probabilityFloor ||
+            !std::isfinite(model.massDelta[index]))
+            continue;
+        const double theoreticalMz =
+            (baseMass + model.massDelta[index]) / precursorCharge + proton;
+        const double mzError = std::fabs(theoreticalMz - isolationCenterMz);
+        if (mzError < closestMzError)
+        {
+            closestMzError = mzError;
+            closestIndex = index;
+        }
+    }
+    if (closestIndex == model.probability.size())
+        return 0.0;
+
+    const double naturalOtherShift =
+        expectedNaturalNominalShiftExceptTarget(
+            calculator.pepComposition, spec.atomIndex,
+            spec.isotopeIndex, referenceFraction);
+    if (!std::isfinite(naturalOtherShift))
+        return 0.0;
+    const double estimatedPct =
+        (static_cast<double>(closestIndex) - naturalOtherShift) /
+        (static_cast<double>(targetAtomCount) * spec.nominalShift) * 100.0;
+    return std::max(0.0, std::min(100.0, estimatedPct));
+}
+
 static double weightedMedian(std::vector<std::pair<double, double>> values)
 {
     if (values.empty())
@@ -1506,9 +1573,13 @@ void PSMfeatureExtractor::extractFeaturesOfEachPSM()
                     calculator.calPrecursorBaseMass(compositionPeptide);
                 const double monoPrecursorMz =
                     baseMass / precursorCharge + ProNovoConfig::getProtonMass();
-                const double matchedPrecursorMz =
-                    mSipPSM->measuredParentMasses[i] / precursorCharge +
-                    ProNovoConfig::getProtonMass();
+                const bool missingMatchedPrecursor =
+                    i < mSipPSM->precursorRtDiffSeconds.size() &&
+                    mSipPSM->precursorRtDiffSeconds[i] < 0.0;
+                const double matchedPrecursorMz = missingMatchedPrecursor
+                    ? mSipPSM->isolationWindowCenterMZs[i]
+                    : mSipPSM->measuredParentMasses[i] / precursorCharge +
+                        ProNovoConfig::getProtonMass();
                 const auto mzToleranceDaAt = [precursorCharge](double)
                 { return 0.01 / precursorCharge; };
                 mSipPSM->isotopicPeakss[i] = findMs1IsotopicPeaks(
@@ -1529,10 +1600,25 @@ void PSMfeatureExtractor::extractFeaturesOfEachPSM()
                         precursorCharge,
                         sipIsotope,
                         mSipPSM->MS2IsotopicAbundances[i]);
-                mSipPSM->isotopicPeakNumbers[i] =
-                    ms1Abundance.rawIsotopicPeakCount;
-                mSipPSM->MS1IsotopeFitScores[i] = ms1Abundance.fitScore;
-                mSipPSM->MS1IsotopicAbundances[i] = ms1Abundance.abundancePct;
+                const double ms1AbundancePct =
+                    missingMatchedPrecursor &&
+                            ms1Abundance.rawIsotopicPeakCount == 0
+                        ? estimateSIPelementAbundanceFromIsolationCenter(
+                              compositionPeptide,
+                              precursorCharge,
+                              mSipPSM->isolationWindowCenterMZs[i],
+                              sipIsotope,
+                              mSipPSM->MS2IsotopicAbundances[i])
+                        : ms1Abundance.abundancePct;
+                mSipPSM->isotopicPeakNumbers[i] = missingMatchedPrecursor
+                    ? 0 : ms1Abundance.rawIsotopicPeakCount;
+                mSipPSM->MS1IsotopeFitScores[i] = missingMatchedPrecursor
+                    ? 0.0 : ms1Abundance.fitScore;
+                mSipPSM->MS1IsotopicAbundances[i] =
+                    ms1AbundancePct;
+                mSipPSM->isotopicAbundanceDiffs[i] =
+                    ms1AbundancePct -
+                    mSipPSM->MS2IsotopicAbundances[i];
             }
             std::tie(mSipPSM->peptideLengths[i],
                      mSipPSM->missCleavageSiteNumbers[i]) =
@@ -1558,9 +1644,6 @@ void PSMfeatureExtractor::extractFeaturesOfEachPSM()
                 mSipPSM->precursorIntensities[i] += peak.intensity;
             }
 
-            mSipPSM->isotopicAbundanceDiffs[i] =
-                mSipPSM->MS1IsotopicAbundances[i] -
-                mSipPSM->MS2IsotopicAbundances[i];
         }
         catch (...)
         {

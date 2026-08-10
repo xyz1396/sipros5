@@ -333,12 +333,18 @@ citation:
         for path in (regular_output, spectra_output):
             os.makedirs(path, exist_ok=True)
 
+        phase_timings: list[tuple[str, float]] = []
+        phase_started = time.perf_counter()
         self.logger.info('Fast SIP phase 1/4: regular target/decoy FASTA search')
         regular_search = self.make_search(
             element='R', output=regular_output, stage_hdf5_copies=False
         )
         regular_search.run()
+        phase_timings.append(
+            ('1/4 Regular FASTA search', time.perf_counter() - phase_started)
+        )
 
+        phase_started = time.perf_counter()
         self.logger.info('Fast SIP phase 2/4: Aerith filtering of regular PSMs')
         if not self.args.dryrun:
             for suffix in ('.bin', '.spectrum', '.rt'):
@@ -358,7 +364,11 @@ citation:
         regular_filter.run()
         if not self.args.dryrun:
             self.report_filtered_psms(regular_search, regular_output)
+        phase_timings.append(
+            ('2/4 Regular Aerith filter', time.perf_counter() - phase_started)
+        )
 
+        phase_started = time.perf_counter()
         self.logger.info(
             'Fast SIP phase 3/4: filtered-PSM SFI generation and spectra search'
         )
@@ -377,7 +387,11 @@ citation:
         if not self.args.dryrun:
             generated = spectra_search.generate_or_reuse_spectra_library()
             spectra_search.search_spectra_samples(generated)
+        phase_timings.append(
+            ('3/4 SFI + spectra search', time.perf_counter() - phase_started)
+        )
 
+        phase_started = time.perf_counter()
         self.logger.info('Fast SIP phase 4/4: Aerith filtering and reporting')
         spectra_filter = self.make_filter(
             spectra_search, spectra_output,
@@ -393,16 +407,28 @@ citation:
             'not written to the target-only cache'
         )
         spectra_filter.run()
+        phase_timings.append(
+            ('4/4 SIP Aerith + reports', time.perf_counter() - phase_started)
+        )
+        width = max(len(label) for label, _ in phase_timings)
+        timing_lines = ['Fast SIP phase timing (wall clock)']
+        for label, seconds in phase_timings:
+            timing_lines.append(f'  {label:<{width}} : {seconds:9.3f} s')
+        timing_lines.append(
+            f'  {"Fast SIP total":<{width}} : '
+            f'{sum(seconds for _, seconds in phase_timings):9.3f} s'
+        )
+        self.logger.info('\n'.join(timing_lines))
         return spectra_search
 
     def run(self) -> None:
-        start_time: float = time.time()
+        start_time = time.perf_counter()
         spectra_mode = bool(self.args.psm_tsv or self.args.unlabeled_input or self.args.spectra_dir)
         if self.args.fast_sip_search:
             self.run_fast_sip_search()
-            running_time = time.time() - start_time
+            running_time = time.perf_counter() - start_time
             self.logger.info(f'All job done. Results are in {self.args.output}.')
-            self.logger.info(f'Total running time: {running_time} seconds')
+            self.logger.info(f'Total wall time: {running_time:.3f} s')
             return
 
         sipros_search = self.make_search(
@@ -426,10 +452,9 @@ citation:
         )
         sipros_filter.run()
 
-        end_time = time.time()
-        running_time = end_time - start_time
+        running_time = time.perf_counter() - start_time
         self.logger.info(f'All job done. Results are in {self.args.output}.')
-        self.logger.info(f'Total running time: {running_time} seconds')
+        self.logger.info(f'Total wall time: {running_time:.3f} s')
 
 
 if __name__ == "__main__":

@@ -382,10 +382,14 @@ void print_summary(std::ostream& output, const Summary& summary) {
         }
     }
     output << "\nTiming by stage (seconds)\n"
+           << "  Top-level rows are disjoint; indented rows are included in "
+              "their parent.\n"
+           << "  Wall time uses a steady clock; CPU time is process CPU; "
+              "average cores = CPU / wall.\n"
            << std::left << std::setw(64) << "Stage"
            << std::right << std::setw(14) << "Wall time"
-           << std::setw(14) << "CPU time"
-           << std::setw(12) << "Speedup" << '\n'
+           << std::setw(14) << "Process CPU"
+           << std::setw(12) << "Avg cores" << '\n'
            << std::string(104, '-') << '\n';
     const auto print_wrapped_timing_detail = [&](const std::string& detail) {
         constexpr std::size_t line_width = 104;
@@ -409,7 +413,7 @@ void print_summary(std::ostream& output, const Summary& summary) {
     };
     const auto print_timing = [&](const std::string& label,
                                   const StageTiming& timing) {
-        const double speedup = timing.wall_seconds > 0.0
+        const double average_cores = timing.wall_seconds > 0.0
             ? timing.cpu_seconds / timing.wall_seconds : 0.0;
         const bool overlong = label.size() > 64;
         const std::string display = overlong
@@ -417,19 +421,15 @@ void print_summary(std::ostream& output, const Summary& summary) {
         output << std::left << std::setw(64) << display
                << std::right << std::setw(14) << timing.wall_seconds
                << std::setw(14) << timing.cpu_seconds
-               << std::setw(11) << speedup << "x\n";
+               << std::setw(12) << average_cores << '\n';
         if (overlong) print_wrapped_timing_detail("Full stage: " + label);
-    };
-    const auto displayed_seconds = [](double seconds) {
-        constexpr double scale = 1000000.0;
-        return std::round(seconds * scale) / scale;
     };
     StageTiming accounted_timing;
     const auto print_top_level_timing = [&](const std::string& label,
                                             const StageTiming& timing) {
         print_timing(label, timing);
-        accounted_timing.wall_seconds += displayed_seconds(timing.wall_seconds);
-        accounted_timing.cpu_seconds += displayed_seconds(timing.cpu_seconds);
+        accounted_timing.wall_seconds += timing.wall_seconds;
+        accounted_timing.cpu_seconds += timing.cpu_seconds;
     };
     const bool has_spectrum_entropy =
         std::find(summary.feature_names.begin(), summary.feature_names.end(),
@@ -499,15 +499,11 @@ void print_summary(std::ostream& output, const Summary& summary) {
         }
     }
     const StageTiming coordination_timing{
-        displayed_seconds(summary.total_timing.wall_seconds) -
-            accounted_timing.wall_seconds,
-        displayed_seconds(summary.total_timing.cpu_seconds) -
-            accounted_timing.cpu_seconds};
+        summary.total_timing.wall_seconds - accounted_timing.wall_seconds,
+        summary.total_timing.cpu_seconds - accounted_timing.cpu_seconds};
     print_timing(
-        "Workflow coordination and timing overhead", coordination_timing);
+        "Uninstrumented workflow remainder", coordination_timing);
     print_timing("Total", summary.total_timing);
-    output << "  Overall OpenMP efficiency: "
-           << summary.omp_parallel_efficiency * 100.0 << "%\n";
     bool wrote_calibration_header = false;
     for (const auto& stage : summary.quantification_stages) {
         if (stage.detail.empty()) continue;

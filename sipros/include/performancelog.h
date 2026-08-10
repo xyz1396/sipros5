@@ -101,7 +101,7 @@ inline void printPerformanceHeader(std::ostream &out,
 {
 	out << "\n" << title << "\n"
 		<< "  Parallel speedup = process CPU time / wall time"
-		<< "; 1.00x is one fully busy core\n"
+		<< "; 1.00x is one fully busy CPU thread\n"
 		<< "  OpenMP threads: " << threadCount
 		<< " (ideal upper bound: " << threadCount << ".00x)\n"
 		<< "  " << std::left << std::setw(33) << "Stage"

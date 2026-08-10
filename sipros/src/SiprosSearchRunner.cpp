@@ -51,8 +51,8 @@ static std::string formatMebibytes(uint64_t bytes)
 
 static const char *precursorSourceName(PrecursorSource source)
 {
-	return source == PrecursorSource::Ms1Neighborhood
-		? "ms1-neighborhood"
+	return source == PrecursorSource::IsolationWindow
+		? "isolation-window; post-score MS1 +/-5"
 		: "raxport-candidates";
 }
 
@@ -467,11 +467,125 @@ static bool scoredPsmBetter(const ScoredPsmRow &left, const ScoredPsmRow &right)
 	return left.identifiedPeptide < right.identifiedPeptide;
 }
 
+static std::vector<ScoredPsmRow> pruneSingleScanRows(
+	std::vector<ScoredPsmRow> scanRows, int topN)
+{
+	std::sort(scanRows.begin(), scanRows.end(), scoredPsmBetter);
+	std::set<std::string> selectedPeptides;
+	std::vector<ScoredPsmRow *> selectedRows;
+	selectedRows.reserve(std::min(
+		scanRows.size(), static_cast<size_t>(topN) +
+			static_cast<size_t>(PeptideUnit::DdaResidualTopN)));
+	for (ScoredPsmRow &row : scanRows)
+	{
+		if (!selectedPeptides.insert(uniquePeptideKey(row)).second)
+		{
+			continue;
+		}
+		selectedRows.push_back(&row);
+		if (static_cast<int>(selectedRows.size()) >= topN)
+		{
+			break;
+		}
+	}
+
+	std::vector<ScoredPsmRow *> residualRows;
+	residualRows.reserve(PeptideUnit::DdaResidualTopN);
+	for (ScoredPsmRow &row : scanRows)
+	{
+		if (row.ddaResidualRank > 0 &&
+			row.ddaResidualRank <= PeptideUnit::DdaResidualTopN)
+		{
+			residualRows.push_back(&row);
+		}
+	}
+	std::sort(
+		residualRows.begin(), residualRows.end(),
+		[](const ScoredPsmRow *left, const ScoredPsmRow *right)
+		{
+			if (left->ddaResidualRank != right->ddaResidualRank)
+				return left->ddaResidualRank < right->ddaResidualRank;
+			if (left->ddaResidualScore != right->ddaResidualScore)
+				return left->ddaResidualScore > right->ddaResidualScore;
+			return scoredPsmBetter(*left, *right);
+		});
+	for (ScoredPsmRow *row : residualRows)
+	{
+		if (!selectedPeptides.insert(uniquePeptideKey(*row)).second)
+			continue;
+		selectedRows.push_back(row);
+	}
+
+	std::vector<ScoredPsmRow> selected;
+	selected.reserve(selectedRows.size());
+	int rank = 1;
+	for (ScoredPsmRow *row : selectedRows)
+	{
+		row->rank = rank++;
+		selected.push_back(std::move(*row));
+	}
+	return selected;
+}
+
 static void pruneScoredRowsByScan(std::vector<ScoredPsmRow> &rows, int topPsmsPerScan)
 {
 	const int topN = topPsmsPerScan > 0 ? topPsmsPerScan : ProNovoConfig::INTTOPKEEP;
 	if (topN <= 0 || rows.empty())
 	{
+		return;
+	}
+
+	// A Regular append is already ordered by scan. Avoid building nearly one
+	// million map nodes and prune independent scans in parallel. Multi-pct SIP
+	// appends form multiple ordered runs and continue through the generic path.
+	const bool scanOrdered = std::is_sorted(
+		rows.begin(), rows.end(),
+		[](const ScoredPsmRow &left, const ScoredPsmRow &right)
+		{ return left.scanNumber < right.scanNumber; });
+	if (scanOrdered)
+	{
+		std::vector<std::pair<size_t, size_t>> scanRanges;
+		for (size_t begin = 0; begin < rows.size();)
+		{
+			size_t end = begin + 1;
+			while (end < rows.size() &&
+				rows[end].scanNumber == rows[begin].scanNumber)
+			{
+				++end;
+			}
+			scanRanges.emplace_back(begin, end);
+			begin = end;
+		}
+
+		std::vector<std::vector<ScoredPsmRow>> selectedByScan(
+			scanRanges.size());
+#pragma omp parallel for schedule(guided)
+		for (long long i = 0;
+			 i < static_cast<long long>(scanRanges.size()); ++i)
+		{
+			const auto range = scanRanges[static_cast<size_t>(i)];
+			std::vector<ScoredPsmRow> scanRows;
+			scanRows.reserve(range.second - range.first);
+			for (size_t rowIndex = range.first;
+				 rowIndex < range.second; ++rowIndex)
+			{
+				scanRows.push_back(std::move(rows[rowIndex]));
+			}
+			selectedByScan[static_cast<size_t>(i)] =
+				pruneSingleScanRows(std::move(scanRows), topN);
+		}
+
+		std::vector<ScoredPsmRow> prunedRows;
+		prunedRows.reserve(std::min(
+			rows.size(), scanRanges.size() *
+				(static_cast<size_t>(topN) +
+				 static_cast<size_t>(PeptideUnit::DdaResidualTopN))));
+		for (std::vector<ScoredPsmRow> &scanRows : selectedByScan)
+		{
+			for (ScoredPsmRow &row : scanRows)
+				prunedRows.push_back(std::move(row));
+		}
+		rows.swap(prunedRows);
 		return;
 	}
 
@@ -482,27 +596,16 @@ static void pruneScoredRowsByScan(std::vector<ScoredPsmRow> &rows, int topPsmsPe
 	}
 
 	std::vector<ScoredPsmRow> prunedRows;
-	prunedRows.reserve(std::min(rows.size(), groupedRows.size() * static_cast<size_t>(topN)));
+	prunedRows.reserve(std::min(
+		rows.size(), groupedRows.size() *
+			(static_cast<size_t>(topN) +
+			 static_cast<size_t>(PeptideUnit::DdaResidualTopN))));
 	for (auto &entry : groupedRows)
 	{
-		std::vector<ScoredPsmRow> &scanRows = entry.second;
-		std::sort(scanRows.begin(), scanRows.end(), scoredPsmBetter);
-		std::set<std::string> selectedPeptides;
-		int rank = 1;
-		for (ScoredPsmRow &row : scanRows)
-		{
-			if (!selectedPeptides.insert(uniquePeptideKey(row)).second)
-			{
-				continue;
-			}
-			row.rank = rank;
+		std::vector<ScoredPsmRow> selected =
+			pruneSingleScanRows(std::move(entry.second), topN);
+		for (ScoredPsmRow &row : selected)
 			prunedRows.push_back(std::move(row));
-			++rank;
-			if (rank > topN)
-			{
-				break;
-			}
-		}
 	}
 	rows.swap(prunedRows);
 }
@@ -532,6 +635,9 @@ static sipPSM buildSipPsm(const std::string &sampleName,
 	psm.MVHscores.reserve(count);
 	psm.XcorrScores.reserve(count);
 	psm.WDPscores.reserve(count);
+	psm.precursorRtDiffSeconds.reserve(count);
+	psm.ddaResidualRanks.reserve(count);
+	psm.ddaResidualScores.reserve(count);
 	psm.matchedBIons.reserve(count);
 	psm.matchedYIons.reserve(count);
 	psm.maxConsecutiveBIons.reserve(count);
@@ -558,6 +664,9 @@ static sipPSM buildSipPsm(const std::string &sampleName,
 		psm.MVHscores.push_back(row.mvhScore);
 		psm.XcorrScores.push_back(row.xcorrScore);
 		psm.WDPscores.push_back(row.wdpScore);
+		psm.precursorRtDiffSeconds.push_back(row.precursorRtDiffSeconds);
+		psm.ddaResidualRanks.push_back(row.ddaResidualRank);
+		psm.ddaResidualScores.push_back(row.ddaResidualScore);
 		psm.matchedBIons.push_back(row.matchedBIons);
 		psm.matchedYIons.push_back(row.matchedYIons);
 		psm.maxConsecutiveBIons.push_back(row.maxConsecutiveBIons);
@@ -586,8 +695,8 @@ void SiprosSearchRunner::printUsage(std::ostream &out, const std::string &prog)
 	out << "  --fragment-index-cache <p>  load/build a reusable v5 .sfi peptide cache\n";
 	out << "  --rebuild-fragment-index    ignore an existing cache and rebuild it\n";
 	out << "  --prepare-only              prepare a Regular peptide cache without searching H5 files\n";
-	out << "  --precursor-source <mode>    profile policy: Regular=ms1-neighborhood, SIP=raxport-candidates\n";
-	out << "                              Regular MS1 mode uses linked parent +/-2 scans and peak charge\n";
+	out << "                              Regular uses isolation windows and matches scored PSMs\n";
+	out << "                              in linked parent MS1 scans +/-5\n";
 	out << "  -a <SIP atom/isotope>       SIP isotope: C13, H2, N15, O18, or S34\n";
 	out << "  -b <pct|range|list>         SIP percentage, inclusive range, or comma-separated list\n";
 	out << "  -s, --step <pct>            SIP percentage step\n";
@@ -602,7 +711,7 @@ void SiprosSearchRunner::printUsage(std::ostream &out, const std::string &prog)
 	out << "  --pin-label <1|-1>          label written to PIN rows; default: 1\n";
 	out << "  --top-psms-per-scan <N>     final WDP-ranked PSMs retained per scan across SIP pct\n";
 	out << "\nWithout --fixed-ptm, compiled fixed CAM is used. Without --ptm, the compiled\n"
-		<< "profile defaults are used (Regular: oxidation and deamidation; SIP: none).\n";
+		<< "profile defaults are used (Regular: oxidation; SIP: none).\n";
 }
 
 bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
@@ -661,31 +770,6 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 		else if (option == "--prepare-only")
 		{
 			args.prepareOnly = true;
-		}
-		else if (option == "--precursor-source")
-		{
-			args.precursorSourceProvided = true;
-			const std::string value = TextUtils::toLower(
-				TextUtils::trim(requireValue(i, option)));
-			if (!valid)
-			{
-				return false;
-			}
-			if (value == "raxport-candidates")
-			{
-				args.raxportReadOptions.precursorSource =
-					PrecursorSource::RaxportCandidates;
-			}
-			else if (value == "ms1-neighborhood")
-			{
-				args.raxportReadOptions.precursorSource =
-					PrecursorSource::Ms1Neighborhood;
-			}
-			else
-			{
-				err << "--precursor-source must be raxport-candidates or ms1-neighborhood\n";
-				return false;
-			}
 		}
 		else if (option == "-a")
 		{
@@ -838,27 +922,13 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 				<< "fragment-index options are not allowed\n";
 			return false;
 		}
-		if (args.precursorSourceProvided &&
-			args.raxportReadOptions.precursorSource !=
-				PrecursorSource::RaxportCandidates)
-		{
-			err << "SIP FASTA search requires --precursor-source raxport-candidates\n";
-			return false;
-		}
 		args.raxportReadOptions.precursorSource =
 			PrecursorSource::RaxportCandidates;
 	}
 	else
 	{
-		if (args.precursorSourceProvided &&
-			args.raxportReadOptions.precursorSource !=
-				PrecursorSource::Ms1Neighborhood)
-		{
-			err << "Regular FASTA search requires --precursor-source ms1-neighborhood\n";
-			return false;
-		}
 		args.raxportReadOptions.precursorSource =
-			PrecursorSource::Ms1Neighborhood;
+			PrecursorSource::IsolationWindow;
 	}
 	if (args.rebuildFragmentIndex && args.fragmentIndexCache.empty())
 	{
@@ -1177,7 +1247,8 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 				  << " (max " << ProNovoConfig::getMaxPTMcount() << " per peptide)\n"
 				  << "  Precursors: "
 				  << precursorSourceName(args.raxportReadOptions.precursorSource) << "\n"
-				  << "  Search    : lossless peptide/fragment cache\n";
+				  << "  Search    : window-only charges 1-4; four-ion gate; "
+					 "post-score MS1 +/-5\n";
 		if (!args.fragmentIndexCache.empty())
 		{
 			std::cout << "  Cache     : " << args.fragmentIndexCache << "\n";
@@ -1195,19 +1266,20 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 		std::cerr << "Error: Failed to load file: " << scanFile << "\n";
 		return 1;
 	}
+	const PerformanceTiming loadTiming = loadTimer.elapsed();
 	if (!directSipMode)
 	{
 		std::ostringstream loadDetail;
 		loadDetail << formatPerformanceCount(scanVector.scanCount())
-				   << " MS2 scans, "
-				   << formatPerformanceCount(
-						  scanVector.precursorHypothesisCount())
-				   << " precursor hypotheses";
+				   << " MS2 isolation-window scans";
 		printPerformanceStage(
-			std::cout, "Load HDF5 scans", loadTimer.elapsed(), loadDetail.str());
+			std::cout, "Load HDF5 scans", loadTiming, loadDetail.str());
 	}
 
 	std::vector<ScoredPsmRow> scoredRows;
+	PerformanceTiming collectTiming;
+	PerformanceTiming precursorMatchTiming;
+	size_t matchedPrecursorCount = 0;
 	if (directSipMode)
 	{
 		std::vector<double> pctValues;
@@ -1250,15 +1322,60 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 			ProNovoConfig::setSearchName("SE");
 		}
 		scanVector.startProcessingMvh();
+		const RegularSearchStatistics &stats =
+			scanVector.regularStatistics();
+		printPerformanceStage(
+			std::cout, "Preprocess spectra", stats.preprocess,
+			formatPerformanceCount(stats.scanCount) + " MS2 scans, " +
+			formatPerformanceCount(stats.skippedScans) + " skipped");
+		std::ostringstream queryDetail;
+		queryDetail
+			<< formatPerformanceCount(stats.isolationWindowRanges)
+			<< " isolation ranges, "
+			<< formatPerformanceCount(stats.isolationWindowCandidates)
+			<< " window candidates, "
+			<< formatPerformanceCount(stats.exactMassCandidates)
+			<< " exact-mass candidates, "
+			<< formatPerformanceCount(stats.fragmentPostingsVisited)
+			<< " posting visits, "
+			<< formatPerformanceCount(stats.fragmentGateSurvivors)
+			<< " gate survivors";
+		printPerformanceStage(
+			std::cout, "Query peptide cache", stats.queryIndex,
+			queryDetail.str());
+		printPerformanceStage(
+			std::cout, "MVH scoring", stats.mvhScoring,
+			formatPerformanceCount(stats.exactMvhCalls) +
+			" candidates, " +
+			formatPerformanceCount(stats.exactMvhAccepted) + " accepted");
+		const std::string scoreDetail =
+			formatPerformanceCount(stats.candidatePsms) +
+			" candidate PSMs across " +
+			formatPerformanceCount(stats.scanCount) + " scans";
+		printPerformanceStage(
+			std::cout, "XCorr scoring", stats.xcorrScoring, scoreDetail);
+		printPerformanceStage(
+			std::cout, "WDP scoring", stats.wdpScoring, scoreDetail);
+		printPerformanceStage(
+			std::cout, "Calculate PSM features", stats.psmFeatures,
+			scoreDetail);
 		const PerformanceTimer collectTimer;
 		scanVector.appendScoredPsmRows(scoredRows, isDecoyLabel, topKeep, 1.07);
 		pruneScoredRowsByScan(scoredRows, topKeep);
+		collectTiming = collectTimer.elapsed();
 		printPerformanceStage(
-			std::cout, "Collect top PSMs", collectTimer.elapsed(),
+			std::cout, "Collect top PSMs", collectTiming,
 			formatPerformanceCount(scoredRows.size()) + " retained rows");
+		const PerformanceTimer precursorMatchTimer;
+		matchedPrecursorCount = scanVector.matchScoredPsmPrecursors(scoredRows);
+		precursorMatchTiming = precursorMatchTimer.elapsed();
+		printPerformanceStage(
+			std::cout, "Match scored precursors", precursorMatchTiming,
+			formatPerformanceCount(matchedPrecursorCount) + " of " +
+			formatPerformanceCount(scoredRows.size()) +
+			" rows matched in linked MS1 +/-5");
 	}
 
-	const PerformanceTimer pinTotalTimer;
 	const std::string sampleName = fs::path(scanFile).stem().string();
 	const PerformanceTimer pinBuildTimer;
 	sipPSM psm = buildSipPsm(sampleName, scoredRows);
@@ -1301,12 +1418,51 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 		printPerformanceStage(
 			std::cout, "Format and write PIN", pinWriteTiming,
 			pinPath.string());
+		PerformanceTiming accountedTiming;
+		accountedTiming += loadTiming;
+		const RegularSearchStatistics &stats =
+			scanVector.regularStatistics();
+		accountedTiming += stats.preprocess;
+		accountedTiming += stats.queryIndex;
+		accountedTiming += stats.mvhScoring;
+		accountedTiming += stats.xcorrScoring;
+		accountedTiming += stats.wdpScoring;
+		accountedTiming += stats.psmFeatures;
+		accountedTiming += collectTiming;
+		accountedTiming += precursorMatchTiming;
+		accountedTiming += pinBuildTiming;
+		accountedTiming += pinMs1LoadTiming;
+		accountedTiming += pinFeatureTiming;
+		accountedTiming += pinWriteTiming;
+		const PerformanceTiming fileTiming = fileTimer.elapsed();
+		PerformanceTiming overheadTiming;
+		overheadTiming.wallSeconds = std::max(
+			0.0, fileTiming.wallSeconds - accountedTiming.wallSeconds);
+		overheadTiming.cpuSeconds = std::max(
+			0.0, fileTiming.cpuSeconds - accountedTiming.cpuSeconds);
 		printPerformanceStage(
-			std::cout, "PIN output (total)", pinTotalTimer.elapsed(),
-			pinPath.string());
+			std::cout, "Workflow setup/overhead", overheadTiming);
 		printPerformanceStage(
-			std::cout, "Search file (total)", fileTimer.elapsed());
+			std::cout, "Search file (total)", fileTiming);
 		printPerformanceFooter(std::cout);
+		std::cout << "\nSearch statistics\n"
+				  << "  Isolation-window candidates: "
+				  << formatPerformanceCount(stats.isolationWindowCandidates)
+				  << "\n"
+				  << "  Four-fragment survivors     : "
+				  << formatPerformanceCount(stats.fragmentGateSurvivors)
+				  << "\n"
+				  << "  MVH accepted                : "
+				  << formatPerformanceCount(stats.exactMvhAccepted) << "\n"
+				  << "  Finalized WDP winners       : "
+				  << formatPerformanceCount(scoredRows.size()) << "\n"
+				  << "  Post-score MS1 matches      : "
+				  << formatPerformanceCount(matchedPrecursorCount) << "/"
+				  << formatPerformanceCount(scoredRows.size()) << "\n"
+				  << "  PIN rows                    : "
+				  << formatPerformanceCount(scoredRows.size()) << "\n"
+				  << "  PIN output                  : "
+				  << pinPath.string() << "\n";
 	}
 	else
 	{

@@ -12,6 +12,12 @@ constexpr bool observedPeakChargeMatches(int observedCharge,
 	return observedCharge == 0 || observedCharge == theoreticalCharge;
 }
 
+class SearchSpectraWorkflow
+{
+public:
+	int run(int argc, char **argv);
+};
+
 } // namespace sipros
 
 class DatabaseSearchWorkflow
@@ -27,12 +33,6 @@ public:
 };
 
 class ExperimentalSpectraWorkflow
-{
-public:
-	int run(int argc, char **argv);
-};
-
-class SearchSpectraWorkflow
 {
 public:
 	int run(int argc, char **argv);

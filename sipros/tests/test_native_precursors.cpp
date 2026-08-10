@@ -41,7 +41,8 @@ void write1D(H5::H5File &file, const std::string &path,
 	}
 }
 
-void writeFixture(const fs::path &path, int reactionCharge)
+void writeFixture(const fs::path &path, int reactionCharge,
+				  bool hasNearbyPrecursor = true)
 {
 	H5::H5File file(path.string(), H5F_ACC_TRUNC);
 	const int schemaVersion = 6;
@@ -74,7 +75,9 @@ void writeFixture(const fs::path &path, int reactionCharge)
 		std::vector<int>{3, 2});
 
 	write1D(file, "/peaks/mz", H5::PredType::NATIVE_DOUBLE,
-		std::vector<double>{499.5, 500.0, 500.01, 100.0, 200.0});
+		hasNearbyPrecursor
+			? std::vector<double>{499.5, 500.0, 500.01, 100.0, 200.0}
+			: std::vector<double>{400.0, 410.0, 420.0, 100.0, 200.0});
 	write1D(file, "/peaks/intensity", H5::PredType::NATIVE_DOUBLE,
 		std::vector<double>{10.0, 20.0, 30.0, 10.0, 20.0});
 	write1D(file, "/peaks/charge", H5::PredType::NATIVE_INT,
@@ -102,15 +105,18 @@ void writeFixture(const fs::path &path, int reactionCharge)
 		std::vector<int>{});
 }
 
-std::vector<MS2Scan *> readNative(const fs::path &path)
+std::vector<MS2Scan *> readNative(
+	const fs::path &path,
+	sipros::RaxportMs1Data *ms1Data = nullptr)
 {
 	std::vector<MS2Scan *> scans;
 	std::string error;
 	sipros::RaxportReadOptions options;
-	options.precursorSource = sipros::PrecursorSource::Ms1Neighborhood;
-	options.ms1NeighborhoodRadius = 2;
+	options.precursorSource = sipros::PrecursorSource::IsolationWindow;
+	check(options.precursorMatchScanRadius == 5,
+		"Regular post-score MS1 radius is not five scans");
 	check(sipros::readRaxportHdf5Scans(
-		path.string(), scans, nullptr, error, nullptr, options), error);
+		path.string(), scans, ms1Data, error, nullptr, options), error);
 	return scans;
 }
 
@@ -134,6 +140,47 @@ void destroy(std::vector<MS2Scan *> &scans)
 	scans.clear();
 }
 
+void checkPostScoreFiveScanMatch()
+{
+	sipros::RaxportMs1Data data;
+	data.scans.resize(12);
+	for (size_t i = 0; i < data.scans.size(); ++i)
+	{
+		data.scans[i].scanNumber = 100 + static_cast<int>(i);
+		data.scans[i].retentionTime = 10.0 + 0.1 * static_cast<double>(i);
+		data.scanNumberToIndex.emplace(data.scans[i].scanNumber, i);
+	}
+	const int charge = 2;
+	const double calculatedMass = 1000.0;
+	const double targetMz = calculatedMass / charge +
+		ProNovoConfig::getProtonMass();
+	for (size_t i : {size_t{0}, size_t{10}, size_t{11}})
+	{
+		data.scans[i].mz = {targetMz};
+		data.scans[i].intensity = {100.0 + static_cast<double>(i)};
+		data.scans[i].charge = {charge};
+	}
+
+	const auto boundary = sipros::findRaxportPrecursorMatch(
+		data, 105, 11.09, charge, calculatedMass, 1.0033548,
+		{0, 1, 2}, 0.01, 5);
+	check(boundary.found && boundary.ms1ScanNumber == 110,
+		"post-score precursor search did not include the +5 MS1 boundary");
+	check(std::abs(boundary.rtDiffSeconds - 5.4) < 1e-9,
+		"post-score precursor RT difference is not in seconds");
+	const auto tooNarrow = sipros::findRaxportPrecursorMatch(
+		data, 105, 11.09, charge, calculatedMass, 1.0033548,
+		{0, 1, 2}, 0.01, 4);
+	check(!tooNarrow.found && tooNarrow.rtDiffSeconds == -1.0,
+		"post-score precursor search escaped its configured scan radius");
+	data.scans[10].charge = {0};
+	const auto unknownCharge = sipros::findRaxportPrecursorMatch(
+		data, 105, 11.09, charge, calculatedMass, 1.0033548,
+		{0}, 0.01, 5);
+	check(unknownCharge.found,
+		"unassigned MS1 peak did not support a post-score charge-2 PSM");
+}
+
 } // namespace
 
 int main()
@@ -148,16 +195,23 @@ int main()
 		("sipros_native_precursor_low_" + std::to_string(processId) + ".h5");
 	const fs::path secondPath = fs::temp_directory_path() /
 		("sipros_native_precursor_high_" + std::to_string(processId) + ".h5");
+	const fs::path noPrecursorPath = fs::temp_directory_path() /
+		("sipros_native_precursor_absent_" + std::to_string(processId) + ".h5");
 	std::vector<MS2Scan *> first;
 	std::vector<MS2Scan *> second;
+	std::vector<MS2Scan *> noPrecursor;
+	sipros::RaxportMs1Data firstMs1;
 	try
 	{
 		check(ProNovoConfig::load(ProNovoConfig::Profile::Regular),
 			"could not load Regular profile");
+		checkPostScoreFiveScanMatch();
 		writeFixture(firstPath, 1);
 		writeFixture(secondPath, 7);
-		first = readNative(firstPath);
+		writeFixture(noPrecursorPath, 2, false);
+		first = readNative(firstPath, &firstMs1);
 		second = readNative(secondPath);
+		noPrecursor = readNative(noPrecursorPath);
 		check(first.size() == 1 && second.size() == 1,
 			"native fixture did not produce one MS2 scan");
 		const MS2Scan &lowReaction = *first.front();
@@ -168,24 +222,34 @@ int main()
 		check(lowReaction.iParentChargeState == 1 &&
 			highReaction.iParentChargeState == 7,
 			"fixture did not preserve reaction charge as metadata");
-		check(lowReaction.iParentChargeStates ==
-			highReaction.iParentChargeStates &&
-			lowReaction.dParentMZs == highReaction.dParentMZs,
-			"reaction charge changed native MS1 hypotheses");
-		check(lowReaction.iParentChargeStates ==
-			std::vector<int>({2, 2, 3, 4, 25}),
-			"native charges did not preserve positive peak charge and zero -> 2/3/4");
-		check(lowReaction.iMaxCandidateCharge == 25 &&
-			highReaction.iMaxCandidateCharge == 25,
-			"reaction charge contaminated the candidate charge limit");
-		check(lowReaction.iParentChargeStates.back() == 25,
-			"a positive MS1 peak charge above seven was discarded");
+		check(lowReaction.vIsolationWindowsMz ==
+			std::vector<std::pair<double, double>>({{500.0, 2.0}}) &&
+			highReaction.vIsolationWindowsMz ==
+			std::vector<std::pair<double, double>>({{500.0, 2.0}}),
+			"native mode did not preserve the acquisition isolation window");
+		check(lowReaction.iParentChargeStates.empty() &&
+			highReaction.iParentChargeStates.empty() &&
+			lowReaction.dParentMZs.empty() && highReaction.dParentMZs.empty(),
+			"window-only mode created candidates from MS1 peaks");
+		check(lowReaction.iMaxCandidateCharge == 0 &&
+			highReaction.iMaxCandidateCharge == 0,
+			"reader assigned a precursor charge before window search");
 		check(std::abs(lowReaction.dParentMass - highReaction.dParentMass) < 1e-12 &&
 			std::abs(lowReaction.dParentNeutralMass -
 				highReaction.dParentNeutralMass) < 1e-12,
-			"reaction charge contaminated native precursor mass limits");
-		check(std::abs(lowReaction.dParentMass - 500.01 * 25.0) < 1e-9,
-			"native precursor mass limit did not use the charge-25 MS1 peak");
+			"reaction charge contaminated window-only precursor limits");
+		check(lowReaction.dParentMass == 0.0 &&
+			lowReaction.dParentNeutralMass == 0.0,
+			"reader assigned a searchable mass before window expansion");
+		check(noPrecursor.size() == 1 &&
+			noPrecursor.front()->iParentChargeStates.empty() &&
+			noPrecursor.front()->vIsolationWindowsMz ==
+				std::vector<std::pair<double, double>>({{500.0, 2.0}}),
+			"isolation-window scan without an MS1 hypothesis was discarded");
+		check(firstMs1.scans.size() == 1 &&
+			firstMs1.scans.front().scanNumber == 100 &&
+			firstMs1.scans.front().mz.size() == 3,
+			"window-only scan read did not retain MS1 data for post-score matching");
 
 		sipros::RaxportMs1Data featureMs1;
 		std::string featureError;
@@ -201,19 +265,23 @@ int main()
 
 		destroy(first);
 		destroy(second);
+		destroy(noPrecursor);
 		std::error_code ignored;
 		fs::remove(firstPath, ignored);
 		fs::remove(secondPath, ignored);
-		std::cout << "ok: native MS1 hypotheses are reaction-charge invariant\n";
+		fs::remove(noPrecursorPath, ignored);
+		std::cout << "ok: Regular candidates are isolation-window-only and retain MS1 data\n";
 		return 0;
 	}
 	catch (const std::exception &ex)
 	{
 		destroy(first);
 		destroy(second);
+		destroy(noPrecursor);
 		std::error_code ignored;
 		fs::remove(firstPath, ignored);
 		fs::remove(secondPath, ignored);
+		fs::remove(noPrecursorPath, ignored);
 		std::cerr << ex.what() << '\n';
 		return 1;
 	}

@@ -65,7 +65,7 @@ int main(int argc, char **argv)
 	}
 	if (command == "search-spectra")
 	{
-		SearchSpectraWorkflow workflow;
+		sipros::SearchSpectraWorkflow workflow;
 		return runShifted(argc, argv, 2, std::string(argv[0]) + " search-spectra", workflow);
 	}
 	std::cerr << "Unknown sipros subcommand: " << command << "\n\n";

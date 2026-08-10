@@ -142,8 +142,6 @@ struct Summary {
     StageTiming protein_assembly_timing;
     std::vector<AccelerationTiming> protein_assembly_stages;
     StageTiming total_timing;
-    double omp_speedup_ratio = 1.0;
-    double omp_parallel_efficiency = 1.0;
     std::string score_model = "global_rt_samplewise_omp_simd_l2_svm_3fold";
     unsigned int threads = 1;
     unsigned int sample_parallelism = 1;

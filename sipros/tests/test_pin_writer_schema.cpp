@@ -41,7 +41,9 @@ std::vector<std::string> splitTabs(const std::string &line)
 void checkPin(const std::filesystem::path &path,
               int expectedRawCount,
               double expectedFitScore,
-              double expectedObservedMass)
+              double expectedObservedMass,
+              double expectedRtDiffSeconds,
+              double expectedAbundanceDiff)
 {
     std::ifstream input(path);
     check(static_cast<bool>(input),
@@ -71,12 +73,27 @@ void checkPin(const std::filesystem::path &path,
         "MS1IsotopicAbundances");
     const auto observedMassIt = std::find(
         header.begin(), header.end(), "ObservedMass");
+    const auto rtDiffIt = std::find(
+        header.begin(), header.end(), "absPrecursorRtDiffSeconds");
+    const auto ms2AbundanceIt = std::find(
+        header.begin(), header.end(), "MS2IsotopicAbundances");
+    const auto abundanceDiffIt = std::find(
+        header.begin(), header.end(), "isotopicAbundanceDiffs");
     check(rawIt != header.end() &&
-              scoreIt == rawIt + 1 &&
+              rtDiffIt == rawIt + 1 &&
+              scoreIt == rtDiffIt + 1 &&
               abundanceIt == scoreIt + 1,
-          "MS1 raw-count/fit-score columns are missing or misordered");
+          "MS1 raw-count/RT-distance/fit-score columns are missing or misordered");
     check(observedMassIt != header.end(),
           "PIN is missing ObservedMass metadata");
+    check(rtDiffIt != header.end(),
+          "PIN is missing absPrecursorRtDiffSeconds");
+    check(ms2AbundanceIt != header.end() &&
+              abundanceDiffIt == ms2AbundanceIt + 1,
+          "isotopicAbundanceDiffs is missing or misordered");
+    check(std::find(header.begin(), header.end(), "hasMs1Precursor") ==
+              header.end(),
+          "obsolete hasMs1Precursor feature is still present");
 
     const size_t rawIndex = static_cast<size_t>(
         rawIt - header.begin());
@@ -92,6 +109,40 @@ void checkPin(const std::filesystem::path &path,
                             observedMassIt - header.begin())]) -
                     expectedObservedMass) < 1e-6,
           "PIN changed the observed precursor mass");
+    check(std::fabs(std::stod(row[static_cast<size_t>(
+                            rtDiffIt - header.begin())]) -
+                    expectedRtDiffSeconds) < 1e-6,
+          "PIN changed the precursor RT-distance feature");
+    check(std::fabs(std::stod(row[static_cast<size_t>(
+                            abundanceDiffIt - header.begin())]) -
+                    expectedAbundanceDiff) < 1e-6,
+          "PIN changed the signed MS1-minus-MS2 abundance feature");
+    const double printedMs1 = std::stod(row[static_cast<size_t>(
+        abundanceIt - header.begin())]);
+    const double printedMs2 = std::stod(row[static_cast<size_t>(
+        ms2AbundanceIt - header.begin())]);
+    const double printedDifference = std::stod(row[static_cast<size_t>(
+        abundanceDiffIt - header.begin())]);
+    check(std::fabs(printedDifference - (printedMs1 - printedMs2)) < 2e-6,
+          "printed abundance difference is inconsistent with printed MS1-MS2");
+	if (expectedRawCount == 1)
+	{
+		const auto intensityIt = std::find(
+			header.begin(), header.end(), "log10_precursorIntensities");
+		check(intensityIt != header.end() &&
+			intensityIt + 2 < header.end() &&
+			*(intensityIt + 1) == "ddaResidualRank" &&
+			*(intensityIt + 2) == "ddaResidualScore",
+			"DDA+ PIN columns are missing or misordered");
+		const size_t rtDiffIndex = static_cast<size_t>(
+			rtDiffIt - header.begin());
+		const size_t intensityIndex = static_cast<size_t>(
+			intensityIt - header.begin());
+		check(std::fabs(std::stod(row[rtDiffIndex]) - 3.25) < 1e-6 &&
+			row[intensityIndex + 1] == "2" &&
+			std::fabs(std::stod(row[intensityIndex + 2]) - 12.5) < 1e-6,
+			"DDA+ PIN feature values changed");
+	}
 
     const auto matchedBIt = std::find(
         header.begin(), header.end(), "matchedBIons");
@@ -145,6 +196,9 @@ sipPSM makeClassicPsm()
     psm.maxConsecutiveBIons = {2};
     psm.maxConsecutiveYIons = {3};
     psm.precursorIntensities = {1000.0};
+	psm.precursorRtDiffSeconds = {3.25};
+	psm.ddaResidualRanks = {2};
+	psm.ddaResidualScores = {12.5f};
     psm.identifiedPeptides = {"K[PEPTIDE]R"};
     psm.originalPeptides = {"K[PEPTIDE]R"};
     psm.proteinNames = {"{protein}"};
@@ -173,7 +227,7 @@ int main()
 
         PinWriter::writePecorlatorPin(
             classicPath.string(), {makeClassicPsm()}, false);
-        checkPin(classicPath, 1, 0.0, 999.5);
+        checkPin(classicPath, 1, 0.0, 999.5, 3.25, 0.1);
 
         PinWriter::SearchSpectraPinRow spectraRow;
         spectraRow.label = 1;
@@ -181,14 +235,17 @@ int main()
         spectraRow.rank = 1;
         spectraRow.isotopicPeakNumber = 4;
         spectraRow.ms1IsotopeFitScore = 0.75;
+        spectraRow.ms1IsotopicAbundance = 2.3;
+        spectraRow.ms2IsotopicAbundance = 1.1;
         spectraRow.observedMass = 998.5;
+        spectraRow.precursorRtDiffSeconds = 7.5;
         spectraRow.peptide = "K[PEPTIDE]R";
         spectraRow.proteins = "{protein}";
         check(PinWriter::writeSearchSpectraPin(
                   spectraPath.string(), "sample",
                   {spectraRow}) == 1,
               "search-spectra PIN writer returned no rows");
-        checkPin(spectraPath, 4, 0.75, 998.5);
+        checkPin(spectraPath, 4, 0.75, 998.5, 7.5, 1.2);
 
         std::filesystem::remove(classicPath);
         std::filesystem::remove(spectraPath);

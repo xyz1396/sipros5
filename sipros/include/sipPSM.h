@@ -40,6 +40,9 @@ public:
     std::vector<float> MVHscores;
     std::vector<float> XcorrScores;
     std::vector<float> WDPscores;
+    std::vector<double> precursorRtDiffSeconds;
+    std::vector<int> ddaResidualRanks;
+    std::vector<float> ddaResidualScores;
 
     // PIN features.
     std::vector<bool> isDecoys;

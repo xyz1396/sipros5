@@ -66,8 +66,8 @@ struct PsmRow
 void printUsage(const char *prog)
 {
 	std::cerr << "Usage: " << prog
-			  << " -i <input.tsv|fragpipe_dir> -o <output.sfi> -a <SIP atom/isotope, e.g. C13,H2,O18,N15,S34> [-b <pct>] [-p <prob cutoff>] [--fixed-ptm <name|default|none|all>] [-t <threads>]\n";
-	std::cerr << "Required columns in input: (PSMId, SpecId, or FragPipe Spectrum), Peptide";
+			  << " -i <input.tsv|report_dir> -o <output.sfi> -a <SIP atom/isotope, e.g. C13,H2,O18,N15,S34> [-b <pct>] [-p <prob cutoff>] [--fixed-ptm <name|default|none|all>] [-t <threads>]\n";
+	std::cerr << "Required columns in input: (PSMId, SpecId, or Spectrum), Peptide";
 	std::cerr << " [MS2IsotopicAbundances required unless -b/--sip-abundance is set]\n";
 	std::cerr << "Directory input recursively combines files named psm.tsv. Output is a memory-mapped SIP fragment index (.sfi).\n";
 	std::cerr << "--fixed-ptm is repeatable; omit it to use the compiled default (carbamidomethyl C).\n";
@@ -484,7 +484,7 @@ void readInputFile(const fs::path &path,
 		throw std::runtime_error(
 			"Missing required column SVMscore in " + path.string());
 	}
-	const bool fragpipeInput = col.find("Spectrum") != col.end();
+	const bool reportStyleInput = col.find("Spectrum") != col.end();
 
 	std::string line;
 	size_t lineNo = 1;
@@ -517,7 +517,7 @@ void readInputFile(const fs::path &path,
 		}
 		PsmRow row;
 		row.psmId = sipros::TextUtils::trim(f[idxPSMId]);
-		if (fragpipeInput)
+		if (reportStyleInput)
 		{
 			const std::string modified = idxModifiedPeptide == std::string::npos
 										 ? std::string()
@@ -1039,8 +1039,8 @@ bool writeSpectraSfi(const fs::path &path,
 		record.peptide = i < data.peptides.size() ? data.peptides[i] : std::string();
 		record.proteins = i < data.proteins.size() ? data.proteins[i] : std::string();
 		record.charge = i < data.charges.size() ? data.charges[i] : 1;
-		// FragPipe/Aerith psm.tsv Retention is defined in seconds. Store the
-		// index RT in minutes so search does not need a unit heuristic.
+		// Accepted PSM reports define Retention in seconds. Store the index RT
+		// in minutes so search does not need a unit heuristic.
 		record.retentionMinutes = retentionValues[i] / 60.0;
 		record.sipAbundancePct = i < data.sipAbundancePct.size()
 			? data.sipAbundancePct[i]

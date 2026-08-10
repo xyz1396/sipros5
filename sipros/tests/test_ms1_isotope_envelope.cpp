@@ -342,7 +342,9 @@ PSMfeatureExtractor::Ms1AbundanceResult fitFixture(
             initializerPct);
 }
 
-sipPSM extractFixtureFeatures(Fixture &fixture)
+sipPSM extractFixtureFeatures(
+    Fixture &fixture,
+    double precursorRtDiffSeconds = 0.0)
 {
     const double matchedMz =
         fixtureMzAt(fixture, fixture.modeIndex);
@@ -367,6 +369,7 @@ sipPSM extractFixtureFeatures(Fixture &fixture)
     psm.ranks.push_back(1);
     psm.WDPscores.push_back(1.0f);
     psm.isolationWindowCenterMZs.push_back(matchedMz);
+    psm.precursorRtDiffSeconds.push_back(precursorRtDiffSeconds);
 
     PSMfeatureExtractor extractor;
     extractor.ms1Data = fixture.ms1;
@@ -374,6 +377,42 @@ sipPSM extractFixtureFeatures(Fixture &fixture)
     extractor.initializeFeatureVectors(psm);
     extractor.extractFeaturesOfEachPSM();
     return psm;
+}
+
+void checkMissingPrecursorUsesIsolationCenter()
+{
+    Fixture fixture = makeFixture(targetCases()[0], 0.5, 2);
+    const sipPSM psm = extractFixtureFeatures(fixture, -1.0);
+    check(psm.isotopicPeakNumbers[0] == 0 &&
+              psm.MS1IsotopeFitScores[0] == 0.0,
+          "isolation-center fallback reported peptide-specific MS1 evidence");
+    check(psm.MS1IsotopicAbundances[0] > 0.0,
+          "isolation-center fallback did not retain the imputed MS1 abundance");
+    check(std::fabs(psm.isotopicAbundanceDiffs[0] -
+                    (psm.MS1IsotopicAbundances[0] -
+                     psm.MS2IsotopicAbundances[0])) < 1e-12,
+          "isolation-center fallback produced an inconsistent abundance difference");
+
+    fixture.ms1.scans[0].mz.clear();
+    fixture.ms1.scans[0].intensity.clear();
+    fixture.ms1.scans[0].charge.clear();
+    const sipPSM emptyPsm = extractFixtureFeatures(fixture, -1.0);
+    const double expectedCenterEstimate =
+        PSMfeatureExtractor::estimateSIPelementAbundanceFromIsolationCenter(
+            fixture.peptide, fixture.charge,
+            fixtureMzAt(fixture, fixture.modeIndex),
+            fixture.target->label, fixture.expectedPct);
+    check(emptyPsm.isotopicPeakNumbers[0] == 0 &&
+              emptyPsm.MS1IsotopeFitScores[0] == 0.0,
+          "theoretical isolation-center fallback reported MS1 evidence");
+    check(expectedCenterEstimate > 0.0 &&
+              std::fabs(emptyPsm.MS1IsotopicAbundances[0] -
+                        expectedCenterEstimate) < 1e-12,
+          "missing center anchor did not use the closest theoretical isotope");
+    check(std::fabs(emptyPsm.isotopicAbundanceDiffs[0] -
+                    (expectedCenterEstimate -
+                     emptyPsm.MS2IsotopicAbundances[0])) < 1e-12,
+          "theoretical isolation-center fallback did not report MS1 minus MS2");
 }
 
 void checkWhitelistAndConfiguredMasses()
@@ -1231,6 +1270,7 @@ int main(int argc, char **argv)
         checkLargeHydrogenEnvelope();
         checkInvalidEvidenceAndUnsupportedTarget();
         checkRawCountAndFitScoreFeatures();
+        checkMissingPrecursorUsesIsolationCenter();
         checkFollowingScanNeighborhood();
         checkProductConvolvedPrecursorLookup();
         checkEndpointStateIndependence();

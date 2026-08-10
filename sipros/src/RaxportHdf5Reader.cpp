@@ -1,9 +1,12 @@
 #include "RaxportHdf5Reader.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
@@ -202,69 +205,6 @@ void appendCandidatePrecursors(MS2Scan *scan,
     }
 }
 
-size_t appendNeighborhoodMs1Precursors(MS2Scan *scan,
-                                       const RaxportMs1Data &ms1Data,
-                                       int parentScanNumber,
-                                       double isolationCenterMz,
-                                       double isolationWidth,
-                                       int neighborhoodRadius)
-{
-    if (scan == nullptr || ms1Data.scans.empty() || neighborhoodRadius < 0 ||
-        isolationCenterMz <= 0.0 || isolationWidth <= 0.0 ||
-        !std::isfinite(isolationCenterMz) || !std::isfinite(isolationWidth))
-    {
-        return 0;
-    }
-
-    const auto parent = ms1Data.scanNumberToIndex.find(parentScanNumber);
-    if (parent == ms1Data.scanNumberToIndex.end())
-    {
-        return 0;
-    }
-
-    const size_t parentIndex = parent->second;
-    const size_t radius = static_cast<size_t>(neighborhoodRadius);
-    const size_t first = parentIndex > radius ? parentIndex - radius : 0;
-    const size_t last = std::min(ms1Data.scans.size() - 1, parentIndex + radius);
-    const double lowerMz = isolationCenterMz - isolationWidth / 2.0;
-    const double upperMz = isolationCenterMz + isolationWidth / 2.0;
-    size_t appended = 0;
-
-    for (size_t scanIndex = first; scanIndex <= last; ++scanIndex)
-    {
-        const RaxportMs1Scan &ms1Scan = ms1Data.scans[scanIndex];
-        auto peak = std::lower_bound(ms1Scan.mz.begin(), ms1Scan.mz.end(), lowerMz);
-        for (; peak != ms1Scan.mz.end() && *peak <= upperMz; ++peak)
-        {
-            const double mz = *peak;
-            if (mz <= 0.0 || !std::isfinite(mz))
-            {
-                continue;
-            }
-            const size_t peakIndex = static_cast<size_t>(std::distance(ms1Scan.mz.begin(), peak));
-            const int nativeCharge = peakIndex < ms1Scan.charge.size()
-                                         ? ms1Scan.charge[peakIndex]
-                                         : 0;
-            if (nativeCharge > 0)
-            {
-                scan->iParentChargeStates.push_back(nativeCharge);
-                scan->dParentMZs.push_back(mz);
-                ++appended;
-            }
-            else if (nativeCharge == 0)
-            {
-                for (const int guessedCharge : {2, 3, 4})
-                {
-                    scan->iParentChargeStates.push_back(guessedCharge);
-                    scan->dParentMZs.push_back(mz);
-                    ++appended;
-                }
-            }
-        }
-    }
-    return appended;
-}
-
 bool requestedScan(const std::unordered_set<int> *requested, int scanNumber)
 {
     return requested == nullptr || requested->find(scanNumber) != requested->end();
@@ -292,6 +232,132 @@ void appendMs1Data(RaxportMs1Data &data,
 
 } // namespace
 
+RaxportPrecursorMatch findRaxportPrecursorMatch(
+    const RaxportMs1Data &ms1Data,
+    int parentScanNumber,
+    double ms2RetentionTimeMinutes,
+    int precursorCharge,
+    double calculatedNeutralMass,
+    double precursorNeutronMass,
+    const std::vector<int> &isotopeWindows,
+    double neutralMassTolerance,
+    int scanRadius)
+{
+    RaxportPrecursorMatch best;
+    if (scanRadius < 0 || precursorCharge <= 0 ||
+        !(calculatedNeutralMass > 0.0) ||
+        !(neutralMassTolerance >= 0.0) || ms1Data.scans.empty())
+    {
+        return best;
+    }
+    const auto parent = ms1Data.scanNumberToIndex.find(parentScanNumber);
+    if (parent == ms1Data.scanNumberToIndex.end())
+    {
+        return best;
+    }
+
+    const double proton = ProNovoConfig::getProtonMass();
+    const double toleranceMz = neutralMassTolerance / precursorCharge;
+    const std::array<int, 1> monoisotopicWindow{{0}};
+    const int *windowBegin = isotopeWindows.empty()
+        ? monoisotopicWindow.data() : isotopeWindows.data();
+    const int *windowEnd = isotopeWindows.empty()
+        ? monoisotopicWindow.data() + monoisotopicWindow.size()
+        : isotopeWindows.data() + isotopeWindows.size();
+    const int64_t first = std::max<int64_t>(
+        0, static_cast<int64_t>(parent->second) - scanRadius);
+    const int64_t last = std::min<int64_t>(
+        static_cast<int64_t>(ms1Data.scans.size()) - 1,
+        static_cast<int64_t>(parent->second) + scanRadius);
+    double bestMassError = std::numeric_limits<double>::infinity();
+    double bestIntensity = 0.0;
+
+    // Raxport stores MS1 acquisitions in time order. Visit the two sides of
+    // the MS2 retention time from nearest to farthest. Once a matching time
+    // has been exhausted, later acquisitions cannot win the RT-first tie
+    // break and need no peak lookup.
+    const auto rangeBegin = ms1Data.scans.begin() + first;
+    const auto rangeEnd = ms1Data.scans.begin() + last + 1;
+    const auto insertion = std::lower_bound(
+        rangeBegin, rangeEnd, ms2RetentionTimeMinutes,
+        [](const RaxportMs1Scan &scan, double retentionTime) {
+            return scan.retentionTime < retentionTime;
+        });
+    int64_t right = static_cast<int64_t>(
+        std::distance(ms1Data.scans.begin(), insertion));
+    int64_t left = right - 1;
+    while (left >= first || right <= last)
+    {
+        const double leftRtDiff = left >= first
+            ? std::abs(ms1Data.scans[static_cast<size_t>(left)].retentionTime -
+                       ms2RetentionTimeMinutes)
+            : std::numeric_limits<double>::infinity();
+        const double rightRtDiff = right <= last
+            ? std::abs(ms1Data.scans[static_cast<size_t>(right)].retentionTime -
+                       ms2RetentionTimeMinutes)
+            : std::numeric_limits<double>::infinity();
+        const int64_t scanIndex = leftRtDiff <= rightRtDiff ? left-- : right++;
+        const RaxportMs1Scan &ms1Scan =
+            ms1Data.scans[static_cast<size_t>(scanIndex)];
+        const double rtDiffSeconds =
+            std::abs(ms1Scan.retentionTime - ms2RetentionTimeMinutes) * 60.0;
+        if (best.found && rtDiffSeconds > best.rtDiffSeconds)
+        {
+            break;
+        }
+        for (const int *isotopeWindow = windowBegin;
+             isotopeWindow != windowEnd; ++isotopeWindow)
+        {
+            const double expectedNeutralMass = calculatedNeutralMass +
+                static_cast<double>(*isotopeWindow) * precursorNeutronMass;
+            const double targetMz = expectedNeutralMass / precursorCharge + proton;
+            auto peak = std::lower_bound(
+                ms1Scan.mz.begin(), ms1Scan.mz.end(), targetMz - toleranceMz);
+            for (; peak != ms1Scan.mz.end() && *peak <= targetMz + toleranceMz;
+                 ++peak)
+            {
+                const size_t peakIndex = static_cast<size_t>(
+                    peak - ms1Scan.mz.begin());
+                const int nativeCharge = peakIndex < ms1Scan.charge.size()
+                    ? ms1Scan.charge[peakIndex] : 0;
+                const bool chargeMatches = nativeCharge > 0
+                    ? nativeCharge == precursorCharge
+                    : nativeCharge == 0 && precursorCharge >= 2 &&
+                        precursorCharge <= 4;
+                if (!chargeMatches)
+                {
+                    continue;
+                }
+                const double observedNeutralMass =
+                    (*peak - proton) * precursorCharge;
+                const double massError =
+                    std::abs(observedNeutralMass - expectedNeutralMass);
+                if (massError > neutralMassTolerance)
+                {
+                    continue;
+                }
+                const double intensity = peakIndex < ms1Scan.intensity.size()
+                    ? ms1Scan.intensity[peakIndex] : 0.0;
+                const bool better = !best.found ||
+                    rtDiffSeconds < best.rtDiffSeconds ||
+                    (rtDiffSeconds == best.rtDiffSeconds &&
+                     (massError < bestMassError ||
+                      (massError == bestMassError && intensity > bestIntensity)));
+                if (better)
+                {
+                    best.found = true;
+                    best.ms1ScanNumber = ms1Scan.scanNumber;
+                    best.observedNeutralMass = observedNeutralMass;
+                    best.rtDiffSeconds = rtDiffSeconds;
+                    bestMassError = massError;
+                    bestIntensity = intensity;
+                }
+            }
+        }
+    }
+    return best;
+}
+
 bool isRaxportHdf5Path(const std::string &path)
 {
     const std::string ext = lowerExt(path);
@@ -316,14 +382,14 @@ bool readRaxportHdf5Scans(const std::string &path,
         error = "Raxport HDF5 input required (.h5 or .hdf5): " + path;
         return false;
     }
-    if (options.ms1NeighborhoodRadius < 0)
+    if (options.precursorMatchScanRadius < 0)
     {
-        error = "MS1 neighborhood radius must be non-negative";
+        error = "Precursor match scan radius must be non-negative";
         return false;
     }
 
-    const bool useMs1Neighborhood =
-        options.precursorSource == PrecursorSource::Ms1Neighborhood;
+    const bool useIsolationWindow =
+        options.precursorSource == PrecursorSource::IsolationWindow;
 
     H5::Exception::dontPrint();
     try
@@ -334,7 +400,7 @@ bool readRaxportHdf5Scans(const std::string &path,
         {
             throw std::runtime_error("missing one or more required groups: /scans, /peaks, /reactions");
         }
-        if (!useMs1Neighborhood && !hasObject(file.getId(), "precursor_candidates"))
+        if (!useIsolationWindow && !hasObject(file.getId(), "precursor_candidates"))
         {
             throw std::runtime_error("missing required group: /precursor_candidates");
         }
@@ -388,7 +454,7 @@ bool readRaxportHdf5Scans(const std::string &path,
         std::vector<double> reactionIsolationOffset;
         std::vector<int> candidateCharge;
         std::vector<double> candidateMz;
-        if (useMs1Neighborhood)
+        if (useIsolationWindow)
         {
             reactionIsolationWidth = read1D<double>(file, "/reactions/isolation_width", H5::PredType::NATIVE_DOUBLE);
             reactionIsolationOffset = read1D<double>(file, "/reactions/isolation_width_offset", H5::PredType::NATIVE_DOUBLE);
@@ -448,13 +514,13 @@ bool readRaxportHdf5Scans(const std::string &path,
             }
         }
 
-        // The neighborhood mode needs both preceding and following MS1 scans,
-        // so load the full MS1 series before constructing any MS2 candidates.
+        // Post-score matching needs preceding and following MS1 scans, so load
+        // the full MS1 series without constructing MS1-derived candidates.
         RaxportMs1Data localMs1Data;
-        RaxportMs1Data *neighborhoodMs1Data = nullptr;
-        if (useMs1Neighborhood)
+        RaxportMs1Data *postScoreMs1Data = nullptr;
+        if (useIsolationWindow)
         {
-            neighborhoodMs1Data = ms1Data != nullptr ? ms1Data : &localMs1Data;
+            postScoreMs1Data = ms1Data != nullptr ? ms1Data : &localMs1Data;
             for (size_t i = 0; i < nScans; ++i)
             {
                 if (msOrder[i] != 1)
@@ -463,7 +529,7 @@ bool readRaxportHdf5Scans(const std::string &path,
                 }
                 if (peakStart[i] < 0 || peakCount[i] <= 0)
                 {
-                    appendMs1Data(*neighborhoodMs1Data, scanNumber[i], retentionTime[i], tic[i],
+                    appendMs1Data(*postScoreMs1Data, scanNumber[i], retentionTime[i], tic[i],
                                   {}, {}, {});
                     continue;
                 }
@@ -488,7 +554,7 @@ bool readRaxportHdf5Scans(const std::string &path,
                 {
                     charge.assign(static_cast<size_t>(count), 0);
                 }
-                appendMs1Data(*neighborhoodMs1Data, scanNumber[i], retentionTime[i], tic[i],
+                appendMs1Data(*postScoreMs1Data, scanNumber[i], retentionTime[i], tic[i],
                               std::move(mz), std::move(intensity), std::move(charge));
             }
         }
@@ -514,7 +580,7 @@ bool readRaxportHdf5Scans(const std::string &path,
 
             if (order == 1)
             {
-                if (useMs1Neighborhood)
+                if (useIsolationWindow)
                 {
                     continue;
                 }
@@ -564,14 +630,12 @@ bool readRaxportHdf5Scans(const std::string &path,
                         scan->iParentChargeState = r < reactionChargeState.size() ? reactionChargeState[r] : 0;
                         havePrimaryReaction = true;
                     }
-                    if (useMs1Neighborhood)
+                    if (useIsolationWindow)
                     {
                         const double isolationCenterMz =
                             reactionPrecursorMass[r] + reactionIsolationOffset[r];
-                        appendNeighborhoodMs1Precursors(
-                            scan.get(), *neighborhoodMs1Data, parentScanNumber[i],
-                            isolationCenterMz, reactionIsolationWidth[r],
-                            options.ms1NeighborhoodRadius);
+                        scan->vIsolationWindowsMz.push_back(
+                            {isolationCenterMz, reactionIsolationWidth[r]});
                     }
                     else
                     {
@@ -583,7 +647,8 @@ bool readRaxportHdf5Scans(const std::string &path,
                     }
                 }
             }
-            if (scan->iParentChargeStates.empty())
+            if (scan->iParentChargeStates.empty() &&
+                scan->vIsolationWindowsMz.empty())
             {
                 continue;
             }
@@ -600,7 +665,7 @@ bool readRaxportHdf5Scans(const std::string &path,
             }
             sortPeakTriples(scan->vdMZ, scan->vdIntensity, scan->viCharge);
             updateObservedMzRange(scan->vdMZ);
-            finalizeMs2Scan(scan.get(), !useMs1Neighborhood);
+            finalizeMs2Scan(scan.get(), !useIsolationWindow);
             ms2Scans.push_back(scan.release());
         }
         return true;
@@ -635,7 +700,7 @@ bool readRaxportHdf5Ms1Data(const std::string &path,
     // so this helper does not accidentally require the legacy
     // /precursor_candidates group merely to expose /peaks data.
     RaxportReadOptions options;
-    options.precursorSource = PrecursorSource::Ms1Neighborhood;
+    options.precursorSource = PrecursorSource::IsolationWindow;
     const bool ok = readRaxportHdf5Scans(
         path, ignored, &ms1Data, error, nullptr, options);
     for (MS2Scan *scan : ignored)

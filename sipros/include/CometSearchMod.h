@@ -166,7 +166,8 @@ public:
 	~CometSearchMod();
 
 	static bool Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, double *pdTmpRawData, double *pdTmpFastXcorrData, double *pdTmpCorrelationData,
-			double *pdSmoothedSpectrum, double *pdTmpPeakExtracted);
+			double *pdSmoothedSpectrum, double *pdTmpPeakExtracted,
+			double maximumArrayMz = -1.0);
 	static bool LoadIons(struct Query *pScoring, double *pdTmpRawData, MS2Scan * mstSpectrum, struct PreprocessStruct *pPre);
 	static void MakeCorrData(double *pdTmpRawData, double *pdTmpCorrelationData, struct Query *pScoring, struct PreprocessStruct *pPre);
 	static bool Smooth(double *data, int iArraySize, double *pdSmoothedSpectrum);
@@ -181,6 +182,20 @@ public:
 	static bool ScorePeptidesSIPNoCancelOut(const vector<vector<double> > & vvdYionMass, const vector<vector<double> > & vvdYionProb, const vector<vector<double> > & vvdBionMass,
 				const vector<vector<double> > & vvdBionProb, MS2Scan * mstSpectrum, vector<unsigned char> & pbDuplFragment, vector<double> & vdBinnedIonMasses,
 				vector<int> & vdBin, double & dXcorr);
+	static void BinPeptideIonsSIPNoCancelOut(
+			const vector<vector<double> > &vvdYionMass,
+			const vector<vector<double> > &vvdYionProb,
+			const vector<vector<double> > &vvdBionMass,
+			const vector<vector<double> > &vvdBionProb,
+			MS2Scan *mstSpectrum,
+			vector<unsigned char> &pbDuplFragment,
+			vector<double> &vdBinnedIonMasses,
+			vector<int> &vdBin);
+	static bool ScoreBinnedPeptideSIPNoCancelOut(
+			MS2Scan *mstSpectrum,
+			const vector<double> &vdBinnedIonMasses,
+			const vector<int> &vdBin,
+			double &dXcorr);
 	static double GetFragmentIonMass(int iWhichIonSeries, int i, int ctCharge, double *_pdAAforward, double *_pdAAreverse);
 
 	static bool CalculateSP(double & fScoreSp, double* _pdAAforward, double * _pdAAreverse, MS2Scan * mstSpectrum, int iLenPeptide);

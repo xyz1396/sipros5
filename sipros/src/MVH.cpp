@@ -96,7 +96,7 @@ bool MVH::Preprocess(MS2Scan * Spectrum, multimap<double, double> * IntenSortedP
 			IntenSortedPeakPreData->erase(IntenSortedPeakPreData->begin(), ite);
 		}
 	}
-	// Water-loss removal is tied to the reaction precursor.  In MS1-neighborhood
+	// Water-loss removal is tied to the reaction precursor.  In isolation-window
 	// mode that value is only the isolation-window center and is not a searchable
 	// precursor hypothesis, so do not let its charge alter the shared peak list.
 	double dMinOneWater = 0;

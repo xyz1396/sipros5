@@ -227,9 +227,13 @@ def run_flat_fasta_layout(scan_file: Path) -> None:
     assert target_header == decoy_header
     assert target_header.count("MS1IsotopeFitScore") == 1
     raw_count_index = target_header.index("isotopicPeakNumbers")
+    rt_diff_index = target_header.index("absPrecursorRtDiffSeconds")
     fit_score_index = target_header.index("MS1IsotopeFitScore")
-    assert fit_score_index == raw_count_index + 1
+    assert rt_diff_index == raw_count_index + 1
+    assert fit_score_index == rt_diff_index + 1
     assert target_header[fit_score_index + 1] == "MS1IsotopicAbundances"
+    ms2_index = target_header.index("MS2IsotopicAbundances")
+    assert target_header[ms2_index + 1] == "isotopicAbundanceDiffs"
     label_index = target_header.index("Label")
     assert all(row[label_index] == "1" for row in target_rows)
     assert all(row[label_index] == "-1" for row in decoy_rows)
@@ -275,8 +279,7 @@ def main() -> None:
     result = run_sipros(
         malformed,
         TMP / "malformed_out",
-        ["-a", "C13", "-b", "50", "-s", "1",
-         "--precursor-source", "raxport-candidates"],
+        ["-a", "C13", "-b", "50", "-s", "1"],
     )
     assert result.returncode != 0, result.stdout
     assert "precursor-candidate datasets have inconsistent lengths" in result.stdout, result.stdout

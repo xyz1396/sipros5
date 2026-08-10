@@ -55,6 +55,12 @@ public:
                                                           int targetAtomIndex,
                                                           int targetIsotopeIndex,
                                                           double targetFraction);
+    static double estimateSIPelementAbundanceFromIsolationCenter(
+        const std::string &peptide,
+        int precursorCharge,
+        double isolationCenterMz,
+        const std::string &sipAtom,
+        double referenceEnrichmentPct);
     static int ms1PeakCharge(const sipros::RaxportMs1Scan &scan, size_t idx);
     static size_t findMs1Peak(const sipros::RaxportMs1Scan &scan,
                               double targetMz,

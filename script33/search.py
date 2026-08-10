@@ -30,7 +30,7 @@ class search:
                  sfiEnvelopeTopN: int = 3,
                  mvhCascadeTopN: int = 150,
                  stageHdf5Copies: bool = True) -> None:
-        self.core_count = available_cpu_count()
+        self.available_threads = available_cpu_count()
         self.element = element
         self.toleranceMS1 = toleranceMS1
         self.toleranceMS2 = toleranceMS2
@@ -43,7 +43,9 @@ class search:
         self.inputPath = inputPath
         self.outPutPath = outputPath
         self.negative_control = negative_control
-        self.threadNumber = effective_thread_count(threadNumber, self.core_count)
+        self.threadNumber = effective_thread_count(
+            threadNumber, self.available_threads
+        )
         self.logger = logger
         self.raw_files: list[str] = []
         self.hdf5_input_files: list[str] = []
@@ -78,7 +80,7 @@ class search:
             self.logger,
             env=env,
             env_updates=thread_env_updates(thread_count),
-            cpu_cores=thread_count,
+            cpu_threads=thread_count,
         )
 
     def log_thread_allocation(self, phase: str, allocation: ThreadAllocation) -> None:
@@ -88,11 +90,12 @@ class search:
         minimum = min(allocation.task_threads)
         maximum = max(allocation.task_threads)
         per_job = str(minimum) if minimum == maximum else f'{minimum}-{maximum}'
-        unit = 'core' if minimum == maximum == 1 else 'cores'
+        unit = 'thread' if minimum == maximum == 1 else 'threads'
         self.logger.info(
             f'{phase}: up to {allocation.worker_count} concurrent processes; '
             f'{per_job} CPU {unit} per process; '
-            f'{allocation.peak_threads}/{self.threadNumber} cores allocated at peak'
+            f'{allocation.peak_threads}/{self.threadNumber} thread budget at peak; '
+            'no CPU affinity'
         )
 
     def sample_base_name(self, path: str) -> str:
@@ -333,10 +336,7 @@ class search:
         output_root = Path(self.outPutPath)
         output_root.mkdir(parents=True, exist_ok=True)
 
-        chemistry_args = (
-            f'{tolerance_args}{ptm_args}'
-            ' --precursor-source ms1-neighborhood'
-        )
+        chemistry_args = f'{tolerance_args}{ptm_args}'
         target_cache = output_root / 'target.sfi'
         decoy_cache = output_root / 'decoy.sfi'
 
@@ -436,13 +436,13 @@ class search:
             commands.append(
                 f'{self.q(self.siprosPath)} search-fasta -fasta {self.q(self.fastaPath)} '
                 f'-f {self.q(hdf5_path)} -o {self.q(sample_dir)} --pin-output {self.q(target_pin_name)}{sip_args} '
-                f'--pin-label 1 --precursor-source raxport-candidates '
+                f'--pin-label 1 '
                 f'--top-psms-per-scan {self.topPsmsPerScan}{tolerance_args}{ptm_args}'
             )
             commands.append(
                 f'{self.q(self.siprosPath)} search-fasta -fasta {self.q(self.decoyPath)} '
                 f'-f {self.q(hdf5_path)} -o {self.q(sample_dir)} --pin-output {self.q(decoy_pin_name)}{sip_args} '
-                f'--pin-label -1 --precursor-source raxport-candidates '
+                f'--pin-label -1 '
                 f'--top-psms-per-scan {self.topPsmsPerScan}{tolerance_args}{ptm_args}'
             )
         allocation = allocate_threads(
@@ -571,7 +571,6 @@ class search:
                 f'--tolerance-ms1 {self.toleranceMS1} --tolerance-ms1-unit da '
                 f'--tolerance-ms2 {self.toleranceMS2} --tolerance-ms2-unit da '
                 f'--rt-tolerance {getattr(self, "rtTolerance", 5.0)} '
-                f'--score-envelope-top-n {getattr(self, "sfiEnvelopeTopN", 3)} '
                 f'--mvh-cascade-top-n {getattr(self, "mvhCascadeTopN", 150)} '
                 f'--top-psms-per-scan {self.topPsmsPerScan}'
             )
@@ -606,8 +605,8 @@ class search:
             self.logger.error('search-spectra mode requires a SIP element such as C13')
             raise SystemExit(1)
         self.logger.info(
-            f'Workflow CPU allocation: {self.threadNumber} cores '
-            f'({self.core_count} available)'
+            f'Workflow CPU thread budget: {self.threadNumber} threads '
+            f'({self.available_threads} available)'
         )
         self.getInputFiles()
         self.create_sample_directories()
@@ -619,8 +618,8 @@ class search:
     def run(self) -> None:
         self.reverse_fasta_sequences()
         self.logger.info(
-            f'Workflow CPU allocation: {self.threadNumber} cores '
-            f'({self.core_count} available)'
+            f'Workflow CPU thread budget: {self.threadNumber} threads '
+            f'({self.available_threads} available)'
         )
         self.getInputFiles()
         self.create_sample_directories()

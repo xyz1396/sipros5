@@ -39,7 +39,7 @@ def null_logger(name: str) -> logging.Logger:
 
 
 class CommandLoggingTests(unittest.TestCase):
-    def test_process_log_reports_cores_without_environment_spam(self) -> None:
+    def test_process_log_reports_unbound_threads_without_environment_spam(self) -> None:
         logger = mock.Mock()
         with mock.patch.object(
                 command_runner_module.subprocess,
@@ -50,12 +50,12 @@ class CommandLoggingTests(unittest.TestCase):
                 "tool --input sample",
                 logger,
                 env_updates={"OMP_NUM_THREADS": "6", "GOMAXPROCS": "6"},
-                cpu_cores=6,
+                cpu_threads=6,
             )
 
         self.assertEqual(
             logger.info.call_args_list[0].args[0],
-            "Running process (allocated 6 CPU cores): tool --input sample",
+            "Running process (6 CPU threads, no affinity): tool --input sample",
         )
         info_messages = [call.args[0] for call in logger.info.call_args_list]
         self.assertFalse(any(message.startswith("Set ") for message in info_messages))
@@ -316,11 +316,11 @@ class WorkflowAllocationTests(unittest.TestCase):
                     arguments[arguments.index("--rt-tolerance") + 1], "5.0"
                 )
                 self.assertEqual(
-                    arguments[arguments.index("--score-envelope-top-n") + 1], "3"
-                )
-                self.assertEqual(
                     arguments[arguments.index("--mvh-cascade-top-n") + 1], "150"
                 )
+                self.assertNotIn("--score-envelope-top-n", arguments)
+                self.assertNotIn("--precursor-source", arguments)
+                self.assertNotIn("--precursor-scan-radius", arguments)
 
     def test_spectra_search_overwrites_existing_pin(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -405,9 +405,7 @@ class WorkflowAllocationTests(unittest.TestCase):
                     {f"{name}_target.pin" for name in workflow.base_names}
                     | {f"{name}_decoy.pin" for name in workflow.base_names},
                 )
-                self.assertIn("--precursor-source", arguments)
-                source_index = arguments.index("--precursor-source")
-                self.assertEqual(arguments[source_index + 1], "ms1-neighborhood")
+                self.assertNotIn("--precursor-source", arguments)
                 cache_index = arguments.index("--fragment-index-cache")
                 cache_paths.add(arguments[cache_index + 1])
                 output_index = arguments.index("-o")
@@ -568,10 +566,7 @@ class WorkflowAllocationTests(unittest.TestCase):
                 self.assertIn("-b", arguments)
                 self.assertIn("-s", arguments)
                 self.assertNotIn("--fragment-index-cache", arguments)
-                source_index = arguments.index("--precursor-source")
-                self.assertEqual(
-                    arguments[source_index + 1], "raxport-candidates"
-                )
+                self.assertNotIn("--precursor-source", arguments)
 
     def test_generated_spectra_library_receives_fixed_ptms(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -829,7 +824,7 @@ class WorkflowAllocationTests(unittest.TestCase):
             captured.append((
                 command,
                 kwargs["env_updates"],
-                kwargs["cpu_cores"],
+                kwargs["cpu_threads"],
             ))
 
         with mock.patch.object(
@@ -838,7 +833,7 @@ class WorkflowAllocationTests(unittest.TestCase):
 
         self.assertEqual(len(captured), 1)
         workflow.postprocess_fasta_results.assert_called_once_with()
-        command, environment, cores = captured[0]
+        command, environment, threads = captured[0]
         arguments = shlex.split(command)
         self.assertEqual(arguments[0], "aerith")
         self.assertEqual(arguments.count("--target-pin"), 3)
@@ -873,7 +868,7 @@ class WorkflowAllocationTests(unittest.TestCase):
         self.assertEqual(int(environment["OMP_NUM_THREADS"]), 16)
         self.assertEqual(int(environment["MKL_NUM_THREADS"]), 16)
         self.assertNotIn("CUDA_VISIBLE_DEVICES", environment)
-        self.assertEqual(cores, 16)
+        self.assertEqual(threads, 16)
         workflow.logger.info.assert_any_call(
             "Aerith DIA-NN device policy: CUDA preferred; "
             "automatic CPU fallback when CUDA is unavailable or fails; "

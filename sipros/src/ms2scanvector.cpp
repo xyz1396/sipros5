@@ -9,8 +9,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <exception>
+#include <limits>
 #include <stdexcept>
-#include <unordered_map>
 #include <utility>
 
 MS2ScanVector::MS2ScanVector(const string &sScanFilenameInput,
@@ -26,7 +26,6 @@ MS2ScanVector::MS2ScanVector(const string &sScanFilenameInput,
 	for (n = 0; n < vsSingleResidueNames.size(); ++n)
 		mapResidueMass[vsSingleResidueNames[n][0]] = vdSingleResidueMasses[n];
 
-	iOpenMPTaskNum = 0;
 }
 
 MS2ScanVector::~MS2ScanVector()
@@ -133,15 +132,38 @@ bool MS2ScanVector::loadRaxportHdf5File()
 			}
 		};
 
-		const size_t nCandidates = std::min(scan->dParentMZs.size(), scan->iParentChargeStates.size());
+		const size_t nCandidates = std::min(
+			scan->dParentMZs.size(), scan->iParentChargeStates.size());
 		for (size_t j = 0; j < nCandidates; ++j)
 		{
-			appendPrecursorMz(scan->dParentMZs[j], scan->iParentChargeStates[j]);
+			appendPrecursorMz(
+				scan->dParentMZs[j], scan->iParentChargeStates[j]);
+		}
+		if (!useReactionCharge)
+		{
+			for (const auto &window : scan->vIsolationWindowsMz)
+			{
+				const double upperMz = window.first + window.second / 2.0;
+				for (int charge = 1; charge <= 4; ++charge)
+				{
+					const double chargedMass = upperMz * charge;
+					const double neutralMass = chargedMass -
+						static_cast<double>(charge) *
+							ProNovoConfig::getProtonMass();
+					scan->dParentMass =
+						std::max(scan->dParentMass, chargedMass);
+					scan->dParentNeutralMass =
+						std::max(scan->dParentNeutralMass, neutralMass);
+					scan->iMaxCandidateCharge =
+						std::max(scan->iMaxCandidateCharge, charge);
+				}
+			}
 		}
 
 		if (useReactionCharge && scan->iParentChargeState <= 0 && nCandidates > 0)
 		{
-			// Keep the historical wide-window fallback charge for downstream preprocessing.
+			// Downstream direct-SIP preprocessing requires one representative charge;
+			// scored candidates retain their native precursor charges.
 			scan->iParentChargeState = 3;
 		}
 	}
@@ -194,6 +216,15 @@ bool MS2ScanVector::loadMassData()
 			ProNovoConfig::dMaxMS2ScanMass = mass;
 		if (ProNovoConfig::iMaxPercusorCharge < charge)
 			ProNovoConfig::iMaxPercusorCharge = charge;
+	}
+	for (const MS2Scan *scan : vpAllMS2Scans)
+	{
+		if (scan == nullptr)
+			continue;
+		ProNovoConfig::dMaxMS2ScanMass =
+			std::max(ProNovoConfig::dMaxMS2ScanMass, scan->dParentMass);
+		ProNovoConfig::iMaxPercusorCharge =
+			std::max(ProNovoConfig::iMaxPercusorCharge, scan->iMaxCandidateCharge);
 	}
 	return bReVal;
 }
@@ -257,11 +288,10 @@ void MS2ScanVector::preProcessAllMs2Mvh()
 		}
 	}
 
-	sipros::printPerformanceStage(
-		cout, "Preprocess spectra", timer.elapsed(),
-		sipros::formatPerformanceCount(vpAllMS2Scans.size()) +
-		" MS2 scans, " +
-		sipros::formatPerformanceCount(iNumSkippedScans) + " skipped");
+	regularSearchStatistics.preprocess = timer.elapsed();
+	regularSearchStatistics.scanCount = vpAllMS2Scans.size();
+	regularSearchStatistics.skippedScans =
+		static_cast<uint64_t>(iNumSkippedScans);
 }
 
 void MS2ScanVector::preProcessAllMs2WdpSip()
@@ -517,195 +547,7 @@ void MS2ScanVector::processPeptideArrayWdpSip(vector<Peptide *> &vpPeptideArray)
 	vpPeptideArray.clear();
 }
 
-void MS2ScanVector::processPeptideArrayMvh(vector<Peptide *> &vpPeptideArray)
-{
-	int i, iPeptideArraySize, iScanSize;
-	estimateAndAssignPeptides(vpPeptideArray);
-	iPeptideArraySize = (int)vpPeptideArray.size();
-	if (iPeptideArraySize == 0)
-		return;
-
-#pragma omp parallel for shared(vpPeptideArray) private(i) \
-	schedule(guided)
-
-	for (i = 0; i < iPeptideArraySize; i++)
-	{
-		vpPeptideArray.at(i)->preprocessingMVH();
-	}
-
-	// every MS2 scans scores their matched peptides
-
-	iScanSize = (int)vpAllMS2Scans.size();
-#pragma omp parallel for schedule(guided)
-
-	for (i = 0; i < iScanSize; i++)
-	{
-		int iThreadId = omp_get_thread_num();
-		vpAllMS2Scans[i]->scorePeptidesMVH(psequenceIonMasses.at(iThreadId), _ppdAAforward.at(iThreadId),
-										   _ppdAAreverse.at(iThreadId), pSeqs.at(iThreadId));
-	}
-
-	// free memory of all peptide objects
-	for (i = 0; i < (int)vpPeptideArray.size(); i++)
-		delete vpPeptideArray.at(i);
-
-	// empty peptide array
-	vpPeptideArray.clear();
-}
-
-void MS2ScanVector::processPeptideArrayMvhTask(vector<Peptide *> &vpPeptideArray, omp_lock_t *pLck)
-{
-	int i, j, k, iPeptideArraySize;
-	vector<pair<int, int>> vpPeptideMassRanges;
-	pair<int, int> pairMS2Range;
-	bool bAssigned = false;
-	bool bMerged = false, bScored = false, bProcessed = false;
-	double dMvh = 0;
-	int iThreadId = omp_get_thread_num();
-
-	iPeptideArraySize = vpPeptideArray.size();
-
-	MS2Scan *scanPtr;
-	int precursorCharge;
-	double precursorMass;
-	PeptideIsotopeCalculator calculator;
-	for (i = 0; i < iPeptideArraySize; i++)
-	{
-		bAssigned = false;
-		bProcessed = false;
-		const string &decorated = vpPeptideArray.at(i)->getPeptideSeq();
-		string compositionSequence;
-		compositionSequence.reserve(decorated.size());
-		for (char symbol : decorated)
-			if (symbol != '[' && symbol != ']')
-				compositionSequence.push_back(symbol);
-		const auto estimate =
-			calculator.calPrecursorEstimate(compositionSequence);
-		vpPeptideArray.at(i)->setPeptideMass(estimate.mass);
-		vpPeptideArray.at(i)->setPrecursorNeutronMass(
-			estimate.neutronMass);
-#pragma omp critical(sipros_max_peptide_mass)
-		{
-			if (estimate.mass > ProNovoConfig::dMaxPeptideMass)
-				ProNovoConfig::dMaxPeptideMass = estimate.mass;
-		}
-		// assign peptide to scan
-		GetAllRangeFromMass(
-			vpPeptideArray.at(i)->getPeptideMass(),
-			vpPeptideArray.at(i)->getPrecursorNeutronMass(),
-			vpPeptideMassRanges);
-		for (j = 0; j < (int)vpPeptideMassRanges.size(); j++)
-		{
-			pairMS2Range = vpPeptideMassRanges.at(j);
-			if ((pairMS2Range.first > -1) && (pairMS2Range.second > -1))
-			{
-				bAssigned = true;
-				if (bAssigned && !bProcessed)
-				{
-					vpPeptideArray.at(i)->preprocessingMVH();
-					bProcessed = true;
-				}
-				// calculate the score
-				for (k = pairMS2Range.first; k <= pairMS2Range.second; ++k)
-				{
-					tie(precursorMass, precursorCharge, scanPtr) = vAllPrecursorMassChargeMS2ScanPtrTuples[k];
-					if (scanPtr->bSkip)
-					{
-						continue;
-					}
-					omp_set_lock(&(pLck[k]));
-					bMerged = scanPtr->mergePeptide(scanPtr->vpWeightSumTopPeptides,
-													vpPeptideArray.at(i)->getPeptideForScoring(), vpPeptideArray.at(i)->getProteinName());
-					omp_unset_lock(&(pLck[k]));
-					// not merged then score
-					if (!bMerged)
-					{
-						bScored = MVH::ScoreSequenceVsSpectrum(vpPeptideArray.at(i)->sNeutralLossPeptide, precursorCharge,
-															   scanPtr, psequenceIonMasses.at(iThreadId), _ppdAAforward.at(iThreadId),
-															   _ppdAAreverse.at(iThreadId), dMvh, pSeqs.at(iThreadId));
-						if (bScored)
-						{
-							omp_set_lock(&(pLck[k]));
-							scanPtr->saveScore(dMvh, {precursorMass, precursorCharge, vpPeptideArray.at(i)},
-											   scanPtr->vpWeightSumTopPeptides,
-											   "MVH", 2);
-							omp_unset_lock(&(pLck[k]));
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// free memory of all peptide objects
-	for (i = 0; i < iPeptideArraySize; i++)
-	{
-		delete vpPeptideArray.at(i);
-	}
-
-	// empty peptide array
-	vpPeptideArray.clear();
-
-	omp_set_lock(&lckOpenMpTaskNum);
-	iOpenMPTaskNum--;
-	if (iOpenMPTaskNum < TASKRESUME_SIZE)
-	{
-		if (omp_test_lock(&lckOpenMpTaskNumHalfed) == 0)
-		{
-			// lock is set'
-			omp_unset_lock(&lckOpenMpTaskNumHalfed);
-			// cout << endl << "Resume" << endl;
-		}
-		else
-		{
-			omp_unset_lock(&lckOpenMpTaskNumHalfed);
-		}
-	}
-	omp_unset_lock(&lckOpenMpTaskNum);
-}
-
 void MS2ScanVector::searchDatabaseMvh()
-{
-	CLOCKSTART;
-
-	ProteinDatabase myProteinDatabase;
-	vector<Peptide *> vpPeptideArray;
-	Peptide *currentPeptide;
-	myProteinDatabase.loadDatabase();
-	this->preMvh();
-	if (myProteinDatabase.getFirstProtein())
-	{
-		currentPeptide = new Peptide;
-		// get one peptide from the database at a time, until there is no more peptide
-		while (myProteinDatabase.getNextPeptide(currentPeptide))
-		{
-			// Modal precursor estimates are calculated for the whole batch in
-			// parallel, then candidates are assigned to scans serially.
-			vpPeptideArray.push_back(currentPeptide);
-			// create a new peptide for the next iteration
-			currentPeptide = new Peptide;
-			// when the vpPeptideArray is full
-			if (vpPeptideArray.size() >= PEPTIDE_ARRAY_SIZE)
-				processPeptideArrayMvh(vpPeptideArray);
-		}
-		// the last peptide object is an empty object and need to be deleted
-		delete currentPeptide;
-		// there are still unprocessed peptides in the vpPeptideArray
-		// need to process them in the same manner
-		// the following code is the same as inside if(vpPeptideArray.size() >= PEPTIDE_ARRAY_SIZE )
-		//    cout<<vpPeptideArray.size()<<endl;
-		if (!vpPeptideArray.empty())
-			processPeptideArrayMvh(vpPeptideArray);
-	}
-	CLOCKSTOP;
-
-	this->postMvh();
-	MVH::destroyLnTable();
-	PeptideUnit::iNumScores = 1;
-	cout << "  MVH search done" << endl;
-}
-
-void MS2ScanVector::searchDatabaseMvhIndexed()
 {
 	this->preMvh();
 	if (!fragmentIndex)
@@ -721,25 +563,6 @@ void MS2ScanVector::searchDatabaseMvhIndexed()
 	}
 
 	const sipros::PerformanceTimer querySetupTimer;
-	std::unordered_map<MS2Scan *, size_t> scanIndices;
-	scanIndices.reserve(vpAllMS2Scans.size());
-	for (size_t i = 0; i < vpAllMS2Scans.size(); ++i)
-	{
-		scanIndices.emplace(vpAllMS2Scans[i], i);
-	}
-	std::vector<std::vector<std::pair<double, int>>> scanHypotheses(
-		vpAllMS2Scans.size());
-	for (const auto &entry : vAllPrecursorMassChargeMS2ScanPtrTuples)
-	{
-		const auto found = scanIndices.find(std::get<2>(entry));
-		if (found != scanIndices.end())
-		{
-			scanHypotheses[found->second].push_back(
-				{std::get<0>(entry), std::get<1>(entry)});
-		}
-	}
-	std::unordered_map<MS2Scan *, size_t>().swap(scanIndices);
-
 	const int threadCount = omp_get_max_threads();
 	std::vector<sipros::IndexedSearchScratch> scratch(
 		static_cast<size_t>(threadCount));
@@ -750,7 +573,9 @@ void MS2ScanVector::searchDatabaseMvhIndexed()
 	sipros::IndexedSearchCounters mvhTotals;
 	sipros::PerformanceTiming queryTiming = querySetupTimer.elapsed();
 	sipros::PerformanceTiming mvhTiming;
-	constexpr size_t ScanBatchSize = 512;
+	// Full-isolation-window candidate vectors are broader than point-MS1
+	// queries.  Compact batches cap transient survivor memory before scoring.
+	constexpr size_t ScanBatchSize = 64;
 	for (size_t batchBegin = 0; batchBegin < vpAllMS2Scans.size();
 		 batchBegin += ScanBatchSize)
 	{
@@ -769,7 +594,6 @@ void MS2ScanVector::searchDatabaseMvhIndexed()
 			sipros::queryIndexedScan(
 				index,
 				*vpAllMS2Scans[static_cast<size_t>(i)],
-				scanHypotheses[static_cast<size_t>(i)],
 				scratch[static_cast<size_t>(threadId)],
 				batchCandidates[static_cast<size_t>(i) - batchBegin],
 				threadCounters[static_cast<size_t>(threadId)]);
@@ -805,27 +629,20 @@ void MS2ScanVector::searchDatabaseMvhIndexed()
 		}
 	}
 	std::vector<sipros::IndexedSearchScratch>().swap(scratch);
-	std::vector<std::vector<std::pair<double, int>>>().swap(scanHypotheses);
-	std::ostringstream queryDetail;
-	queryDetail
-		<< sipros::formatPerformanceCount(queryTotals.precursorHypotheses)
-		<< " hypotheses, "
-		<< sipros::formatPerformanceCount(queryTotals.exactMassCandidates)
-		<< " mass matches, "
-		<< sipros::formatPerformanceCount(queryTotals.fragmentPostingsVisited)
-		<< " postings, "
-		<< sipros::formatPerformanceCount(queryTotals.fragmentGateSurvivors)
-		<< " survivors";
-	sipros::printPerformanceStage(
-		cout, "Query peptide cache", queryTiming, queryDetail.str());
-
-	std::ostringstream mvhDetail;
-	mvhDetail << sipros::formatPerformanceCount(mvhTotals.exactMvhCalls)
-			  << " candidates, "
-			  << sipros::formatPerformanceCount(mvhTotals.exactMvhAccepted)
-			  << " accepted";
-	sipros::printPerformanceStage(
-		cout, "MVH scoring", mvhTiming, mvhDetail.str());
+	regularSearchStatistics.queryIndex = queryTiming;
+	regularSearchStatistics.mvhScoring = mvhTiming;
+	regularSearchStatistics.isolationWindowRanges =
+		queryTotals.isolationWindowRanges;
+	regularSearchStatistics.isolationWindowCandidates =
+		queryTotals.isolationWindowCandidates;
+	regularSearchStatistics.exactMassCandidates =
+		queryTotals.exactMassCandidates;
+	regularSearchStatistics.fragmentPostingsVisited =
+		queryTotals.fragmentPostingsVisited;
+	regularSearchStatistics.fragmentGateSurvivors =
+		queryTotals.fragmentGateSurvivors;
+	regularSearchStatistics.exactMvhCalls = mvhTotals.exactMvhCalls;
+	regularSearchStatistics.exactMvhAccepted = mvhTotals.exactMvhAccepted;
 
 	this->postMvh();
 	MVH::destroyLnTable();
@@ -859,7 +676,7 @@ void MS2ScanVector::searchDatabaseWdpSip()
 		delete currentPeptide;
 		// there are still unprocessed peptides in the vpPeptideArray
 		// need to process them in the same manner
-		// the following code is the same as inside if(vpPeptideArray.size() >= PEPTIDE_ARRAY_SIZE )
+		// Process the final partial SIP peptide batch.
 		if (!vpPeptideArray.empty())
 		{
 			processPeptideArrayWdpSip(vpPeptideArray);
@@ -871,108 +688,14 @@ void MS2ScanVector::searchDatabaseWdpSip()
 	CLOCKSTOP;
 }
 
-void MS2ScanVector::searchDatabaseMvhTask()
-{
-	ProteinDatabase myProteinDatabase;
-	vector<Peptide *> vpPeptideArray;
-	Peptide *currentPeptide;
-	myProteinDatabase.loadDatabase();
-	this->preMvh();
-
-	int iScanNum = this->vpAllMS2Scans.size();
-	omp_lock_t *pLck = new omp_lock_t[iScanNum];
-	iOpenMPTaskNum = 0;
-#pragma omp parallel for schedule(guided)
-	for (int i = 0; i < iScanNum; ++i)
-	{
-		omp_init_lock(&(pLck[i]));
-	}
-	omp_init_lock(&lckOpenMpTaskNum);
-	omp_init_lock(&lckOpenMpTaskNumHalfed);
-	// omp_set_lock(&lckOpenMpTaskNumHalfed);
-#pragma omp parallel
-	{
-#pragma omp single
-		{
-			if (myProteinDatabase.getFirstProtein())
-			{
-				currentPeptide = new Peptide();
-				// get one peptide from the database at a time, until there is no more peptide
-				while (myProteinDatabase.getNextPeptide(currentPeptide))
-				{
-					vpPeptideArray.push_back(currentPeptide);
-					if (vpPeptideArray.size() >= TASKPEPTIDE_ARRAY_SIZE)
-					{
-						omp_set_lock(&lckOpenMpTaskNum);
-						iOpenMPTaskNum++;
-						omp_unset_lock(&lckOpenMpTaskNum);
-#pragma omp task firstprivate(vpPeptideArray)
-						{
-							processPeptideArrayMvhTask(vpPeptideArray, pLck);
-						}
-
-						vpPeptideArray.clear();
-
-						if (iOpenMPTaskNum >= TASKWAIT_SIZE)
-						{
-							// cout << endl << "Stop" << endl;
-							omp_set_lock(&lckOpenMpTaskNumHalfed);
-						}
-					}
-					currentPeptide = new Peptide();
-				}
-				delete currentPeptide;
-			}
-			if (!vpPeptideArray.empty())
-			{
-#pragma omp task firstprivate(vpPeptideArray)
-				{
-					processPeptideArrayMvhTask(vpPeptideArray, pLck);
-				}
-				vpPeptideArray.clear();
-			}
-#pragma omp taskwait
-		}
-	}
-
-	omp_destroy_lock(&lckOpenMpTaskNumHalfed);
-	omp_destroy_lock(&lckOpenMpTaskNum);
-
-#pragma omp parallel for schedule(guided)
-	for (int i = 0; i < iScanNum; ++i)
-	{
-		omp_destroy_lock(&(pLck[i]));
-	}
-
-	this->postMvh();
-	MVH::destroyLnTable();
-	PeptideUnit::iNumScores = 1;
-	cout << "  MVH search done" << endl;
-}
-
 void MS2ScanVector::startProcessingMvh()
 {
+	regularSearchStatistics = RegularSearchStatistics{};
 	// Preprocessing all MS2 scans by mult-threading
 	preProcessAllMs2Mvh();
 
-	// Search all MS2 scans against the database by mult-threading.
-	if (fragmentIndex)
-		searchDatabaseMvhIndexed();
-	else
-		searchDatabaseMvh();
-
-	// Postprocessing all MS2 scans' results by mult-threading
-	postProcessAllMs2WdpXcorr();
-
-}
-
-void MS2ScanVector::startProcessingMvhTask()
-{
-	// Preprocessing all MS2 scans by mult-threading
-	preProcessAllMs2Mvh();
-
-	// Search all MS2 scans against the database by mult-threading
-	searchDatabaseMvhTask();
+	// Search all MS2 scans with the prepared precursor/fragment index.
+	searchDatabaseMvh();
 
 	// Postprocessing all MS2 scans' results by mult-threading
 	postProcessAllMs2WdpXcorr();
@@ -1017,20 +740,15 @@ void MS2ScanVector::postProcessAllMs2WdpXcorr()
 	{
 		candidateCount += scan->vpWeightSumTopPeptides.size();
 	}
-	const std::string scoreDetail =
-		sipros::formatPerformanceCount(candidateCount) +
-		" candidate PSMs across " +
-		sipros::formatPerformanceCount(vpAllMS2Scans.size()) + " scans";
+	regularSearchStatistics.candidatePsms = candidateCount;
 
 	const sipros::PerformanceTimer xcorrTimer;
 	postProcessAllMs2Xcorr();
-	sipros::printPerformanceStage(
-		cout, "XCorr scoring", xcorrTimer.elapsed(), scoreDetail);
+	regularSearchStatistics.xcorrScoring = xcorrTimer.elapsed();
 
 	const sipros::PerformanceTimer wdpTimer;
 	postProcessAllMs2Wdp();
-	sipros::printPerformanceStage(
-		cout, "WDP scoring", wdpTimer.elapsed(), scoreDetail);
+	regularSearchStatistics.wdpScoring = wdpTimer.elapsed();
 
 	const sipros::PerformanceTimer featureTimer;
 #pragma omp parallel for schedule(guided)
@@ -1038,8 +756,7 @@ void MS2ScanVector::postProcessAllMs2WdpXcorr()
 	{
 		vpAllMS2Scans.at(i)->scoreFeatureCalculation();
 	}
-	sipros::printPerformanceStage(
-		cout, "Calculate PSM features", featureTimer.elapsed(), scoreDetail);
+	regularSearchStatistics.psmFeatures = featureTimer.elapsed();
 }
 
 void MS2ScanVector::postProcessAllMs2MvhXcorr()
@@ -1589,17 +1306,17 @@ static FragmentSeriesFeatures calculateFragmentSeriesFeatures(
 		ProNovoConfig::getSearchType() == "SIP" &&
 		peptide->vvdBionMass.size() == bMatches.size() &&
 		peptide->vvdYionMass.size() == yMatches.size();
-	const auto matchB = [&](size_t index, int charge, double fallbackMz) {
+	const auto matchB = [&](size_t index, int charge, double regularMz) {
 		return sipEnvelopes
 			? matchesIsotopeEnvelope(
 				scan, peptide->vvdBionMass[index], charge)
-			: matchesMvhPeak(scan, fallbackMz);
+			: matchesMvhPeak(scan, regularMz);
 	};
-	const auto matchY = [&](size_t index, int charge, double fallbackMz) {
+	const auto matchY = [&](size_t index, int charge, double regularMz) {
 		return sipEnvelopes
 			? matchesIsotopeEnvelope(
 				scan, peptide->vvdYionMass[index], charge)
-			: matchesMvhPeak(scan, fallbackMz);
+			: matchesMvhPeak(scan, regularMz);
 	};
 
 	if (peptide->iMeasuredParentCharge > 2 && MVH::bUseSmartPlusThreeModel)
@@ -1706,12 +1423,19 @@ void MS2ScanVector::appendScoredPsmRows(vector<ScoredPsmRow> &rows, bool isDecoy
 	vector<MS2Scan *> orderedScans = vpAllMS2Scans;
 	sort(orderedScans.begin(), orderedScans.end(), mylessScanId);
 	const int keep = topKeep > 0 ? topKeep : ProNovoConfig::INTTOPKEEP;
-	for (MS2Scan *scan : orderedScans)
+	vector<vector<ScoredPsmRow>> rowsByScan(orderedScans.size());
+	const long long scanCount = static_cast<long long>(orderedScans.size());
+#pragma omp parallel for schedule(guided)
+	for (long long scanIndex = 0; scanIndex < scanCount; ++scanIndex)
 	{
+		MS2Scan *scan = orderedScans[static_cast<size_t>(scanIndex)];
 		if (scan == nullptr || scan->vpWeightSumTopPeptides.empty())
 		{
 			continue;
 		}
+		vector<ScoredPsmRow> &scanRows =
+			rowsByScan[static_cast<size_t>(scanIndex)];
+		scanRows.reserve(scan->vpWeightSumTopPeptides.size());
 		for (int j = 0; j < static_cast<int>(scan->vpWeightSumTopPeptides.size()); ++j)
 		{
 			if (!scan->isAnyScoreInTopN(j, keep))
@@ -1734,11 +1458,14 @@ void MS2ScanVector::appendScoredPsmRows(vector<ScoredPsmRow> &rows, bool isDecoy
 			row.scanType = scan->getScanType();
 			row.searchName = ProNovoConfig::getSearchName();
 			row.ms2IsotopicAbundancePct = ms2IsotopicAbundancePct;
-			row.retentionTime = static_cast<float>(std::atof(scan->getRTime().c_str()));
+			row.retentionTime = std::atof(scan->getRTime().c_str());
 			row.wdpScore = static_cast<float>(peptide->vdScores[0]);
 			row.xcorrScore = static_cast<float>(peptide->vdScores[1]);
 			row.mvhScore = static_cast<float>(peptide->vdScores[2]);
 			row.rank = static_cast<int>(peptide->vdRank[0]);
+			row.ddaResidualRank = peptide->iDdaResidualRank;
+			row.ddaResidualScore =
+				static_cast<float>(peptide->dDdaResidualScore);
 			const FragmentSeriesFeatures fragmentFeatures =
 				calculateFragmentSeriesFeatures(peptide, scan);
 			row.matchedBIons = fragmentFeatures.matchedB;
@@ -1752,9 +1479,51 @@ void MS2ScanVector::appendScoredPsmRows(vector<ScoredPsmRow> &rows, bool isDecoy
 			row.nakedPeptide = stripPeptideForFeatures(peptide->sIdentifiedPeptide);
 			row.proteinNames = "{" + peptide->sProteinNames + "}";
 			row.isDecoy = isDecoy;
-			rows.push_back(std::move(row));
+			scanRows.push_back(std::move(row));
 		}
 	}
+
+	size_t appendedCount = 0;
+	for (const vector<ScoredPsmRow> &scanRows : rowsByScan)
+		appendedCount += scanRows.size();
+	rows.reserve(rows.size() + appendedCount);
+	for (vector<ScoredPsmRow> &scanRows : rowsByScan)
+	{
+		for (ScoredPsmRow &row : scanRows)
+			rows.push_back(std::move(row));
+	}
+}
+
+size_t MS2ScanVector::matchScoredPsmPrecursors(
+	vector<ScoredPsmRow> &rows) const
+{
+	long long matchedCount = 0;
+#pragma omp parallel for schedule(guided) reduction(+ : matchedCount)
+	for (long long i = 0; i < static_cast<long long>(rows.size()); ++i)
+	{
+		ScoredPsmRow &row = rows[static_cast<size_t>(i)];
+		const int parentScanNumber = row.precursorScanNumber;
+		const sipros::RaxportPrecursorMatch match =
+			sipros::findRaxportPrecursorMatch(
+				raxportMs1Data,
+				parentScanNumber,
+				row.retentionTime,
+				row.parentCharge,
+				row.calculatedParentMass,
+				row.precursorNeutronMass,
+				ProNovoConfig::getParentMassWindows(),
+				ProNovoConfig::getMassAccuracyParentIon(),
+				raxportReadOptions.precursorMatchScanRadius);
+		row.precursorRtDiffSeconds = match.rtDiffSeconds;
+		if (!match.found)
+		{
+			continue;
+		}
+		row.precursorScanNumber = match.ms1ScanNumber;
+		row.measuredParentMass = match.observedNeutralMass;
+		++matchedCount;
+	}
+	return static_cast<size_t>(matchedCount);
 }
 
 void MS2ScanVector::preMvh()

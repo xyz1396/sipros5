@@ -13,13 +13,15 @@ namespace sipros
 enum class PrecursorSource
 {
     RaxportCandidates,
-    Ms1Neighborhood
+    IsolationWindow
 };
 
 struct RaxportReadOptions
 {
     PrecursorSource precursorSource = PrecursorSource::RaxportCandidates;
-    int ms1NeighborhoodRadius = 2;
+    // Regular search creates candidates from the isolation window only. This
+    // radius is used later to match already-scored PSMs to nearby MS1 scans.
+    int precursorMatchScanRadius = 5;
 };
 
 struct RaxportMs1Scan
@@ -43,6 +45,27 @@ struct RaxportMs1Data
         scanNumberToIndex.clear();
     }
 };
+
+struct RaxportPrecursorMatch
+{
+    bool found = false;
+    int ms1ScanNumber = 0;
+    double observedNeutralMass = 0.0;
+    double rtDiffSeconds = -1.0;
+};
+
+// Match an already-scored theoretical precursor against parent MS1 +/- radius.
+// Positive native peak charges must agree; unassigned peaks can support z2-z4.
+RaxportPrecursorMatch findRaxportPrecursorMatch(
+    const RaxportMs1Data &ms1Data,
+    int parentScanNumber,
+    double ms2RetentionTimeMinutes,
+    int precursorCharge,
+    double calculatedNeutralMass,
+    double precursorNeutronMass,
+    const std::vector<int> &isotopeWindows,
+    double neutralMassTolerance,
+    int scanRadius = 5);
 
 bool isRaxportHdf5Path(const std::string &path);
 

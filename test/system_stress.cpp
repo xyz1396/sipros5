@@ -4,7 +4,7 @@
 // Build example:
 //   x86_64-conda-linux-gnu-g++ -O2 -std=c++17 -fopenmp test/system_stress.cpp -o /tmp/sipros_system_stress
 // Run example:
-//   OMP_PROC_BIND=spread OMP_PLACES=cores /tmp/sipros_system_stress --threads 16 --memory-gib 12 --seconds 300
+//   /tmp/sipros_system_stress --threads 16 --memory-gib 12 --seconds 300
 
 #include <omp.h>
 

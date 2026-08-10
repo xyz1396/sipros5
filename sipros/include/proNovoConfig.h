@@ -310,7 +310,7 @@ public:
 	static const vector<PtmDefinition> &getPtmCatalog();
 	static const vector<FixedPtmDefinition> &getFixedPtmCatalog();
 	static vector<string> getEnabledFixedPtmNames();
-	// Convert FragPipe-style bracketed masses to the compiled one-character
+	// Convert bracketed masses to the compiled one-character
 	// chemistry tokens before any theoretical mass or spectrum calculation.
 	static bool translatePsmPeptide(
 		const string &plainPeptide,

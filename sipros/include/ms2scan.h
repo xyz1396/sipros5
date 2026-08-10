@@ -95,6 +95,8 @@ public:
 class PeptideUnit
 {
 public:
+	static constexpr int DdaResidualTopN = 5;
+
 	// the mass of the matched precursor peak
 	double dMeasuredParentMass;
 	// the charge of the matched precursor peak
@@ -116,6 +118,8 @@ public:
 	std::array<double, 3> vdScores;
 	// ranks of the 3 scores
 	std::array<double, 3> vdRank;
+	int iDdaResidualRank = 0;
+	double dDdaResidualScore = 0.0;
 	double dPepNeutralMass;
 	double dPrecursorNeutronMass;
 	double iPepLength;
@@ -304,6 +308,10 @@ public:
 	int iParentScanID; 												   // Parent scan ID for DIA
 	vector<int> iParentChargeStates;								   // Parent ion charge states for DIA
 	vector<double> dParentMZs;										   // Parent ion M/Z for DIA
+	// Keep the acquisition window independent from detected MS1 peaks.  Regular
+	// search can then discover a weak co-isolated precursor from its fragments
+	// before targeted MS1 feature extraction validates it.
+	vector<pair<double, double>> vIsolationWindowsMz; // center m/z, full width
 	vector<tuple<double, int, Peptide *>> vMassChargePeptidePtrTuples; // current set of peptides to be scored
 
 	vector<PeptideUnit *> vpWeightSumTopPeptides;
@@ -384,7 +392,7 @@ public:
 	{
 		sRTime = _sRTime;
 	};
-	string getRTime()
+	string getRTime() const
 	{
 		return sRTime;
 	};

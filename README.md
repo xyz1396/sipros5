@@ -37,7 +37,7 @@ siproswf -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o regular_output
 
 #### Extract protein sequences identified in Regular search
 
-- This step is particularly useful when your protein FASTA is large (for example, several GB in metaproteomics studies). The `regular_output/combined_protein.tsv` file can be replaced with results from other proteomics search engines (e.g., FragPipe, MaxQuant, or Proteome Discoverer) as long as the first column contains the protein identifier.
+- This step is particularly useful when your protein FASTA is large (for example, several GB in metaproteomics studies). The `regular_output/combined_protein.tsv` file can be replaced with a protein report from another search engine as long as the first column contains the protein identifier.
 - If you are working with a small FASTA, you can skip this extraction step and use the original FASTA for the label search.
 
 ```bash
@@ -67,21 +67,56 @@ distributions, digestion rules, and default tolerances live in
 mass-tolerance overrides, SIP isotope, abundance range, and abundance step are
 passed explicitly on the command line. Missing SIP controls are rejected.
 
-Regular FASTA search enables oxidation (`~`, M) and deamidation (`!`, N/Q) by
-default, with at most three variable PTMs per peptide. Use a repeatable
-`--ptm` option to replace that default set with compiled PTMs, and
+Regular FASTA search enables oxidation (`~`, M) by default, matching the
+validated benchmark's residue-level variable-modification space, with at most
+three variable PTMs per peptide. Deamidation (`!`, N/Q) remains
+available explicitly. Use a
+repeatable `--ptm` option to replace that default set with compiled PTMs, and
 `--max-ptm-count` to change the per-peptide limit. The `default` selector adds
 the Regular defaults to an explicit list; `none` disables all variable PTMs;
 and `all` selects every compatible variable PTM. Descriptive names avoid shell
 quoting problems with symbols such as `>`, `&`, and `$`.
+
+Regular HDF5 search derives candidates only from the acquisition isolation
+window. For charges 1-4, every theoretical precursor inside that window enters
+a fast fragment-index pass; MS1 peaks never create or prioritize candidates.
+The gate uses the validated yeast DDA settings: the 200 most intense processed
+peaks, singly charged b/y ions, and
+at least four fragment matches. Exact MVH, XCorr, and WDP scoring follows for
+gate survivors. The usual single acquisition window stays as a peptide-mass
+range until the gate passes, avoiding a large temporary candidate vector.
+
+After scoring and final per-scan pruning, each retained PSM is independently
+matched against the linked parent MS1 acquisition plus or minus five MS1
+acquisitions. The closest match by absolute retention-time difference is used,
+with mass error and intensity as tie-breakers. PIN output records that distance
+in seconds as `absPrecursorRtDiffSeconds`, immediately after
+`isotopicPeakNumbers`; `-1` means no peptide-specific precursor peak was
+matched. In that case, the linked parent MS1 acquisition and the isolation
+window center anchor MS1-abundance imputation while the distance remains `-1`.
+The imputed abundance is retained, but `isotopicPeakNumbers` and
+`MS1IsotopeFitScore` are forced to zero because no peptide-specific precursor
+was matched. If the center cannot anchor an observed MS1 envelope, the
+theoretical isotope m/z closest to the isolation-window center supplies a
+nominal-shift abundance estimate corrected for the peptide's natural-isotope
+background. `isotopicAbundanceDiffs` remains the signed
+`MS1IsotopicAbundances - MS2IsotopicAbundances` value. Up to five greedy
+residual-spectrum winners are also retained through `ddaResidualRank` and
+`ddaResidualScore`; each winner's matched fragment peaks are removed before
+selecting the next one. Isolation-window discovery is the only Regular
+candidate path; there is no precursor-source compatibility switch.
 
 Carbamidomethyl-Cys is the default fixed PTM. A repeatable `--fixed-ptm`
 option replaces the fixed default set: use `--fixed-ptm none` for natural Cys,
 or `--fixed-ptm carbamidomethyl` to open it explicitly.
 
 ```bash
-# Defaults: oxidation + deamidation
+# Default: oxidation
 siproswf -i sample.h5 -f proteins.fasta -o regular_output
+
+# Oxidation plus explicit deamidation
+siproswf -i sample.h5 -f proteins.fasta -o deamidation_output \
+  --ptm default --ptm deamidation
 
 # Defaults plus phosphorylation and acetylation
 siproswf -i sample.h5 -f proteins.fasta -o ptm_output \
@@ -101,8 +136,8 @@ neutral-loss forms, acetylation, mono/di/trimethylation, S-nitrosylation,
 nitration, and beta-methylthiolation in addition to the two defaults. IAA
 carbamidomethylation uses the `/` token when natural Cys is selected; it is
 excluded from variable search while the equivalent fixed PTM is open.
-FragPipe bracketed absolute or delta modification masses are translated through
-this same catalog before theoretical or experimental spectrum masses are
+Bracketed absolute or delta modification masses are translated through this
+same catalog before theoretical or experimental spectrum masses are
 calculated.
 
 Elemental formulas also retain isotope-source provenance. Amino-acid atoms are
@@ -129,13 +164,18 @@ product-index blocks, payload validation, and SFI publication are parallel;
 generation logs report the worker count, fragment/posting counts, index-build
 time, checksum/layout time, parallel-write time, and final GiB. HDF5
 theoretical-spectrum libraries are not supported. Spectra search runs the target and decoy indexes
-in parallel, applies RT plus Raxport isolation-window precursor matching and a
-sparse product-ion gate, then scores survivors in MVH, Xcorr, and WDP order. It
-collects gate survivors in per-thread record bitsets and performs the final
+in parallel. It creates charge-1--4 candidates only from the acquisition
+isolation window plus the SFI RT range, then applies the same top-200,
+singly-charged b/y, four-product-ion first gate as optimized regular search.
+No MS1 peak is required before MVH, Xcorr, and WDP scoring. For retained PSMs,
+it searches the parent MS1 +/-5 acquisitions and exposes the absolute
+retention-time distance in seconds (or -1 when unmatched) as a model feature.
+It collects gate survivors in per-thread record bitsets and performs the final
 unique-record reduction in parallel, avoiding a serial candidate-ID sort; the
-regular-search-style timing table reports lookup and reduction CPU/wall
-parallelism separately. It
-precomputes each surviving SFI record's compact MVH ion list once, retains the
+per-file timing table reports measured wall time, process CPU time, and
+parallel speedup for each search and output stage, followed by exact gate,
+cascade, precursor-match, and PIN-row counts. It precomputes each surviving
+SFI record's compact MVH ion list once, retains the
 best 150 MVH candidates per scan by default for the Xcorr/WDP cascade
 (`--mvh-cascade-top-n` changes this limit), and
 materializes compact spectra only for that bounded cascade. Final WDP scoring
@@ -143,7 +183,7 @@ regenerates the full high-resolution b/y isotope envelopes from the peptide,
 per-record SIP abundance, and SFI chemistry metadata just as regular search
 does; it does not rank from the truncated SFI envelope. Matched-ion and
 spectrum-shape features consume those same full WDP envelopes. The precursor
-feature envelope is reconstructed with the legacy `b_(n-1) * y1` convolution
+feature envelope is reconstructed with the established `b_(n-1) * y1` convolution
 and retained after the much larger product envelopes are released. It writes one
 `_target.pin` and one `_decoy.pin` per sample.
 
@@ -155,6 +195,8 @@ decoy SFI covering the requested SIP range, searches both indexes, and runs a
 final cross-sample Aerith report. Existing HDF5 inputs are linked into the
 regular stage instead of copied, and the same scan files are reused by spectra
 generation, spectra search, and final feature calculation.
+The workflow divides a CPU-thread budget among concurrent target/decoy jobs;
+it does not bind processes or OpenMP workers to particular CPUs.
 
 ```bash
 siproswf -i 'T01.h5,T02.h5,T03.h5,X1.h5,X2.h5,X3.h5' \
@@ -196,7 +238,7 @@ precursor when the candidate list is empty.
 
 ### 5. Output Files
 
-- `SIP_filtered_psms.tsv`: target PSMs from all non-control samples that pass the unlabeled negative-control filter (1% FDR). It reports the final `SVMscore`, the compact search `Peptide`, a human-readable `ModifiedPeptide`, `AssignedModifications`, and SIP element labeling percentages (`MS1IsotopicAbundances`, `MS2IsotopicAbundances`); training-only `Label` and `diffScores` fields are not exported. `isotopicPeakNumbers` is the raw number of extracted MS1 isotope peaks. `MS1IsotopeFitScore` is the theoretical-envelope coverage from `0` to `1`, set to `0` unless at least two compatible peaks are present; scores of at least `0.02` pass the MS1 abundance-fit validity threshold. MS1IsotopicAbundances are more sensitive; MS2IsotopicAbundances are more accurate.
+- `SIP_filtered_psms.tsv`: target PSMs from all non-control samples that pass the unlabeled negative-control filter (1% FDR). It reports the final `SVMscore`, the compact search `Peptide`, a human-readable `ModifiedPeptide`, `AssignedModifications`, and SIP element labeling percentages (`MS1IsotopicAbundances`, `MS2IsotopicAbundances`); training-only `Label` and `diffScores` fields are not exported. `isotopicPeakNumbers` is the raw number of extracted MS1 isotope peaks for a peptide-specific matched precursor and is zero for isolation-center imputation. `MS1IsotopeFitScore` is the theoretical-envelope coverage from `0` to `1`, set to `0` unless at least two compatible peaks and a peptide-specific precursor match are present; scores of at least `0.02` pass the MS1 abundance-fit validity threshold. MS1IsotopicAbundances are more sensitive; MS2IsotopicAbundances are more accurate.
 - `SIP_target_psms.tsv`, `SIP_decoy_psms.tsv`: all target and negative-control candidates used by the secondary SIP SVM, written in the same `PSMId`, `SVMscore`, `q-value`, `posterior_error_prob`, `peptide`, `modifiedPeptide`, `assignedModifications`, and `proteinIds` format as the corresponding sample-subdirectory score tables.
 - `combined_protein_with_SIP_filtered_PSM.tsv`: maps unlabeled negative-control filtered PSMs to the proteins identified in each sample.
 - For each raw-file subdirectory:
@@ -204,7 +246,7 @@ precursor when the candidate list is empty.
   - `<sample>_target.pin`, `<sample>_decoy.pin`: target and decoy search intermediates.
   - `<sample>_target_psms.tsv`, `<sample>_decoy_psms.tsv`: Aerith reranked `SVMscore` tables with compact and human-readable modified peptide forms and explicit assigned modifications.
   - `<sample>_filtered_psms.tsv`: Aerith 1% FDR PSMs with original search and RT features, `ModifiedPeptide`, and `AssignedModifications`.
-  - `psm.tsv`: FragPipe/Philosopher-style accepted PSM report with precursor
+  - `psm.tsv`: accepted PSM report with precursor
     intensity, assigned modifications, search class, protein coordinates, and
     FASTA annotations.
   - `ion.tsv`, `modified_peptide.tsv`, `peptide.tsv`: accepted PSMs aggregated
@@ -214,7 +256,7 @@ precursor when the candidate list is empty.
   - `*_filtered_psms.tsv`: PSMs passing 1% FDR decoy filtering with `isotopicPeakNumbers`, `MS1IsotopeFitScore`, `MS1IsotopicAbundances`, `MS2IsotopicAbundances`, and, for regular and SIP FASTA search, `unweighted_spectral_entropy`, `delta_RT_loess_real`, and `pred_RT_real_units`.
 - At the workflow root, `combined_psm.tsv`, `combined_ion.tsv`,
   `combined_modified_peptide.tsv`, `combined_peptide.tsv`, and
-  `combined_protein.tsv` contain cross-sample reports with FragPipe-compatible
+  `combined_protein.tsv` contain cross-sample reports with aligned
   sample spectral-count and intensity columns. `combined_protein.tsv` also
   reports sequence coverage from the union of observed peptides. Aerith
   performs this directly from its in-memory scored PSMs, without pepXML,
@@ -283,9 +325,9 @@ controls transferred ions by posterior ion FDR. Transferred values are marked
 `MBR` in the sample and combined ion, modified-peptide, and peptide tables;
 missing values are marked `unmatched`.
 
-The defaults match the FragPipe IonQuant LFQ workflow: 10 ppm MS1 tolerance,
-a 0.4 minute retention-time window, at least two isotopes, at least three MS1
-scans, and cross-run intensity normalization. They can be adjusted with
+The LFQ defaults are 10 ppm MS1 tolerance, a 0.4 minute retention-time window,
+at least two isotopes, at least three MS1 scans, and cross-run intensity
+normalization. They can be adjusted with
 `--quant-mz-ppm`, `--quant-rt-window`, `--quant-min-isotopes`, and
 `--quant-min-scans`. `--quant-intensity-mode` accepts IonQuant-compatible
 `0` (background-corrected apex), `1` (background-corrected area), or `2`
@@ -427,8 +469,8 @@ the best 4,000 globally plus up to 20 additional nonduplicate precursors from
 each of 50 equal-width observed-RT bins. Sparse bins are backfilled with the
 best remaining WDP candidates. Target/decoy labels, `log10_evalue`, and
 `hyperscore` are not consulted.
-Both Sipros symbol modifications and FragPipe/MSBooster numeric mass notation
-are accepted. Use `--rt-model` to override the checkpoint. The timing report's
+Both Sipros symbol modifications and bracketed numeric mass notation are
+accepted. Use `--rt-model` to override the checkpoint. The timing report's
 `Predict RT and compute delta-RT` row includes peptide deduplication, Torch
 inference, bandwidth selection, LOESS calibration, inverse mapping, and all
 three value calculations. When the DIA-NN RT feature is generated,

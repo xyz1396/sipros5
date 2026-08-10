@@ -52,8 +52,15 @@ int main()
 			std::vector<std::string>({"one.h5", "two.hdf5"}),
 			"repeatable -f did not preserve every input in order");
 		require(regular.raxportReadOptions.precursorSource ==
-			sipros::PrecursorSource::Ms1Neighborhood,
-			"Regular search did not resolve to MS1-neighborhood precursors");
+			sipros::PrecursorSource::IsolationWindow,
+			"Regular search did not resolve to isolation-window precursors");
+
+		sipros::DatabaseSearchArguments removedPrecursorSource;
+		require(!parse({"sipros search-fasta", "-fasta", "target.fasta",
+			"-f", "one.h5", "--precursor-source", "isolation-window"},
+			removedPrecursorSource, error) &&
+			error.find("Unknown option --precursor-source") != std::string::npos,
+			"removed precursor-source option was still accepted");
 
 		sipros::DatabaseSearchArguments removedLegacyFlag;
 		require(!parse({"sipros search-fasta", "-fasta", "target.fasta",
@@ -98,14 +105,6 @@ int main()
 			"--fragment-index-cache", "sip.sfi"}, badSipIndex, error) &&
 			error.find("Raxport HDF5 precursor candidates") != std::string::npos,
 			"SIP fragment-index conflict was not rejected clearly");
-
-		sipros::DatabaseSearchArguments badRegularSource;
-		require(!parse({"sipros search-fasta", "-fasta", "target.fasta",
-			"-f", "one.h5", "--precursor-source", "raxport-candidates"},
-			badRegularSource, error) &&
-			error.find("requires --precursor-source ms1-neighborhood") !=
-				std::string::npos,
-			"Regular legacy precursor-source conflict was not rejected");
 
 		sipros::DatabaseSearchArguments badPinOutput;
 		require(!parse({"sipros search-fasta", "-fasta", "target.fasta",

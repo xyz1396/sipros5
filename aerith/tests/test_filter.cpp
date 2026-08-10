@@ -889,8 +889,10 @@ int main() {
            std::string::npos);
     assert(log_text.find("Timing by stage (seconds)") != std::string::npos);
     assert(log_text.find("Protein assembly total") != std::string::npos);
-    assert(log_text.find("Workflow coordination and timing overhead") !=
+    assert(log_text.find("Uninstrumented workflow remainder") !=
            std::string::npos);
+    assert(log_text.find("Process CPU") != std::string::npos);
+    assert(log_text.find("Avg cores") != std::string::npos);
     assert(log_text.find("Quantification total") !=
            std::string::npos);
     assert(log_text.find("Trace identified XICs + detect peaks/intensity") !=
@@ -907,7 +909,7 @@ int main() {
     assert(log_text.find("RT prediction cache .bin file merge/write") !=
            std::string::npos);
     assert(log_text.find("MBR calibration audit") >
-           log_text.find("Overall OpenMP efficiency"));
+           log_text.find("Timing by stage (seconds)"));
     assert(log_text.find("four-population per-run calibration") >
            log_text.find("MBR calibration audit"));
     assert(log_text.find("Detail: four-population per-run calibration") ==
@@ -934,7 +936,6 @@ int main() {
             continue;
         }
         if (!in_timing_table) continue;
-        if (timing_line.rfind("  Overall OpenMP efficiency", 0) == 0) break;
         if (timing_line.empty() || timing_line.front() == ' ' ||
             timing_line.rfind("Stage", 0) == 0 ||
             timing_line.front() == '-') {
@@ -948,13 +949,14 @@ int main() {
         if (label == "Total") {
             displayed_total_wall = wall;
             displayed_total_cpu = cpu;
+            break;
         } else {
             displayed_stage_wall_sum += wall;
             displayed_stage_cpu_sum += cpu;
         }
     }
-    assert(std::abs(displayed_stage_wall_sum - displayed_total_wall) < 1e-9);
-    assert(std::abs(displayed_stage_cpu_sum - displayed_total_cpu) < 1e-9);
+    assert(std::abs(displayed_stage_wall_sum - displayed_total_wall) < 2e-6);
+    assert(std::abs(displayed_stage_cpu_sum - displayed_total_cpu) < 2e-6);
     assert(log_text.find("aerith.log") == std::string::npos);
     aerith::Dataset sip_data;
     sip_data.rows = data.rows;

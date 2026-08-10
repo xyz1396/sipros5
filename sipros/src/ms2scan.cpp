@@ -1,6 +1,7 @@
 #include "ms2scan.h"
 
 #include <algorithm>
+#include <limits>
 
 /**********switching from weightsum to ranksum needs to turn on some function in ms2scan.cpp and peptide.cpp *******/
 
@@ -1589,14 +1590,14 @@ bool MS2Scan::binarySearch(const double &dTarget, const vector<double> &vdList, 
 
 bool MS2Scan::isAnyScoreInTopN(int _iIndexPeptide, int _iRankThreshold)
 {
-	for (int k = 0; k < ((int)vpWeightSumTopPeptides.at(_iIndexPeptide)->vdScores.size()); k++)
+	PeptideUnit *peptide = vpWeightSumTopPeptides.at(_iIndexPeptide);
+	for (size_t k = 0; k < peptide->vdScores.size(); ++k)
 	{
-		if (vpWeightSumTopPeptides.at(_iIndexPeptide)->vdRank.at(k) <= _iRankThreshold)
-		{
+		if (peptide->vdRank[k] <= _iRankThreshold)
 			return true;
-		}
 	}
-	return false;
+	return peptide->iDdaResidualRank > 0 &&
+		peptide->iDdaResidualRank <= PeptideUnit::DdaResidualTopN;
 }
 
 bool scoreSort(pair<double, int> _a, pair<double, int> _b)
@@ -1848,7 +1849,13 @@ double MS2Scan::scoreWeightSumHighMS2(const string *currentPeptide,
 	int i, iMostAbundantPeakIndex = 0;
 	int n; // Ion number starting from one
 	int z; // charge state
-	vector<ProductIon> vFoundIons;
+	// This overload runs millions of times in the spectra-library cascade.
+	// Reuse per-worker storage instead of allocating three small vectors for
+	// every peptide/scan pair.
+	static thread_local vector<ProductIon> vFoundIons;
+	vFoundIons.clear();
+	vFoundIons.reserve(static_cast<size_t>(iPeptideLength * 4));
+	const bool sipSearch = ProNovoConfig::getSearchType() == "SIP";
 	double dScoreWeight = 0, dMZError = 1, dMostAbundantObservedMZ = 0, dAverageMZError = 0, dBonus4ComplementaryFragmentObserved = 1.0;
 	int chargeThresh = (2 < measuredCharge)
 						   ? 2
@@ -1860,7 +1867,7 @@ double MS2Scan::scoreWeightSumHighMS2(const string *currentPeptide,
 		{
 			ProductIon currentIon;
 			currentIon.setProductIon('y', n + 1, z);
-			if (ProNovoConfig::getSearchType() == "SIP")
+			if (sipSearch)
 			{
 				if (findProductIonSIP((*vvdYionMass)[n], (*vvdYionProb)[n], z, dScoreWeight, dMZError, dMostAbundantObservedMZ, iMostAbundantPeakIndex))
 				{
@@ -1885,7 +1892,7 @@ double MS2Scan::scoreWeightSumHighMS2(const string *currentPeptide,
 		{
 			ProductIon currentIon;
 			currentIon.setProductIon('b', n + 1, z);
-			if (ProNovoConfig::getSearchType() == "SIP")
+			if (sipSearch)
 			{
 				if (findProductIonSIP((*vvdBionMass)[n], (*vvdBionProb)[n], z, dScoreWeight, dMZError, dMostAbundantObservedMZ, iMostAbundantPeakIndex))
 				{
@@ -1906,8 +1913,10 @@ double MS2Scan::scoreWeightSumHighMS2(const string *currentPeptide,
 
 	// Complementarity depends only on ion type and ordinal, not charge.  Track
 	// observed b/y ordinals once instead of comparing every found ion pair.
-	std::vector<unsigned char> foundY(static_cast<size_t>(iPeptideLength + 1), 0);
-	std::vector<unsigned char> foundB(static_cast<size_t>(iPeptideLength + 1), 0);
+	static thread_local std::vector<unsigned char> foundY;
+	static thread_local std::vector<unsigned char> foundB;
+	foundY.assign(static_cast<size_t>(iPeptideLength + 1), 0);
+	foundB.assign(static_cast<size_t>(iPeptideLength + 1), 0);
 	for (ProductIon &ion : vFoundIons)
 	{
 		const int ionNumber = ion.getIonNumber();
@@ -1945,7 +1954,7 @@ double MS2Scan::scoreWeightSumHighMS2(const string *currentPeptide,
 		{
 			dBonus4ComplementaryFragmentObserved = 1.0;
 		}
-		if (ProNovoConfig::getSearchType() == "SIP")
+		if (sipSearch)
 		{
 			dScore += ProNovoConfig::scoreError(fabs(vFoundIons[i].getMZError() - dAverageMZError)) * vFoundIons[i].getScoreWeight() * dBonus4ComplementaryFragmentObserved;
 		}
@@ -2023,6 +2032,8 @@ void PeptideUnit::setPeptideUnitInfo(const tuple<double, int, Peptide *> current
 
 	// Sipros Ensemble
 	vdScores[scoreIX] = dScore;
+	iDdaResidualRank = 0;
+	dDdaResidualScore = 0.0;
 	dPepNeutralMass = currentPeptide->getPeptideMass();
 	dPrecursorNeutronMass = currentPeptide->getPrecursorNeutronMass();
 	iPepLength = currentPeptide->getPeptideLength();

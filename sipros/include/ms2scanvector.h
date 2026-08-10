@@ -2,6 +2,7 @@
 #define MS2SCANVECTOR_H
 
 #include <string>
+#include <cstdint>
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -16,13 +17,10 @@
 #include "MVH.h"
 #include "CometSearchMod.h"
 #include "RaxportHdf5Reader.h"
+#include "performancelog.h"
 
 #define ZERO            0.00000001
-#define PEPTIDE_ARRAY_SIZE  2000000
 #define PEPTIDE_ARRAY_SIP_SIZE  200000
-#define TASKWAIT_SIZE 64
-#define TASKRESUME_SIZE 32
-#define TASKPEPTIDE_ARRAY_SIZE  20000
 
 using namespace std;
 
@@ -43,11 +41,16 @@ struct ScoredPsmRow
 	string scanType;
 	string searchName;
 	double ms2IsotopicAbundancePct = 1.07;
-	float retentionTime = 0.0f;
+	double retentionTime = 0.0;
 	float mvhScore = 0.0f;
 	float xcorrScore = 0.0f;
 	float wdpScore = 0.0f;
 	int rank = 0;
+	// Absolute RT difference in seconds to the precursor matched after scoring.
+	// -1 is the explicit missing value when no peak matches in parent MS1 +/-5.
+	double precursorRtDiffSeconds = -1.0;
+	int ddaResidualRank = 0;
+	float ddaResidualScore = 0.0f;
 	int matchedBIons = 0;
 	int matchedYIons = 0;
 	int maxConsecutiveBIons = 0;
@@ -57,6 +60,26 @@ struct ScoredPsmRow
 	string nakedPeptide;
 	string proteinNames;
 	bool isDecoy = false;
+};
+
+struct RegularSearchStatistics
+{
+	sipros::PerformanceTiming preprocess;
+	sipros::PerformanceTiming queryIndex;
+	sipros::PerformanceTiming mvhScoring;
+	sipros::PerformanceTiming xcorrScoring;
+	sipros::PerformanceTiming wdpScoring;
+	sipros::PerformanceTiming psmFeatures;
+	uint64_t scanCount = 0;
+	uint64_t skippedScans = 0;
+	uint64_t isolationWindowRanges = 0;
+	uint64_t isolationWindowCandidates = 0;
+	uint64_t exactMassCandidates = 0;
+	uint64_t fragmentPostingsVisited = 0;
+	uint64_t fragmentGateSurvivors = 0;
+	uint64_t exactMvhCalls = 0;
+	uint64_t exactMvhAccepted = 0;
+	uint64_t candidatePsms = 0;
 };
 
 class MS2ScanVector {
@@ -75,6 +98,7 @@ class MS2ScanVector {
 	sipros::RaxportReadOptions raxportReadOptions;
 	sipros::RaxportMs1Data raxportMs1Data;
 	shared_ptr<const sipros::FragmentIndex> fragmentIndex;
+	RegularSearchStatistics regularSearchStatistics;
 
 	// this should be moved to Peptide or shared through ProNovoConfig
 	map<char, double> mapResidueMass; // mass except N and C termini;
@@ -91,11 +115,7 @@ class MS2ScanVector {
 
 	// regular search functions
 	void preProcessAllMs2Mvh(); // pre-process all MS2 scans before mvh
-	void searchDatabaseMvh(); // search all ms2 scans against the protein list using mvh
-	void searchDatabaseMvhIndexed(); // lossless precursor/fragment indexed regular search
-	void processPeptideArrayMvh(vector<Peptide*>& vpPeptideArray); // process peptide array using mvh score
-	void searchDatabaseMvhTask(); // search all ms2 scans against the protein list using mvh, task version
-	void processPeptideArrayMvhTask(vector<Peptide*>& vpPeptideArray, omp_lock_t * pLck); // process peptide array using mvh score, task version
+	void searchDatabaseMvh(); // lossless precursor/fragment indexed regular search
 	void postProcessAllMs2WdpXcorr(); // post processing after mvh scoring
 	void postProcessAllMs2Wdp(); // post processing using wdp scoring
 	void postProcessAllMs2Xcorr(); // post processing using xcorr scoring
@@ -138,13 +158,17 @@ public:
 	{
 		fragmentIndex = sharedIndex;
 	}
+	const RegularSearchStatistics &regularStatistics() const
+	{
+		return regularSearchStatistics;
+	}
 
 	// begin the database searching
 	void startProcessingMvh(); // start functions to process the loaded HDF5 file using mvh as the prime score
-	void startProcessingMvhTask(); // start functions to process the loaded HDF5 file using mvh as the prime score, task mode
 	void startProcessingWdpSip(); // start functions to process the loaded HDF5 file with WDP as prime score without tasking
 	void clearSearchResults();
 	void appendScoredPsmRows(vector<ScoredPsmRow> &rows, bool isDecoy, int topKeep, double ms2IsotopicAbundancePct = 1.07) const;
+	size_t matchScoredPsmPrecursors(vector<ScoredPsmRow> &rows) const;
 
 	// variables for the MVH thread
 	vector<vector<double> *> _ppdAAforward;
@@ -164,10 +188,6 @@ public:
 	vector<vector<int> > vvdBinGlobal;
 	void preXcorr();
 	void postXcorr();
-	int iOpenMPTaskNum;
-	omp_lock_t lckOpenMpTaskNum;
-	omp_lock_t lckOpenMpTaskNumHalfed;
-
 };
 
 #endif // MS2SCANVECTOR_H

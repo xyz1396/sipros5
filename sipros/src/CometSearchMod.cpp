@@ -30,7 +30,8 @@ CometSearchMod::~CometSearchMod() {
  * vdMZ
  */
 bool CometSearchMod::Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, double *pdTmpRawData, double *pdTmpFastXcorrData, double *pdTmpCorrelationData,
-		double *pdTmpSmoothedSpectrum, double *pdTmpPeakExtracted) {
+		double *pdTmpSmoothedSpectrum, double *pdTmpPeakExtracted,
+		double maximumArrayMz) {
 	int i;
 	int x;
 	int y;
@@ -53,7 +54,20 @@ bool CometSearchMod::Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, d
 	//MH: Find appropriately sized array cushion based on user parameters. Fixes error found by Patrick Pedrioli for
 	// very wide mass tolerance searches (i.e. 500 Da).
 	double dCushion = 3.0;
-	pScoring->_spectrumInfoInternal.iArraySize = (int) ((mstSpectrum->dParentMass + dCushion + 2.0) * dInverseBinWidth);
+	double arrayUpperMz = mstSpectrum->dParentMass;
+	if (maximumArrayMz > 0.0 && std::isfinite(maximumArrayMz)) {
+		// The XCorr correlation spectrum is identically zero above the highest
+		// observed fragment plus the background-correlation tail. Window-only
+		// precursor hypotheses can otherwise size this array to the z=4 neutral
+		// mass even though no MS2 data exist in most of that range. Express the
+		// tail in bins so this remains safe for both high- and low-resolution MS2.
+		const double correlationTailMz =
+			static_cast<double>(ProNovoConfig::iXcorrProcessingOffset + 12) /
+			dInverseBinWidth;
+		arrayUpperMz = std::min(
+			arrayUpperMz, maximumArrayMz + correlationTailMz);
+	}
+	pScoring->_spectrumInfoInternal.iArraySize = (int) ((arrayUpperMz + dCushion + 2.0) * dInverseBinWidth);
 	// seg debug b
 	if (pScoring->_spectrumInfoInternal.iArraySize > CometSearchMod::iArraySizePreprocess) {
 		cout << "Error 90" << endl;
@@ -1016,9 +1030,15 @@ bool CometSearchMod::ScorePeptides(string * currentPeptide, bool *pbDuplFragment
 	return true;
 }
 
-bool CometSearchMod::ScorePeptidesSIPNoCancelOut(const vector<vector<double> > & vvdYionMass, const vector<vector<double> > & vvdYionProb,
-		const vector<vector<double> > & vvdBionMass, const vector<vector<double> > & vvdBionProb, MS2Scan * mstSpectrum, vector<unsigned char> & pbDuplFragment,
-		vector<double> & vdBinnedIonMasses, vector<int> & vdBin, double & dXcorr) {
+void CometSearchMod::BinPeptideIonsSIPNoCancelOut(
+		const vector<vector<double> > &vvdYionMass,
+		const vector<vector<double> > &vvdYionProb,
+		const vector<vector<double> > &vvdBionMass,
+		const vector<vector<double> > &vvdBionProb,
+		MS2Scan *mstSpectrum,
+		vector<unsigned char> &pbDuplFragment,
+		vector<double> &vdBinnedIonMasses,
+		vector<int> &vdBin) {
 	double dInverseBinWidth = 0, dOneMinusBinOffset = 0;
 	// Reuse the sparse list from the preceding candidate to reset only bins
 	// that were touched.  The old implementation visited every theoretical
@@ -1060,6 +1080,10 @@ bool CometSearchMod::ScorePeptidesSIPNoCancelOut(const vector<vector<double> > &
 				}
 				dFragmentIonMassZ = (vvdYionMass.at(i).at(j) + (ctCharge) * PROTON_MASS) / ctCharge;
 				iVal = BINX(dFragmentIonMassZ, dInverseBinWidth, dOneMinusBinOffset);
+				if (iVal < 0 ||
+					static_cast<size_t>(iVal) >= vdBinnedIonMasses.size()) {
+					continue;
+				}
 				if (pbDuplFragment.at(iVal) == 0) {
 					vdBinnedIonMasses.at(iVal) = vvdYionProb.at(i).at(j);
 					pbDuplFragment.at(iVal) = 1;
@@ -1081,6 +1105,10 @@ bool CometSearchMod::ScorePeptidesSIPNoCancelOut(const vector<vector<double> > &
 				}
 				dFragmentIonMassZ = (vvdBionMass.at(i).at(j) + (ctCharge) * PROTON_MASS) / ctCharge;
 				iVal = BINX(dFragmentIonMassZ, dInverseBinWidth, dOneMinusBinOffset);
+				if (iVal < 0 ||
+					static_cast<size_t>(iVal) >= vdBinnedIonMasses.size()) {
+					continue;
+				}
 				if (pbDuplFragment.at(iVal) == 0) {
 					vdBinnedIonMasses.at(iVal) = vvdBionProb.at(i).at(j);
 					pbDuplFragment.at(iVal) = 1;
@@ -1097,6 +1125,14 @@ bool CometSearchMod::ScorePeptidesSIPNoCancelOut(const vector<vector<double> > &
 	std::sort(vdBin.begin(), vdBin.end());
 
 	vdBinnedIonMasses.at(0) = 1;
+}
+
+bool CometSearchMod::ScoreBinnedPeptideSIPNoCancelOut(
+		MS2Scan *mstSpectrum,
+		const vector<double> &vdBinnedIonMasses,
+		const vector<int> &vdBin,
+		double &dXcorr) {
+	Query *pQuery = mstSpectrum->pQuery;
 	dXcorr = 0;
 	// bool bUseNLPeaks = false;
 	float **ppSparseFastXcorrData;              // use this if bSparseMatrix
@@ -1128,6 +1164,16 @@ bool CometSearchMod::ScorePeptidesSIPNoCancelOut(const vector<vector<double> > &
 	}
 
 	return true;
+}
+
+bool CometSearchMod::ScorePeptidesSIPNoCancelOut(const vector<vector<double> > & vvdYionMass, const vector<vector<double> > & vvdYionProb,
+		const vector<vector<double> > & vvdBionMass, const vector<vector<double> > & vvdBionProb, MS2Scan * mstSpectrum, vector<unsigned char> & pbDuplFragment,
+		vector<double> & vdBinnedIonMasses, vector<int> & vdBin, double & dXcorr) {
+	BinPeptideIonsSIPNoCancelOut(
+		vvdYionMass, vvdYionProb, vvdBionMass, vvdBionProb,
+		mstSpectrum, pbDuplFragment, vdBinnedIonMasses, vdBin);
+	return ScoreBinnedPeptideSIPNoCancelOut(
+		mstSpectrum, vdBinnedIonMasses, vdBin, dXcorr);
 }
 
 double CometSearchMod::GetFragmentIonMass(int iWhichIonSeries, int i, int ctCharge, double *_pdAAforward, double *_pdAAreverse) {

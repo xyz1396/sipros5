@@ -36,6 +36,7 @@ public:
         double cosineScore = 0.0;
         double deltaRT = 0.0;
         double log10PrecursorIntensity = 0.0;
+        double precursorRtDiffSeconds = -1.0;
         std::string peptide;
         std::string proteins;
     };

@@ -39,8 +39,10 @@ class filter:
         self.baseNames = baseNames
         self.outputPath = outputPath
         self.logger = logger
-        self.core_count = available_cpu_count()
-        self.threadNumber = effective_thread_count(threadNumber, self.core_count)
+        self.available_threads = available_cpu_count()
+        self.threadNumber = effective_thread_count(
+            threadNumber, self.available_threads
+        )
         self.decoyPrefix = decoyPrefix
         self.ignorePCT = ignorePCT
         self.dryrun = dryrun
@@ -136,7 +138,7 @@ class filter:
             command,
             self.logger,
             env_updates=environment,
-            cpu_cores=self.threadNumber,
+            cpu_threads=self.threadNumber,
         )
 
     def postprocess_fasta_results(self) -> None:
@@ -178,7 +180,7 @@ class filter:
             operation = "filtering only"
         self.logger.info(
             f"Running Aerith cross-sample {operation} with "
-            f"{self.threadNumber} CPU cores"
+            f"{self.threadNumber} CPU threads (no affinity)"
         )
         if self.spectraPaths:
             self.logger.info(
