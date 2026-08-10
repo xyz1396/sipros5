@@ -13,7 +13,7 @@ def run_logged_command(cmd: str, logger: Logger, env: dict[str, str] | None = No
     else:
         unit = "thread" if cpu_threads == 1 else "threads"
         logger.info(
-            f"Running process ({cpu_threads} CPU {unit}, no affinity): {cmd}"
+            f"Running process ({cpu_threads} CPU {unit}): {cmd}"
         )
     run_env = os.environ.copy()
     if env is not None:

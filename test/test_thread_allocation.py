@@ -39,7 +39,7 @@ def null_logger(name: str) -> logging.Logger:
 
 
 class CommandLoggingTests(unittest.TestCase):
-    def test_process_log_reports_unbound_threads_without_environment_spam(self) -> None:
+    def test_process_log_reports_threads_without_environment_spam(self) -> None:
         logger = mock.Mock()
         with mock.patch.object(
                 command_runner_module.subprocess,
@@ -55,7 +55,7 @@ class CommandLoggingTests(unittest.TestCase):
 
         self.assertEqual(
             logger.info.call_args_list[0].args[0],
-            "Running process (6 CPU threads, no affinity): tool --input sample",
+            "Running process (6 CPU threads): tool --input sample",
         )
         info_messages = [call.args[0] for call in logger.info.call_args_list]
         self.assertFalse(any(message.startswith("Set ") for message in info_messages))
@@ -177,31 +177,20 @@ class ThreadAllocationTests(unittest.TestCase):
         with mock.patch.object(
                 allocation_module.os, "process_cpu_count", return_value=6,
                 create=True), mock.patch.object(
-                    allocation_module.os, "sched_getaffinity", return_value=set(range(12))
-                ):
+                    allocation_module.os, "cpu_count", return_value=12):
             self.assertEqual(allocation_module.available_cpu_count(), 6)
 
-    def test_available_cpu_count_falls_back_to_affinity_and_cpu_count(self) -> None:
+    def test_available_cpu_count_falls_back_to_cpu_count(self) -> None:
         with mock.patch.object(
                 allocation_module.os, "process_cpu_count", return_value=None,
                 create=True), mock.patch.object(
-                    allocation_module.os, "sched_getaffinity", return_value=set(range(7))
-                ):
-            self.assertEqual(allocation_module.available_cpu_count(), 7)
-
-        with mock.patch.object(
-                allocation_module.os, "process_cpu_count", return_value=None,
-                create=True), mock.patch.object(
-                    allocation_module.os, "sched_getaffinity", side_effect=OSError
-                ), mock.patch.object(allocation_module.os, "cpu_count", return_value=5):
+                    allocation_module.os, "cpu_count", return_value=5):
             self.assertEqual(allocation_module.available_cpu_count(), 5)
 
         with mock.patch.object(
                 allocation_module.os, "process_cpu_count", return_value=None,
                 create=True), mock.patch.object(
-                    allocation_module.os, "sched_getaffinity",
-                    side_effect=NotImplementedError
-                ), mock.patch.object(allocation_module.os, "cpu_count", return_value=None):
+                    allocation_module.os, "cpu_count", return_value=None):
             self.assertEqual(allocation_module.available_cpu_count(), 1)
 
     def test_effective_thread_count_caps_to_available_cpus(self) -> None:

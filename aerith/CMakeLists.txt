@@ -118,7 +118,32 @@ if(AERITH_ENABLE_TORCH)
         message(STATUS "Aerith: found NVTX3 in ${nvtx3_dir}")
       endif()
     endif()
+    # Some shared Conda libtorch builds enable Kineto in TorchConfig.cmake but
+    # fold its required symbols into the shared Torch libraries instead of
+    # packaging a standalone libkineto.  Upstream TorchConfig emits a warning
+    # and appends nothing in that case.  Pre-seed its lookup with a removable
+    # sentinel so this known optional packaging mismatch does not obscure real
+    # CMake warnings.
+    set(AERITH_KINETO_LINK_SENTINEL "")
+    if(DEFINED Torch_DIR)
+      get_filename_component(AERITH_TORCH_PREFIX
+        "${Torch_DIR}/../../.." ABSOLUTE)
+      find_library(AERITH_KINETO_LIBRARY
+        NAMES kineto
+        PATHS "${AERITH_TORCH_PREFIX}/lib")
+      if(NOT AERITH_KINETO_LIBRARY)
+        set(AERITH_KINETO_LINK_SENTINEL
+          "AERITH_OPTIONAL_KINETO_NOT_PACKAGED")
+        set(kineto_LIBRARY "${AERITH_KINETO_LINK_SENTINEL}")
+      endif()
+    endif()
     find_package(Torch 2.12.1 REQUIRED)
+    if(AERITH_KINETO_LINK_SENTINEL)
+      list(REMOVE_ITEM TORCH_LIBRARIES "${AERITH_KINETO_LINK_SENTINEL}")
+      unset(kineto_LIBRARY)
+      message(STATUS
+        "Aerith: optional standalone Kineto library is not packaged; omitting it")
+    endif()
   endif()
 endif()
 if(Torch_FOUND)

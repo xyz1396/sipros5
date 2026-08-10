@@ -270,8 +270,10 @@ std::string token_key(const std::vector<std::int64_t>& tokens) {
     return key;
 }
 
-#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 15
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 14
 #pragma GCC diagnostic push
+// GCC 14+ can lose track of the engaged state of AutogradState's optional
+// SafePyObject while inlining c10::InferenceMode's destructor.
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
 std::vector<float> predict_irt(const std::filesystem::path& model_path,
@@ -354,7 +356,7 @@ std::vector<float> predict_irt(const std::filesystem::path& model_path,
         return predictions;
     });
 }
-#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 15
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 14
 #pragma GCC diagnostic pop
 #endif
 

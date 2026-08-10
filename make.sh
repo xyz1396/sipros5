@@ -74,7 +74,12 @@ if [ "$RELEASE_ENV_ACTIVE" = "1" ]; then
     SYSTEM_CC="$RELEASE_PREFIX/bin/x86_64-conda-linux-gnu-gcc"
     SYSTEM_CXX="$RELEASE_PREFIX/bin/x86_64-conda-linux-gnu-g++"
     SYSTEM_TORCH_ROOT="$RELEASE_PREFIX"
-    RELEASE_HDF5_DIR="$RELEASE_PREFIX/cmake"
+    if [ -f "$RELEASE_PREFIX/lib/cmake/hdf5/hdf5-config.cmake" ]; then
+        RELEASE_HDF5_DIR="$RELEASE_PREFIX/lib/cmake/hdf5"
+    else
+        # Older Conda HDF5 packages install their CMake package here.
+        RELEASE_HDF5_DIR="$RELEASE_PREFIX/cmake"
+    fi
 else
     SYSTEM_CMAKE="${SYSTEM_CMAKE:-/usr/bin/cmake}"
     SYSTEM_NINJA="${SYSTEM_NINJA:-/usr/bin/ninja}"

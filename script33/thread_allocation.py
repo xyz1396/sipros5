@@ -23,18 +23,12 @@ class ThreadAllocation:
 
 
 def available_cpu_count() -> int:
-    """Return the logical-CPU allowance inherited by this process."""
+    """Return the number of logical CPUs available to the workflow."""
     process_cpu_count = getattr(os, "process_cpu_count", None)
     if process_cpu_count is not None:
         count = process_cpu_count()
         if count:
             return max(1, count)
-    try:
-        affinity_count = len(os.sched_getaffinity(0))
-        if affinity_count:
-            return affinity_count
-    except (AttributeError, OSError, NotImplementedError):
-        pass
     return max(1, os.cpu_count() or 1)
 
 

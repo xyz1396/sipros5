@@ -180,7 +180,7 @@ class filter:
             operation = "filtering only"
         self.logger.info(
             f"Running Aerith cross-sample {operation} with "
-            f"{self.threadNumber} CPU threads (no affinity)"
+            f"{self.threadNumber} CPU threads"
         )
         if self.spectraPaths:
             self.logger.info(

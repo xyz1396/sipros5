@@ -94,8 +94,7 @@ class search:
         self.logger.info(
             f'{phase}: up to {allocation.worker_count} concurrent processes; '
             f'{per_job} CPU {unit} per process; '
-            f'{allocation.peak_threads}/{self.threadNumber} thread budget at peak; '
-            'no CPU affinity'
+            f'{allocation.peak_threads}/{self.threadNumber} thread budget at peak'
         )
 
     def sample_base_name(self, path: str) -> str:

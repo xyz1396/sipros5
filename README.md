@@ -196,7 +196,7 @@ final cross-sample Aerith report. Existing HDF5 inputs are linked into the
 regular stage instead of copied, and the same scan files are reused by spectra
 generation, spectra search, and final feature calculation.
 The workflow divides a CPU-thread budget among concurrent target/decoy jobs;
-it does not bind processes or OpenMP workers to particular CPUs.
+the configured thread limits are passed to each worker runtime.
 
 ```bash
 siproswf -i 'T01.h5,T02.h5,T03.h5,X1.h5,X2.h5,X3.h5' \
