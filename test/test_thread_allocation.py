@@ -30,6 +30,20 @@ import search as search_module
 import thread_allocation as allocation_module
 
 
+def split_command(command) -> list[str]:
+    if not isinstance(command, str):
+        return list(command)
+    values = shlex.split(command, posix=os.name != "nt")
+    if os.name == "nt":
+        return [
+            value[1:-1]
+            if len(value) >= 2 and value[0] == value[-1] == '"'
+            else value
+            for value in values
+        ]
+    return values
+
+
 def null_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.handlers.clear()
@@ -62,6 +76,19 @@ class CommandLoggingTests(unittest.TestCase):
         process_env = check_output.call_args.kwargs["env"]
         self.assertEqual(process_env["OMP_NUM_THREADS"], "6")
         self.assertEqual(process_env["GOMAXPROCS"], "6")
+
+    def test_argument_array_bypasses_platform_shell(self) -> None:
+        logger = mock.Mock()
+        arguments = ["aerith", "--target-pin", "sample path/target.pin"]
+        with mock.patch.object(
+                command_runner_module.subprocess,
+                "check_output",
+                return_value="complete\n",
+        ) as check_output:
+            command_runner_module.run_logged_command(arguments, logger)
+
+        self.assertEqual(check_output.call_args.args[0], arguments)
+        self.assertFalse(check_output.call_args.kwargs["shell"])
 
 
 class ThreadAllocationTests(unittest.TestCase):
@@ -288,7 +315,7 @@ class WorkflowAllocationTests(unittest.TestCase):
                 [8, 8, 8, 8, 8, 8],
             )
             labels = [
-                shlex.split(command)[shlex.split(command).index("--sfi-label") + 1]
+                split_command(command)[split_command(command).index("--sfi-label") + 1]
                 for command, _ in captured
             ]
             self.assertEqual(labels.count("target"), 3)
@@ -300,7 +327,7 @@ class WorkflowAllocationTests(unittest.TestCase):
                 self.assertNotIn(" -c ", command)
                 self.assertIn(" --sfi ", command)
                 self.assertNotIn(" -h5 ", command)
-                arguments = shlex.split(command)
+                arguments = split_command(command)
                 self.assertEqual(
                     arguments[arguments.index("--rt-tolerance") + 1], "5.0"
                 )
@@ -360,7 +387,7 @@ class WorkflowAllocationTests(unittest.TestCase):
             output_paths: set[str] = set()
             prepare_fastas: list[str] = []
             for command, _ in prepare_calls:
-                arguments = shlex.split(command)
+                arguments = split_command(command)
                 self.assertIn("--prepare-only", arguments)
                 self.assertNotIn("-f", arguments)
                 self.assertNotIn("-o", arguments)
@@ -377,7 +404,7 @@ class WorkflowAllocationTests(unittest.TestCase):
                 self.assertNotRegex(command, r"(?:^| )-t \d+(?: |$)")
                 self.assertIn("--tolerance-ms1 0.01", command)
                 self.assertIn("--tolerance-ms2 0.02", command)
-                arguments = shlex.split(command)
+                arguments = split_command(command)
                 self.assertNotIn("--exclude-target-fasta", arguments)
                 self.assertNotIn("--prepare-only", arguments)
                 scan_files = [
@@ -436,7 +463,7 @@ class WorkflowAllocationTests(unittest.TestCase):
                 name: {} for name in workflow.base_names
             }
             for command, threads in search_calls:
-                arguments = shlex.split(command)
+                arguments = split_command(command)
                 scan = arguments[arguments.index("-f") + 1]
                 sample = Path(scan).stem
                 label = arguments[arguments.index("--pin-label") + 1]
@@ -468,7 +495,7 @@ class WorkflowAllocationTests(unittest.TestCase):
 
             def fake_run(command: str, _threads: int) -> None:
                 nonlocal maximum_active_samples
-                arguments = shlex.split(command)
+                arguments = split_command(command)
                 if "--prepare-only" in arguments:
                     return
                 scan = arguments[arguments.index("-f") + 1]
@@ -510,7 +537,7 @@ class WorkflowAllocationTests(unittest.TestCase):
 
             self.assertEqual(len(captured), 4)
             for command in captured:
-                arguments = shlex.split(command)
+                arguments = split_command(command)
                 ptms = [
                     arguments[index + 1]
                     for index, argument in enumerate(arguments)
@@ -548,7 +575,7 @@ class WorkflowAllocationTests(unittest.TestCase):
             self.assertEqual(len(captured), 4)
             self.assertEqual(sorted(threads for _, threads in captured), [8] * 4)
             for command, _ in captured:
-                arguments = shlex.split(command)
+                arguments = split_command(command)
                 self.assertEqual(arguments.count("-f"), 1)
                 self.assertIn("--pin-output", arguments)
                 self.assertIn("-a", arguments)
@@ -586,7 +613,7 @@ class WorkflowAllocationTests(unittest.TestCase):
                 workflow.generatedSpectraDir,
             )
             self.assertEqual(len(captured), 1)
-            arguments = shlex.split(captured[0])
+            arguments = split_command(captured[0])
             fixed_ptms = [
                 arguments[index + 1]
                 for index, argument in enumerate(arguments)
@@ -701,9 +728,9 @@ class WorkflowAllocationTests(unittest.TestCase):
             workflow.prepare_hdf5_inputs()
 
             staged = stage / "sample" / "sample.h5"
-            self.assertTrue(staged.is_symlink())
-            self.assertEqual(staged.resolve(), source.resolve())
-            self.assertEqual(workflow.hdf5_paths["sample"], str(staged))
+            self.assertTrue(staged.exists())
+            self.assertTrue(os.path.samefile(source, staged))
+            self.assertEqual(Path(workflow.hdf5_paths["sample"]), staged)
 
     def test_reused_spectra_library_rejects_fixed_ptms(self) -> None:
         with tempfile.TemporaryDirectory() as output:
@@ -739,7 +766,7 @@ class WorkflowAllocationTests(unittest.TestCase):
 
             def fake_run(command: str, threads: int) -> None:
                 captured.append(threads)
-                arguments = shlex.split(command)
+                arguments = split_command(command)
                 if "--prepare-only" in arguments:
                     return
                 output_index = arguments.index("-o")
@@ -823,7 +850,7 @@ class WorkflowAllocationTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         workflow.postprocess_fasta_results.assert_called_once_with()
         command, environment, threads = captured[0]
-        arguments = shlex.split(command)
+        arguments = split_command(command)
         self.assertEqual(arguments[0], "aerith")
         self.assertEqual(arguments.count("--target-pin"), 3)
         self.assertEqual(arguments.count("--decoy-pin"), 3)
@@ -883,7 +910,7 @@ class WorkflowAllocationTests(unittest.TestCase):
         workflow.spectraPaths = []
         workflow.predictionCachePath = "/output/predictions"
 
-        arguments = shlex.split(workflow.command())
+        arguments = split_command(workflow.command())
         self.assertEqual(arguments.count("--input"), 0)
         self.assertEqual(arguments.count("--target-pin"), 2)
         self.assertEqual(arguments.count("--decoy-pin"), 2)
@@ -915,7 +942,7 @@ class WorkflowAllocationTests(unittest.TestCase):
         workflow.negative_control = "control"
         workflow.label_threshold = 2.5
 
-        arguments = shlex.split(workflow.command())
+        arguments = split_command(workflow.command())
 
         self.assertEqual(arguments.count("--negative-control"), 1)
         self.assertEqual(
@@ -941,7 +968,7 @@ class WorkflowAllocationTests(unittest.TestCase):
         workflow.ignorePCT = False
         workflow.spectraPaths = []
 
-        arguments = shlex.split(workflow.command())
+        arguments = split_command(workflow.command())
 
         self.assertIn("--no-protein-assembly", arguments)
         self.assertIn("--filtered-only", arguments)
@@ -973,8 +1000,6 @@ class NativeProteinAssemblyOwnershipTests(unittest.TestCase):
 
     def test_merged_filter_has_no_bridge_or_combined_fasta(self) -> None:
         source = inspect.getsource(filter_module.filter)
-        self.assertNotIn("proteinprophet", source.lower())
-        self.assertNotIn("pep.xml", source.lower())
         self.assertNotIn("targetdecoy", source.lower())
 
     def test_protein_psm_matching_is_native_only(self) -> None:

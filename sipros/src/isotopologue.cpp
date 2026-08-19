@@ -54,7 +54,7 @@ bool Isotopologue::setupIsotopologue(
 	const vector<IsotopeDistribution> &atomIsotopicDistribution,
 	const string &atomNames)
 {
-	AtomNumber = atomNames.size();
+	AtomNumber = static_cast<unsigned int>(atomNames.size());
 	if (AtomNumber == 0 ||
 		atomIsotopicDistribution.size() != AtomNumber)
 	{
@@ -267,7 +267,7 @@ bool Isotopologue::getSingleResidueMostAbundantMasses(vector<string> &vsResidues
 	unsigned int i;
 
 	// bubble sort the list by mass
-	unsigned int n = vsResidues.size();
+	const unsigned int n = static_cast<unsigned int>(vsResidues.size());
 	unsigned int pass;
 	double dCurrentMass;
 	for (pass = 1; pass < n; pass++)
@@ -661,19 +661,21 @@ IsotopeDistribution Isotopologue::sum(const IsotopeDistribution &distribution0, 
 	double ProbabilityCutoff_local = 0.000001;
 
 	IsotopeDistribution sumDistribution;
-	int iSizeDistribution0 = distribution0.vMass.size();
-	int iSizeDistribution1 = distribution1.vMass.size();
-	size_t newSize = iSizeDistribution0 + iSizeDistribution1 - 1;
+	const std::size_t iSizeDistribution0 = distribution0.vMass.size();
+	const std::size_t iSizeDistribution1 = distribution1.vMass.size();
+	const std::size_t newSize = iSizeDistribution0 + iSizeDistribution1 - 1;
 	sumDistribution.vMass.reserve(newSize);
 	sumDistribution.vProb.reserve(newSize);
-	for (int k = 0; k < newSize; k++)
+	for (std::size_t k = 0; k < newSize; k++)
 	{
 		double sumweight = 0, summass = 0;
-		int start = k < (iSizeDistribution1 - 1) ? 0 : k - iSizeDistribution1 + 1; // max(0, k-f_n+1)
-		int end = k < (iSizeDistribution0 - 1) ? k : iSizeDistribution0 - 1;	   // min(g_n - 1, k)
+		const std::size_t start =
+			k < (iSizeDistribution1 - 1) ? 0 : k - iSizeDistribution1 + 1; // max(0, k-f_n+1)
+		const std::size_t end =
+			k < (iSizeDistribution0 - 1) ? k : iSizeDistribution0 - 1; // min(g_n - 1, k)
 		int iCount = 0;
 		double dSum = 0;
-		for (int i = start; i <= end; i++)
+		for (std::size_t i = start; i <= end; i++)
 		{
 			double weight = distribution0.vProb[i] * distribution1.vProb[k - i];
 			double mass = distribution0.vMass[i] + distribution1.vMass[k - i];
@@ -732,7 +734,7 @@ IsotopeDistribution Isotopologue::sum(const IsotopeDistribution &distribution0, 
 	int iSizeSumDistribution;
 	int i;
 	double sumProb = 0;
-	iSizeSumDistribution = sumDistribution.vMass.size();
+	iSizeSumDistribution = static_cast<int>(sumDistribution.vMass.size());
 	for (i = 0; i < iSizeSumDistribution; ++i)
 	{
 		sumProb += sumDistribution.vProb[i];
@@ -808,7 +810,7 @@ bool Isotopologue::CheckMass(vector<double> &vdMass, vector<double> &vdNaturalCo
 {
 	double dDiff = 0;
 
-	int iMassCount = vdMass.size();
+	const int iMassCount = static_cast<int>(vdMass.size());
 	if (iMassCount < 2)
 	{
 		return true;

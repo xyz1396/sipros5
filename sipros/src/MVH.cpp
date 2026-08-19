@@ -87,7 +87,7 @@ bool MVH::Preprocess(MS2Scan * Spectrum, multimap<double, double> * IntenSortedP
 	//FilterByPeakCount
 	if (!IntenSortedPeakPreData->empty()) {
 		if (((int) IntenSortedPeakPreData->size()) > ProNovoConfig::MaxPeakCount) {
-			int peakCount = IntenSortedPeakPreData->size();
+			int peakCount = static_cast<int>(IntenSortedPeakPreData->size());
 			ite = IntenSortedPeakPreData->begin();
 			while (peakCount > ProNovoConfig::MaxPeakCount) {
 				++ite;
@@ -445,7 +445,7 @@ bool MVH::CalculateSequenceIonsSIP(string & sSequence, int maxIonCharge, bool us
 				int bZ = itr->second;
 				int yZ = maxIonCharge - bZ;
 				if (fragmentTypes[FragmentType_B]) {
-					iIsotopicDistSize = vvdBionMass.at(c - 1).size();
+					iIsotopicDistSize = static_cast<int>(vvdBionMass.at(c - 1).size());
 					for (int j = 0; j < iIsotopicDistSize; ++j) {
 						if (vvdBionProb.at(c - 1).at(j) < ProbabilityCutOff) {
 							continue;
@@ -456,7 +456,7 @@ bool MVH::CalculateSequenceIonsSIP(string & sSequence, int maxIonCharge, bool us
 				}
 
 				if (fragmentTypes[FragmentType_Y]) {
-					iIsotopicDistSize = vvdYionMass.at(iLenMinus1 - c).size();
+					iIsotopicDistSize = static_cast<int>(vvdYionMass.at(iLenMinus1 - c).size());
 					for (int j = 0; j < iIsotopicDistSize; ++j) {
 						if (vvdYionProb.at(iLenMinus1 - c).at(j) < ProbabilityCutOff) {
 							continue;
@@ -471,9 +471,9 @@ bool MVH::CalculateSequenceIonsSIP(string & sSequence, int maxIonCharge, bool us
 			for (int z = 1; z < maxIonCharge; ++z) {
 				// b-ion
 				if (fragmentTypes[FragmentType_B]) {
-					iIonMassSize = vvdBionMass.size();
+					iIonMassSize = static_cast<int>(vvdBionMass.size());
 					for (int i = 0; i < iIonMassSize; ++i) {
-						iIsotopicDistSize = vvdBionMass.at(i).size();
+						iIsotopicDistSize = static_cast<int>(vvdBionMass.at(i).size());
 						for (int j = 0; j < iIsotopicDistSize; ++j) {
 							if (vvdBionProb.at(i).at(j) < ProbabilityCutOff) {
 								continue;
@@ -485,9 +485,9 @@ bool MVH::CalculateSequenceIonsSIP(string & sSequence, int maxIonCharge, bool us
 				}
 				// y-ion
 				if (fragmentTypes[FragmentType_Y]) {
-					iIonMassSize = vvdYionMass.size();
+					iIonMassSize = static_cast<int>(vvdYionMass.size());
 					for (int i = 0; i < iIonMassSize; ++i) {
-						iIsotopicDistSize = vvdYionMass.at(i).size();
+						iIsotopicDistSize = static_cast<int>(vvdYionMass.at(i).size());
 						for (int j = 0; j < iIsotopicDistSize; ++j) {
 							if (vvdYionProb.at(i).at(j) < ProbabilityCutOff) {
 								continue;
@@ -502,9 +502,9 @@ bool MVH::CalculateSequenceIonsSIP(string & sSequence, int maxIonCharge, bool us
 	} else {
 		// b-ion
 		if (fragmentTypes[FragmentType_B]) {
-			iIonMassSize = vvdBionMass.size();
+			iIonMassSize = static_cast<int>(vvdBionMass.size());
 			for (int i = 0; i < iIonMassSize; ++i) {
-				iIsotopicDistSize = vvdBionMass.at(i).size();
+				iIsotopicDistSize = static_cast<int>(vvdBionMass.at(i).size());
 				for (int j = 0; j < iIsotopicDistSize; ++j) {
 					if (vvdBionProb.at(i).at(j) < ProbabilityCutOff) {
 						continue;
@@ -516,9 +516,9 @@ bool MVH::CalculateSequenceIonsSIP(string & sSequence, int maxIonCharge, bool us
 		}
 		// y-ion
 		if (fragmentTypes[FragmentType_Y]) {
-			iIonMassSize = vvdYionMass.size();
+			iIonMassSize = static_cast<int>(vvdYionMass.size());
 			for (int i = 0; i < iIonMassSize; ++i) {
-				iIsotopicDistSize = vvdYionMass.at(i).size();
+				iIsotopicDistSize = static_cast<int>(vvdYionMass.at(i).size());
 				for (int j = 0; j < iIsotopicDistSize; ++j) {
 					if (vvdYionProb.at(i).at(j) < ProbabilityCutOff) {
 						continue;

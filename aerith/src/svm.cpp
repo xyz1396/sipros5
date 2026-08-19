@@ -97,7 +97,9 @@ SvmImplementation::SvmMatrix SvmImplementation::make_matrix(
          row_index < static_cast<std::ptrdiff_t>(matrix.rows); ++row_index) {
         const auto local_row = static_cast<std::size_t>(row_index);
         const auto i = row_begin + local_row;
+        #ifndef _MSC_VER
         #pragma omp simd
+        #endif
         for (std::size_t j = 0; j < matrix.columns; ++j) {
             matrix.values[local_row * matrix.columns + j] =
                 static_cast<float>((raw(i, j) - mean[j]) / scale[j]);
@@ -110,7 +112,9 @@ double SvmImplementation::score(const SvmMatrix& matrix, std::size_t row,
                                 const std::vector<double>& weights) {
     const float* values = matrix.row(row);
     double score = weights.back();
+    #ifndef _MSC_VER
     #pragma omp simd reduction(+:score)
+    #endif
     for (std::size_t j = 0; j < matrix.columns; ++j) {
         score += static_cast<double>(values[j]) * weights[j];
     }
@@ -227,7 +231,9 @@ std::vector<double> SvmImplementation::fit_svm(
         diagonal[i] = 1.0 / cost;
         const float* values = matrix.row(selected[i]);
         double norm = 1.0; // regularized intercept feature
+        #ifndef _MSC_VER
         #pragma omp simd reduction(+:norm)
+        #endif
         for (std::size_t j = 0; j < matrix.columns; ++j) {
             norm += static_cast<double>(values[j]) * values[j];
         }
@@ -272,7 +278,9 @@ std::vector<double> SvmImplementation::fit_svm(
                 alpha[i] = std::max(0.0, old - gradient / quadratic[i]);
                 const double update = (alpha[i] - old) * label;
                 const float* values = matrix.row(selected[i]);
+                #ifndef _MSC_VER
                 #pragma omp simd
+                #endif
                 for (std::size_t j = 0; j < matrix.columns; ++j) {
                     weights[j] += update * values[j];
                 }

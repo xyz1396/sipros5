@@ -41,13 +41,15 @@ void Peptide::calculateExpectedFragmentsSIP(const string &sNewPeptide)
 	{
 		// Find the index of the maximum value in vvdYionProb[i]
 		auto maxElement = std::max_element(vvdYionProb[i].begin(), vvdYionProb[i].end());
-		int maxIndex = std::distance(vvdYionProb[i].begin(), maxElement);
+		const auto maxIndex = static_cast<std::size_t>(
+			std::distance(vvdYionProb[i].begin(), maxElement));
 		vdYionMasses.push_back(vvdYionMass[i][maxIndex]);
 	}
 	for (size_t i = 0; i < vvdBionProb.size(); i++)
 	{
 		auto maxElement = std::max_element(vvdBionProb[i].begin(), vvdBionProb[i].end());
-		int maxIndex = std::distance(vvdBionProb[i].begin(), maxElement);
+		const auto maxIndex = static_cast<std::size_t>(
+			std::distance(vvdBionProb[i].begin(), maxElement));
 		vdBionMasses.push_back(vvdBionMass[i][maxIndex]);
 	}
 }
@@ -94,8 +96,8 @@ void Peptide::calculateExpectedFragments(const string & sNewPeptide, const map<c
 		}
 	dMass = dMass + ProNovoConfig::getTerminusMassC() + ProNovoConfig::getTerminusMassN();
 	vdBionMasses.pop_back();
-	for (i = vdBionMasses.size() - 1; i >= 0; --i)
-		vdYionMasses.push_back(dMass - vdBionMasses[i]);
+	for (std::size_t index = vdBionMasses.size(); index-- > 0;)
+		vdYionMasses.push_back(dMass - vdBionMasses[index]);
 }
 
 void Peptide::calculateIsotope(const string & sNewPeptide) {
@@ -212,7 +214,7 @@ void Peptide::calculateExpectedFragments(const string & sNewPeptide, const map<c
 	}
 	dMass = dMass + ProNovoConfig::getTerminusMassC() + ProNovoConfig::getTerminusMassN();
 	pvdBionMass->pop_back();
-	for (i = pvdBionMass->size() - 1; i >= 0; --i) {
-		pvdYionMass->push_back(dMass - (*pvdBionMass)[i]);
+	for (std::size_t index = pvdBionMass->size(); index-- > 0;) {
+		pvdYionMass->push_back(dMass - (*pvdBionMass)[index]);
 	}
 }

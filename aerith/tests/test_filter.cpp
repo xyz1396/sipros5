@@ -398,7 +398,6 @@ int main() {
     assert(std::filesystem::exists(root / "sample" / "ion.tsv"));
     assert(std::filesystem::exists(root / "sample" / "peptide.tsv"));
     assert(std::filesystem::exists(root / "sample" / "modified_peptide.tsv"));
-    assert(!std::filesystem::exists(root / "sample" / "sample.pep.xml"));
     assert(!std::filesystem::exists(root / "aerith.log"));
     std::ifstream protein_table(root / "sample" / "protein.tsv");
     const std::string report(

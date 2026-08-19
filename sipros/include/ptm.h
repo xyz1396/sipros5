@@ -22,11 +22,11 @@ public:
   PTM_List() {}
   ~PTM_List() {}
 
-  char residue(int n) { return _residue[n]; }
-  double mass_shift(int n) { return _mass_shift[n]; }
-  string symbol(int n) { return _symbol[n]; }
+  char residue(size_t n) const { return _residue[n]; }
+  double mass_shift(size_t n) const { return _mass_shift[n]; }
+  string symbol(size_t n) const { return _symbol[n]; }
 
-  int size() { return _residue.size(); }
+  size_t size() const { return _residue.size(); }
 
   bool populateFromEnabledPtms();
   

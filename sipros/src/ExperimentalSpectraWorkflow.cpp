@@ -34,13 +34,16 @@
 #include "RaxportHdf5Reader.h"
 #include "spectraindex.h"
 #include "ms2scan.h"
+#include "performancelog.h"
 
 #if !defined(_WIN32)
 #include <cerrno>
 #include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
 #endif
 
 namespace fs = std::filesystem;
@@ -49,10 +52,12 @@ namespace
 {
 constexpr int kSpectraHdf5FormatVersion = 2;
 
+#if !defined(_WIN32)
 double timevalSeconds(const timeval &tv)
 {
 	return static_cast<double>(tv.tv_sec) + static_cast<double>(tv.tv_usec) / 1.0e6;
 }
+#endif
 
 double processTreeCpuSeconds()
 {
@@ -64,7 +69,7 @@ double processTreeCpuSeconds()
 	return timevalSeconds(self.ru_utime) + timevalSeconds(self.ru_stime) +
 		   timevalSeconds(children.ru_utime) + timevalSeconds(children.ru_stime);
 #else
-	return omp_get_wtime();
+        return sipros::processCpuSeconds();
 #endif
 }
 
@@ -3177,13 +3182,12 @@ bool runOutputJobs(std::vector<OutputFileJob> &outputJobs,
 								 sipAtom, targetSipIsotopeIndex, effectiveThreads, processingStats);
 #else
 	std::vector<OutputJobStats> jobStats(outputJobs.size());
-#pragma omp parallel for schedule(dynamic)
-	for (int i = 0; i < static_cast<int>(outputJobs.size()); ++i)
+	for (size_t i = 0; i < outputJobs.size(); ++i)
 	{
-		generateAndWriteOutputFileJob(outputJobs[static_cast<size_t>(i)], rows, baselineOk,
+		generateAndWriteOutputFileJob(outputJobs[i], rows, baselineOk,
 									  matchedEnvelopeSets, decoyPeptides, decoyAddedResidues,
 									  pristineIso, args, sipAtom, targetSipIsotopeIndex,
-									  1, jobStats[static_cast<size_t>(i)]);
+									  effectiveThreads, jobStats[i]);
 	}
 	for (const OutputJobStats &stats : jobStats)
 	{
@@ -3400,7 +3404,8 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 		{
 			timing.run("Generate Decoy", "generate decoy peptides", rows.size(), "rows", [&]()
 			{
-#pragma omp parallel for schedule(dynamic) reduction(+ : generatedCount)
+				size_t generatedInRun = 0;
+#pragma omp parallel for schedule(dynamic) reduction(+ : generatedInRun)
 				for (int i = 0; i < static_cast<int>(rows.size()); ++i)
 				{
 					const size_t rowIndex = static_cast<size_t>(i);
@@ -3414,13 +3419,14 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 											 addedResidue))
 					{
 						decoyAddedResidues[rowIndex] = addedResidue ? 1 : 0;
-						++generatedCount;
+						++generatedInRun;
 					}
 					else
 					{
 						++processingStats.decoyCollision;
 					}
 				}
+				generatedCount += generatedInRun;
 			});
 		}
 		decoyPeptidesGenerated = generatedCount;

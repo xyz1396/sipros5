@@ -7,6 +7,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(MSVC)
+  # CMake injects /W3 into its MSVC defaults. Aerith selects /W4 below, so
+  # remove the inherited level in this directory instead of asking cl.exe to
+  # override it for every translation unit.
+  string(REGEX REPLACE "(^| )[/-]W[0-4]( |$)" " "
+    CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+endif()
+
 add_library(aerith_filter
   src/filter.cpp
   src/isotope.cpp
@@ -97,7 +105,7 @@ if(AERITH_ENABLE_TORCH)
       find_path(AERITH_NVTX3_INCLUDE_DIR
         NAMES nvtx3/nvToolsExt.h
         HINTS "$ENV{CONDA_PREFIX}/include")
-      if(NOT AERITH_NVTX3_INCLUDE_DIR)
+      if(NOT AERITH_NVTX3_INCLUDE_DIR AND AERITH_ENABLE_CUDA)
         find_program(AERITH_NVCC_EXECUTABLE NAMES nvcc)
         if(AERITH_NVCC_EXECUTABLE)
           get_filename_component(AERITH_CUDA_BIN_DIR
@@ -172,6 +180,10 @@ if(Torch_FOUND)
   endif()
   if(TORCH_CXX_FLAGS)
     separate_arguments(AERITH_TORCH_CXX_FLAGS NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
+    if(MSVC)
+      # Aerith owns its warning level; do not let Torch's /W3 conflict with /W4.
+      list(FILTER AERITH_TORCH_CXX_FLAGS EXCLUDE REGEX "^/W[0-4]$")
+    endif()
     target_compile_options(aerith_filter PRIVATE ${AERITH_TORCH_CXX_FLAGS})
   endif()
 elseif(AERITH_ENABLE_TORCH)
@@ -180,7 +192,15 @@ else()
   message(STATUS "LibTorch not found: Aerith will build without predicted-spectrum or predicted-RT features")
 endif()
 if(MSVC)
-  target_compile_options(aerith_filter PRIVATE /W4 /O2)
+  target_compile_definitions(aerith_filter PRIVATE _CRT_SECURE_NO_WARNINGS)
+  target_compile_options(aerith_filter PRIVATE
+    /W4 /O2 /utf-8 /external:anglebrackets /external:W0)
+  # These translation units instantiate PyTorch templates that emit narrowing
+  # and unreachable-code diagnostics from MSVC/STL internals. Keep the same
+  # warnings enabled for Aerith's own non-template code.
+  set_source_files_properties(
+    src/predicted_rt.cpp src/spectrum_entropy.cpp
+    PROPERTIES COMPILE_OPTIONS "/wd4267;/wd4702")
 else()
   target_compile_options(aerith_filter PRIVATE -Wall -Wextra -Wpedantic -O3 -ftree-vectorize)
 endif()

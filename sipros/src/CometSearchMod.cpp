@@ -37,16 +37,17 @@ bool CometSearchMod::Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, d
 	int y;
 	// struct msdata pTmpSpData[NUM_SP_IONS];
 	struct PreprocessStruct pPre;
-	double dInverseBinWidth = 0, iMinus17 = 0, iMinus18 = 0; // dFragmentBinSize = 0;
+	double dInverseBinWidth = 0; // dFragmentBinSize = 0;
+	int iMinus17 = 0, iMinus18 = 0;
 	//mstSpectrum->isMS2HighRes = false;
 	if (mstSpectrum->isMS2HighRes) {
 		dInverseBinWidth = ProNovoConfig::dHighResInverseBinWidth;
-		iMinus17 = ProNovoConfig::precalcMasses.iMinus17HighRes;
-		iMinus18 = ProNovoConfig::precalcMasses.iMinus18HighRes;
+		iMinus17 = static_cast<int>(ProNovoConfig::precalcMasses.iMinus17HighRes);
+		iMinus18 = static_cast<int>(ProNovoConfig::precalcMasses.iMinus18HighRes);
 	} else {
 		dInverseBinWidth = ProNovoConfig::dLowResInverseBinWidth;
-		iMinus17 = ProNovoConfig::precalcMasses.iMinus17LowRes;
-		iMinus18 = ProNovoConfig::precalcMasses.iMinus18LowRes;
+		iMinus17 = static_cast<int>(ProNovoConfig::precalcMasses.iMinus17LowRes);
+		iMinus18 = static_cast<int>(ProNovoConfig::precalcMasses.iMinus18LowRes);
 	}
 	pPre.iHighestIon = 0;
 	pPre.dHighestIntensity = 0;
@@ -111,12 +112,11 @@ bool CometSearchMod::Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, d
 	try {
 		pScoring->pfFastXcorrData = new float[pScoring->_spectrumInfoInternal.iArraySize]();
 	} catch (std::bad_alloc& ba) {
-		char szErrorMsg[256];
-		sprintf(szErrorMsg, " Error - new(pfFastXcorrData[%d]). bad_alloc: %s.\n", pScoring->_spectrumInfoInternal.iArraySize, ba.what());
-		sprintf(szErrorMsg + strlen(szErrorMsg), "Comet ran out of memory. Look into \"spectrum_batch_size\"\n");
-		sprintf(szErrorMsg + strlen(szErrorMsg), "parameters to address mitigate memory use.\n");
-		string strErrorMsg(szErrorMsg);
-		logerr(szErrorMsg);
+		const string strErrorMsg = " Error - new(pfFastXcorrData[" +
+			to_string(pScoring->_spectrumInfoInternal.iArraySize) +
+			"]). bad_alloc: " + ba.what() +
+			".\nComet ran out of memory. Adjust spectrum_batch_size to mitigate memory use.\n";
+		logerr(strErrorMsg.c_str());
 		return false;
 	}
 
@@ -126,12 +126,11 @@ bool CometSearchMod::Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, d
 		try {
 			pScoring->pfFastXcorrDataNL = new float[pScoring->_spectrumInfoInternal.iArraySize]();
 		} catch (std::bad_alloc& ba) {
-			char szErrorMsg[256];
-			sprintf(szErrorMsg, " Error - new(pfFastXcorrDataNL[%d]). bad_alloc: %s.\n", pScoring->_spectrumInfoInternal.iArraySize, ba.what());
-			sprintf(szErrorMsg + strlen(szErrorMsg), "Comet ran out of memory. Look into \"spectrum_batch_size\"\n");
-			sprintf(szErrorMsg + strlen(szErrorMsg), "parameters to address mitigate memory use.\n");
-			string strErrorMsg(szErrorMsg);
-			logerr(szErrorMsg);
+			const string strErrorMsg = " Error - new(pfFastXcorrDataNL[" +
+				to_string(pScoring->_spectrumInfoInternal.iArraySize) +
+				"]). bad_alloc: " + ba.what() +
+				".\nComet ran out of memory. Adjust spectrum_batch_size to mitigate memory use.\n";
+			logerr(strErrorMsg.c_str());
 			return false;
 		}
 	}
@@ -223,12 +222,10 @@ bool CometSearchMod::Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, d
 		try {
 			pScoring->ppfSparseFastXcorrDataNL = new float*[pScoring->iFastXcorrDataNL]();
 		} catch (std::bad_alloc& ba) {
-			char szErrorMsg[256];
-			sprintf(szErrorMsg, " Error - new(pScoring->ppfSparseFastXcorrDataNL[%d]). bad_alloc: %s.", pScoring->iFastXcorrDataNL, ba.what());
-			sprintf(szErrorMsg + strlen(szErrorMsg), "Comet ran out of memory. Look into \"spectrum_batch_size\"\n");
-			sprintf(szErrorMsg + strlen(szErrorMsg), "parameters to address mitigate memory use.\n");
-			string strErrorMsg(szErrorMsg);
-			logerr(szErrorMsg);
+			const string strErrorMsg = " Error - new(pScoring->ppfSparseFastXcorrDataNL[" +
+				to_string(pScoring->iFastXcorrDataNL) + "]). bad_alloc: " + ba.what() +
+				".\nComet ran out of memory. Adjust spectrum_batch_size to mitigate memory use.\n";
+			logerr(strErrorMsg.c_str());
 			return false;
 		}
 		for (i = 0; i < pScoring->iFastXcorrDataNL; i++) {
@@ -247,13 +244,11 @@ bool CometSearchMod::Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, d
 					try {
 						pScoring->ppfSparseFastXcorrDataNL[x] = new float[SPARSE_MATRIX_SIZE]();
 					} catch (std::bad_alloc& ba) {
-						char szErrorMsg[256];
-						sprintf(szErrorMsg, " Error - new(pScoring->ppfSparseFastXcorrDataNL[%d][%d]). bad_alloc: %s.\n", x,
-						SPARSE_MATRIX_SIZE, ba.what());
-						sprintf(szErrorMsg + strlen(szErrorMsg), "Comet ran out of memory. Look into \"spectrum_batch_size\"\n");
-						sprintf(szErrorMsg + strlen(szErrorMsg), "parameters to address mitigate memory use.\n");
-						string strErrorMsg(szErrorMsg);
-						logerr(szErrorMsg);
+						const string strErrorMsg = " Error - new(pScoring->ppfSparseFastXcorrDataNL[" +
+							to_string(x) + "][" + to_string(SPARSE_MATRIX_SIZE) +
+							"]). bad_alloc: " + ba.what() +
+							".\nComet ran out of memory. Adjust spectrum_batch_size to mitigate memory use.\n";
+						logerr(strErrorMsg.c_str());
 						return false;
 					}
 					for (y = 0; y < SPARSE_MATRIX_SIZE; y++) {
@@ -281,12 +276,10 @@ bool CometSearchMod::Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, d
 	try {
 		pScoring->ppfSparseFastXcorrData = new float*[pScoring->iFastXcorrData]();
 	} catch (std::bad_alloc& ba) {
-		char szErrorMsg[256];
-		sprintf(szErrorMsg, " Error - new(pScoring->ppfSparseFastXcorrData[%d]). bad_alloc: %s.\n", pScoring->iFastXcorrData, ba.what());
-		sprintf(szErrorMsg + strlen(szErrorMsg), "Comet ran out of memory. Look into \"spectrum_batch_size\"\n");
-		sprintf(szErrorMsg + strlen(szErrorMsg), "parameters to address mitigate memory use.\n");
-		string strErrorMsg(szErrorMsg);
-		logerr(szErrorMsg);
+		const string strErrorMsg = " Error - new(pScoring->ppfSparseFastXcorrData[" +
+			to_string(pScoring->iFastXcorrData) + "]). bad_alloc: " + ba.what() +
+			".\nComet ran out of memory. Adjust spectrum_batch_size to mitigate memory use.\n";
+		logerr(strErrorMsg.c_str());
 		return false;
 	}
 	for (i = 0; i < pScoring->iFastXcorrData; i++) {
@@ -305,13 +298,11 @@ bool CometSearchMod::Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, d
 				try {
 					pScoring->ppfSparseFastXcorrData[x] = new float[SPARSE_MATRIX_SIZE]();
 				} catch (std::bad_alloc& ba) {
-					char szErrorMsg[256];
-					sprintf(szErrorMsg, " Error - new(pScoring->ppfSparseFastXcorrData[%d][%d]). bad_alloc: %s.\n", x,
-					SPARSE_MATRIX_SIZE, ba.what());
-					sprintf(szErrorMsg + strlen(szErrorMsg), "Comet ran out of memory. Look into \"spectrum_batch_size\"\n");
-					sprintf(szErrorMsg + strlen(szErrorMsg), "parameters to address mitigate memory use.\n");
-					string strErrorMsg(szErrorMsg);
-					logerr(szErrorMsg);
+					const string strErrorMsg = " Error - new(pScoring->ppfSparseFastXcorrData[" +
+						to_string(x) + "][" + to_string(SPARSE_MATRIX_SIZE) +
+						"]). bad_alloc: " + ba.what() +
+						".\nComet ran out of memory. Adjust spectrum_batch_size to mitigate memory use.\n";
+					logerr(strErrorMsg.c_str());
 					return false;
 				}
 				for (y = 0; y < SPARSE_MATRIX_SIZE; y++)
@@ -423,7 +414,9 @@ void CometSearchMod::MakeCorrData(double *pdTmpRawData, double *pdTmpCorrelation
 		const int windowBegin = i * iWindowSize;
 		const int windowEnd = std::min(windowBegin + iWindowSize, arraySize);
 
+#ifndef _MSC_VER
 #pragma omp simd reduction(max : dMaxWindowInten)
+#endif
 		for (int iBin = windowBegin; iBin < windowEnd; ++iBin) {
 			if (pdTmpRawData[iBin] > dMaxWindowInten) {
 				dMaxWindowInten = pdTmpRawData[iBin];
@@ -435,7 +428,9 @@ void CometSearchMod::MakeCorrData(double *pdTmpRawData, double *pdTmpCorrelation
 			dTmp2 = 0.05 * pPre->dHighestIntensity;
 
 
+#ifndef _MSC_VER
 #pragma omp simd
+#endif
 			for (int iBin = windowBegin; iBin < windowEnd; ++iBin) {
 				if (pdTmpRawData[iBin] > dTmp2) {
 					pdTmpCorrelationData[iBin] = pdTmpRawData[iBin] * dTmp1;
@@ -665,7 +660,7 @@ bool CometSearchMod::ScorePeptides(string * currentPeptide, bool *pbDuplFragment
 			iPeptideLength = iPeptideLength + 1;
 		}
 	}
-	int iLenMinus1 = iPeptideLength - 1;
+	const int iLenMinus1 = static_cast<int>(iPeptideLength) - 1;
 	//seg debug b
 	if (iLenMinus1 >= iMAX_PEPTIDE_LEN) {
 		cout << iLenMinus1 << endl;
@@ -1071,9 +1066,9 @@ void CometSearchMod::BinPeptideIonsSIPNoCancelOut(
 	double dFragmentIonMassZ = 0;
 	for (ctCharge = 1; ctCharge <= iMaxFragCharge; ctCharge++) {
 		// y-ion
-		iIonMassSize = vvdYionMass.size();
+		iIonMassSize = static_cast<int>(vvdYionMass.size());
 		for (int i = 0; i < iIonMassSize; ++i) {
-			iIsotopicDistSize = vvdYionMass.at(i).size();
+			iIsotopicDistSize = static_cast<int>(vvdYionMass.at(i).size());
 			for (int j = 0; j < iIsotopicDistSize; ++j) {
 				if (vvdYionProb.at(i).at(j) < ProbabilityCutOff) {
 					continue;
@@ -1096,9 +1091,9 @@ void CometSearchMod::BinPeptideIonsSIPNoCancelOut(
 			}
 		}
 		// b-ion
-		iIonMassSize = vvdBionMass.size();
+		iIonMassSize = static_cast<int>(vvdBionMass.size());
 		for (int i = 0; i < iIonMassSize; ++i) {
-			iIsotopicDistSize = vvdBionMass.at(i).size();
+			iIsotopicDistSize = static_cast<int>(vvdBionMass.at(i).size());
 			for (int j = 0; j < iIsotopicDistSize; ++j) {
 				if (vvdBionProb.at(i).at(j) < ProbabilityCutOff) {
 					continue;
@@ -1144,7 +1139,7 @@ bool CometSearchMod::ScoreBinnedPeptideSIPNoCancelOut(
 		dXcorr = XCORR_CUTOFF;
 		return false;
 	}
-	int iBinSize = vdBin.size();
+	const int iBinSize = static_cast<int>(vdBin.size());
 	for (int i = 0; i < iBinSize; ++i) {
 		bin = vdBin.at(i);
 		if (bin < 0 || bin >= pQuery->_spectrumInfoInternal.iArraySize)
@@ -1243,7 +1238,8 @@ bool CometSearchMod::CalculateSP(double & fScoreSp, double* _pdAAforward, double
 					int iFragmentIonMass = BINX(dFragmentIonMass, dInverseBinWidth, dOneMinusBinOffset);
 					float fSpScore;
 
-					fSpScore = FindSpScore(mstSpectrum->pQuery, iFragmentIonMass);
+					fSpScore = static_cast<float>(
+						FindSpScore(mstSpectrum->pQuery, iFragmentIonMass));
 
 					if (fSpScore > FLOAT_ZERO) {
 						iMatchedFragmentIonCt++;

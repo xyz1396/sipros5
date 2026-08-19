@@ -26,6 +26,8 @@ struct PerformanceTiming
 	}
 };
 
+double processCpuSeconds();
+
 inline PerformanceTiming &operator+=(PerformanceTiming &left,
 										 const PerformanceTiming &right)
 {
@@ -38,29 +40,25 @@ class PerformanceTimer
 {
 public:
 	PerformanceTimer()
-		: wallStart_(omp_get_wtime()), cpuStart_(std::clock())
+		: wallStart_(omp_get_wtime()), cpuStart_(processCpuSeconds())
 	{
 	}
 
 	PerformanceTiming elapsed() const
 	{
-		const std::clock_t cpuEnd = std::clock();
+		const double cpuEnd = processCpuSeconds();
 		PerformanceTiming result;
 		result.wallSeconds = std::max(0.0, omp_get_wtime() - wallStart_);
-		if (cpuStart_ != static_cast<std::clock_t>(-1) &&
-			cpuEnd != static_cast<std::clock_t>(-1))
+		if (cpuStart_ >= 0.0 && cpuEnd >= 0.0)
 		{
-			result.cpuSeconds = std::max(
-				0.0,
-				static_cast<double>(cpuEnd - cpuStart_) /
-					static_cast<double>(CLOCKS_PER_SEC));
+			result.cpuSeconds = std::max(0.0, cpuEnd - cpuStart_);
 		}
 		return result;
 	}
 
 private:
 	double wallStart_ = 0.0;
-	std::clock_t cpuStart_ = 0;
+	double cpuStart_ = 0.0;
 };
 
 inline std::string formatPerformanceSeconds(double seconds)

@@ -348,7 +348,7 @@ pair<int, int> MS2ScanVector::GetRangeFromMass(double lb, double ub)
 // lb and ub are lower and upper bounds of acceptable parent mass values
 {
 	pair<int, int> p;
-	int low = 0, high = vpPrecursorMasses.size() - 1, mid;
+	int low = 0, high = static_cast<int>(vpPrecursorMasses.size()) - 1, mid;
 	double target;
 	target = (lb + ub) / 2.0;
 	// double lb, ub;  // lower and upper bounds on acceptable parent mass values
@@ -509,7 +509,7 @@ void MS2ScanVector::estimateAndAssignPeptides(
 
 void MS2ScanVector::processPeptideArrayWdpSip(vector<Peptide *> &vpPeptideArray)
 {
-	int i, iPeptideArraySize, iScanSize;
+	int iPeptideArraySize, iScanSize;
 	estimateAndAssignPeptides(vpPeptideArray);
 	iPeptideArraySize = (int)vpPeptideArray.size();
 	if (iPeptideArraySize == 0)
@@ -523,10 +523,10 @@ void MS2ScanVector::processPeptideArrayWdpSip(vector<Peptide *> &vpPeptideArray)
 	//	  <<vpPeptideArray.at(i)->getPeptideMass()<<endl;
 
 	// cout<<"calculating fragments of "<<vpPeptideArray.size()<<"  peptides"<<endl;
-#pragma omp parallel for shared(vpPeptideArray) private(i) \
+#pragma omp parallel for shared(vpPeptideArray) \
 	schedule(guided)
 
-	for (i = 0; i < iPeptideArraySize; i++)
+	for (int i = 0; i < iPeptideArraySize; i++)
 		vpPeptideArray[i]->preprocessing(vpAllMS2Scans.at(0)->isMS2HighRes, mapResidueMass);
 	// vpPeptideArray[i]->calculateExpectedFragments(mapResidueMass);
 
@@ -536,11 +536,11 @@ void MS2ScanVector::processPeptideArrayWdpSip(vector<Peptide *> &vpPeptideArray)
 	iScanSize = (int)vpAllMS2Scans.size();
 #pragma omp parallel for schedule(guided)
 
-	for (i = 0; i < iScanSize; i++)
+	for (int i = 0; i < iScanSize; i++)
 		vpAllMS2Scans[i]->scorePeptides();
 
 	// free memory of all peptide objects
-	for (i = 0; i < (int)vpPeptideArray.size(); i++)
+	for (int i = 0; i < static_cast<int>(vpPeptideArray.size()); i++)
 		delete vpPeptideArray[i];
 
 	// empty peptide array

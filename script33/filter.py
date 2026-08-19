@@ -1,8 +1,7 @@
 from logging import Logger
 import os
-import shlex
 
-from command_runner import run_logged_command
+from command_runner import join_command, run_logged_command
 from thread_allocation import (
     available_cpu_count,
     effective_thread_count,
@@ -75,7 +74,7 @@ class filter:
                 "Native negative-control filtering requires protein assembly"
             )
 
-    def command(self) -> str:
+    def command_arguments(self) -> list[str]:
         arguments = [
             self.aerithPath,
             "--decoy-prefix", self.decoyPrefix,
@@ -129,9 +128,12 @@ class filter:
             ])
             if self.spectraPaths:
                 arguments.extend(["--spectra", self.spectraPaths[index]])
-        return shlex.join(arguments)
+        return arguments
 
-    def run_command(self, command: str) -> None:
+    def command(self) -> str:
+        return join_command(self.command_arguments())
+
+    def run_command(self, command: list[str]) -> None:
         environment = thread_env_updates(self.threadNumber)
         environment["MKL_NUM_THREADS"] = str(self.threadNumber)
         run_logged_command(
@@ -168,7 +170,8 @@ class filter:
         if not self.baseNames:
             self.logger.info("Aerith: no jobs")
             return
-        command = self.command()
+        arguments = self.command_arguments()
+        command = join_command(arguments)
         if self.assembleProteins and self.spectraPaths:
             operation = (
                 "filtering, chromatographic quantification, and "
@@ -191,6 +194,6 @@ class filter:
         self.logger.info(command)
         if self.dryrun:
             return
-        self.run_command(command)
+        self.run_command(arguments)
         if self.assembleProteins:
             self.postprocess_fasta_results()

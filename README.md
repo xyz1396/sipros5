@@ -259,8 +259,8 @@ precursor when the candidate list is empty.
   `combined_protein.tsv` contain cross-sample reports with aligned
   sample spectral-count and intensity columns. `combined_protein.tsv` also
   reports sequence coverage from the union of observed peptides. Aerith
-  performs this directly from its in-memory scored PSMs, without pepXML,
-  ProteinProphet, Philosopher workspaces, or `.meta` intermediates.
+  performs this directly from its in-memory scored PSMs, without external
+  workspaces or `.meta` intermediates.
 - `combined_protein_with_PSM.tsv` is also written natively by Aerith. For each
   sample it contains aligned comma-separated PSM IDs, peptide sequences, MS1
   and MS2 isotopic abundances, and chromatographically quantified SIP
@@ -295,8 +295,8 @@ sample-specific SVM, Aerith warns, writes zero accepted PSMs for that sample,
 and continues filtering the remaining samples.
 
 Aerith converts `log10_precursorIntensities` back to linear PSM intensity and
-uses Philosopher's top-three peptide-ion rule for total, unique, and razor
-protein intensity in its standard protein reports.
+uses a top-three peptide-ion rule for total, unique, and razor protein
+intensity in its standard protein reports.
 
 ### Native IonQuant-style chromatographic quantification
 
@@ -313,8 +313,8 @@ apex-1/apex/apex+1 values across the traced envelope. Aerith reports the
 feature apex, apex scan,
 start/end retention times, FWHM, traced scans, and intensity in `psm.tsv`,
 `ion.tsv`, and `combined_ion.tsv`. This runs in memory between Aerith filtering
-and native protein assembly; it does not create pepXML or another temporary
-quantification table.
+and native protein assembly; it does not create a temporary quantification
+table.
 
 Aerith also performs IonQuant-style match between runs. It ranks up to ten
 donor runs using shared-ion retention-time and intensity Spearman

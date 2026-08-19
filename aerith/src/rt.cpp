@@ -390,7 +390,8 @@ RtImplementation::enhanced_rt_embedding(const Psm& psm) {
     std::copy(base.begin(), base.end(), values.begin());
     const auto parsed = parse_peptide(psm.peptide);
     const auto& sequence = parsed.sequence;
-    const double length = std::max<std::size_t>(1, sequence.size());
+    const double length = static_cast<double>(
+        std::max<std::size_t>(1, sequence.size()));
     constexpr std::array<double, kAminoAcids> hydrophobicity{
         1.8, 2.5, -3.5, -3.5, 2.8, -0.4, -3.2, 4.5, -3.9, 3.8,
         1.9, -3.5, -1.6, -3.5, -4.5, -0.8, -0.7, 4.2, -0.9, -1.3};
@@ -693,7 +694,9 @@ RtResult RtImplementation::fit_nested_rt(
                     : model.inner_beta[static_cast<std::size_t>(peptide_folds[i])];
                 const auto& x = embeddings[i];
                 double raw_prediction = 0.0;
+                #ifndef _MSC_VER
                 #pragma omp simd reduction(+:raw_prediction)
+                #endif
                 for (std::size_t feature = 0; feature < Dimensions; ++feature)
                     raw_prediction += static_cast<double>(x[feature]) * beta[feature];
                 const double observed = aligned_retention(psm, model.alignment);

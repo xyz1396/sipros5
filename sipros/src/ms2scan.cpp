@@ -161,7 +161,7 @@ void MS2Scan::scoreWeightSum(const tuple<double, int, Peptide *> currentMassChar
 
 	if (measuredCharge >= 3)
 		WeightCompare(currentPeptide->getPeptideSeq(), vbFragmentZ2);
-	iNumFragments = currentPeptide->vdYionMasses.size();
+	iNumFragments = static_cast<int>(currentPeptide->vdYionMasses.size());
 	for (n = 0; n < iNumFragments; ++n)
 	{
 		dYweight = 0;
@@ -363,7 +363,7 @@ void MS2Scan::scoreRankSumHighMS2(const tuple<double, int, Peptide *> currentMas
 	vector<bool> vbMatch;
 	double dUvalue;
 
-	iNumFragments = currentPeptide->vdYionMasses.size();
+	iNumFragments = static_cast<int>(currentPeptide->vdYionMasses.size());
 
 	iPeakNum = (int)vdpreprocessedMZ.size();
 	iUpperBound = iPeakNum - 1;
@@ -467,7 +467,7 @@ void MS2Scan::scoreRankSum(const tuple<double, int, Peptide *> currentMassCharge
 	vector<bool> vbMatch;
 	double dUvalue;
 
-	iNumFragments = currentPeptide->vdYionMasses.size();
+	iNumFragments = static_cast<int>(currentPeptide->vdYionMasses.size());
 
 	iPeakNum = (int)vdpreprocessedMZ.size();
 	iUpperBound = iPeakNum - 1;
@@ -1174,7 +1174,7 @@ bool MS2Scan::findProductIon(const vector<double> &vdIonMass, const vector<doubl
 	double dMostAbundantMZError = dMostAbundantObservedMZ - dMaxIntExpectedMZ;
 
 	// compute expected MZ and intensity for this product ion
-	int iIsotopicEnvelopeSize = vdIonProb.size();
+	const int iIsotopicEnvelopeSize = static_cast<int>(vdIonProb.size());
 	vector<bool> vbObserved(iIsotopicEnvelopeSize, false);
 	vector<double> vdObservedMZ(iIsotopicEnvelopeSize, 0);
 	vector<double> vdObservedRelativeInt(iIsotopicEnvelopeSize, 0);
@@ -1547,7 +1547,7 @@ bool MS2Scan::binarySearch(const double &dTarget, const vector<double> &vdList, 
 {
 	viIndex4Found.clear();
 	int low = 0;
-	int high = vdList.size() - 1;
+	int high = static_cast<int>(vdList.size()) - 1;
 	int mid;
 	while (low <= high)
 	{
@@ -1726,7 +1726,7 @@ double MS2Scan::scoreWeightSum(string *currentPeptide, int measuredCharge,
 	{
 		WeightCompare((*currentPeptide), vbFragmentZ2);
 	}
-	iNumFragments = pvdYionMasses->size();
+	iNumFragments = static_cast<int>(pvdYionMasses->size());
 	for (n = 0; n < iNumFragments; ++n)
 	{
 		dYweight = 0;
@@ -2074,7 +2074,8 @@ void PeptideUnit::setIonMassProb(const Peptide *currentPeptide, int topN)
 				auto it = std::find(ionProb[i].begin(), ionProb[i].end(), prob);
 				if (it != ionProb[i].end())
 				{
-					int index = std::distance(ionProb[i].begin(), it);
+					const auto index = static_cast<std::size_t>(
+						std::distance(ionProb[i].begin(), it));
 					topNionMass[i].push_back(ionMass[i][index]);
 					topNionProb[i].push_back(prob);
 				}
@@ -2102,14 +2103,15 @@ void PeptideUnit::setIonMassProb(const Peptide *currentPeptide, int topN)
 	vvdBionProb = topNvvdBionProb;
 }
 
-char PeakList::iNULL = 255;
+// Peak classes are non-negative; -1 is the out-of-band "not found" sentinel.
+char PeakList::iNULL = static_cast<char>(-1);
 
 PeakList::PeakList(map<double, char> *_peakData)
 {
 	pMassHub.clear();
 	pPeaks.clear();
 	pClasses.clear();
-	iPeakSize = _peakData->size();
+	iPeakSize = static_cast<int>(_peakData->size());
 	if (iPeakSize == 0)
 	{
 		return;
@@ -2138,7 +2140,7 @@ PeakList::PeakList(map<double, char> *_peakData)
 	int iStart, iEnd;
 	for (j = 0; j < iPeakSize;)
 	{
-		iMass = pPeaks.at(j);
+		iMass = static_cast<int>(pPeaks.at(j));
 		iStart = j;
 		iEnd = j + 1;
 		for (k = j + 1; k < iPeakSize; ++k)

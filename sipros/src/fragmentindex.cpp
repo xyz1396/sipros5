@@ -1,4 +1,7 @@
 #include "fragmentindex.h"
+#if defined(_WIN32)
+#include "windows_posix_compat.h"
+#endif
 
 #include "MVH.h"
 #include "PeptideIsotopeCalculator.h"
@@ -23,6 +26,7 @@
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <type_traits>
 #include <unordered_set>
 
@@ -40,6 +44,18 @@ namespace fs = std::filesystem;
 
 namespace sipros
 {
+
+namespace
+{
+int closeFileDescriptor(int fd)
+{
+#if defined(_WIN32)
+	return sipros_close(fd);
+#else
+	return ::close(fd);
+#endif
+}
+} // namespace
 
 namespace
 {
@@ -250,7 +266,8 @@ bool readFastaEntries(const std::string &path,
 
 std::string systemError(const std::string &prefix)
 {
-	return prefix + ": " + std::strerror(errno);
+	return prefix + ": " +
+		std::error_code(errno, std::generic_category()).message();
 }
 
 class CacheBuildLock
@@ -262,7 +279,7 @@ public:
 		if (fd_ >= 0)
 		{
 			(void)flock(fd_, LOCK_UN);
-			close(fd_);
+			closeFileDescriptor(fd_);
 		}
 #endif
 	}
@@ -282,7 +299,7 @@ public:
 		{
 			error = systemError(
 				"cannot acquire fragment-index build lock " + lockPath);
-			close(fd_);
+			closeFileDescriptor(fd_);
 			fd_ = -1;
 			return false;
 		}
@@ -427,14 +444,14 @@ FragmentIndex::~FragmentIndex()
 
 void FragmentIndex::releaseMapping()
 {
-#if defined(__unix__) || defined(__APPLE__)
+#if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
 	if (mapping_ != nullptr && mappingSize_ > 0)
 	{
 		munmap(mapping_, mappingSize_);
 	}
 	if (mappingFd_ >= 0)
 	{
-		close(mappingFd_);
+		closeFileDescriptor(mappingFd_);
 	}
 #endif
 	mapping_ = nullptr;
@@ -1390,7 +1407,7 @@ bool FragmentIndex::save(const std::string &path,
 	}
 	const fs::path temporary = output.string() + ".tmp." +
 		std::to_string(static_cast<unsigned long long>(
-#if defined(__unix__) || defined(__APPLE__)
+#if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
 			getpid()
 #else
 			0
@@ -1547,14 +1564,14 @@ bool FragmentIndex::save(const std::string &path,
 		const int syncError = errno;
 		if (temporaryFd >= 0)
 		{
-			close(temporaryFd);
+			closeFileDescriptor(temporaryFd);
 		}
 		errno = syncError;
 		error = systemError("cannot sync fragment-index cache " + temporary.string());
 		fs::remove(temporary, ec);
 		return false;
 	}
-	close(temporaryFd);
+	closeFileDescriptor(temporaryFd);
 #endif
 	fs::rename(temporary, output, ec);
 	if (ec)
@@ -1571,7 +1588,7 @@ bool FragmentIndex::save(const std::string &path,
 	if (parentFd >= 0)
 	{
 		(void)fsync(parentFd);
-		close(parentFd);
+		closeFileDescriptor(parentFd);
 	}
 #endif
 	stats_.cacheBytes = header.fileSize;
@@ -1605,7 +1622,7 @@ bool FragmentIndex::load(const std::string &path,
 	fragmentBinCount_ = 0;
 	precursorBlockCount_ = 0;
 
-#if defined(__unix__) || defined(__APPLE__)
+#if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
 	mappingFd_ = open(path.c_str(), O_RDONLY);
 	if (mappingFd_ < 0)
 	{

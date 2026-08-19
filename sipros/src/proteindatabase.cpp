@@ -92,7 +92,7 @@ void ProteinDatabase::initializePtmInfo()
 		// PTMs are added explicitly above only for biological protein termini.
 		if (sOriginalPeptide.at(j) == '[' || sOriginalPeptide.at(j) == ']')
 			continue;
-		residue_id = orderstring.find(sOriginalPeptide.at(j));
+		residue_id = static_cast<int>(orderstring.find(sOriginalPeptide.at(j)));
 		if (!(ptm_map[residue_id].empty()))
 		{
 			// cout<<residue_id<<endl;
@@ -372,19 +372,21 @@ void ProteinDatabase::Initial_PTM_Map()
 {
 	vector<pair<string, double>> ptm_elm;
 	pair<string, double> cur_elm;
-	int i, residue_id;
+	int i;
 
 	ptm_elm.clear();
 	// cout<< orderstring.length() <<endl;
 	for (i = 0; i < (int)orderstring.length(); i++) // initialize the vector
 		ptm_map.push_back(ptm_elm);
-	for (i = 0; i < ptmlist.size(); i++)
+	for (size_t ptmIndex = 0; ptmIndex < ptmlist.size(); ++ptmIndex)
 	{
 		//		cout<<orderstring<<"aa"<<endl;
 		//		cout<<ptmlist.residue(i)<<"bb"<<endl;
-		residue_id = orderstring.find(ptmlist.residue(i));
-		cur_elm = make_pair<string, double>(ptmlist.symbol(i), ptmlist.mass_shift(i));
-		ptm_map[residue_id].push_back(cur_elm);
+		const size_t residueId = orderstring.find(ptmlist.residue(ptmIndex));
+		if (residueId == string::npos)
+			continue;
+		cur_elm = make_pair<string, double>(ptmlist.symbol(ptmIndex), ptmlist.mass_shift(ptmIndex));
+		ptm_map[residueId].push_back(cur_elm);
 	}
 }
 
@@ -392,7 +394,7 @@ bool ProteinDatabase::GenerateNextComb(std::vector<int> &comb_order, const int &
 {
 	int i, j, r_num, ori_val;
 	bool re_val = false;
-	r_num = comb_order.size();
+	r_num = static_cast<int>(comb_order.size());
 	for (i = (r_num - 1); i >= 0; i--)
 		if (comb_order[i] < total_num - r_num + i)
 		{
@@ -465,7 +467,7 @@ void ProteinDatabase::setProtein()
 	for (i = 0; i < (int)(scurrentProtein.length() - 1); i++)
 		if (isCleavageSite(scurrentProtein.at(i), scurrentProtein.at(i + 1)))
 			vicleavageSite.push_back(i);
-	vicleavageSite.push_back(scurrentProtein.length() - 1);
+	vicleavageSite.push_back(static_cast<int>(scurrentProtein.length() - 1));
 
 	ibeginCleavagePos = -1;
 
@@ -1002,13 +1004,15 @@ void ProteinDatabase::subPeptide(const string &sMutatedPeptide)
 			}
 		ileftMostCleavage = vicleavageSite.at(ibeginCleavagePos + 1) - vicleavageSite.at(ibeginCleavagePos) - 1;
 		if ((imutationPos < ileftMostCleavage)) // for right peptide
-			if (isPeptideLengthGood(sMutatedPeptide.length() - imutationPos - 1))
+			if (isPeptideLengthGood(static_cast<int>(
+				sMutatedPeptide.length() - imutationPos - 1)))
 			{
 				bRightSubpeptide = true;
 				sRightSubpeptide = sMutatedPeptide.substr(imutationPos + 1);
 				cRightSubPeptidePrefix = sMutatedPeptide.at(imutationPos);
 				iRightSubPeptideBeginPos = vicleavageSite.at(ibeginCleavagePos) + imutationPos + 2;
-				iRightSubPeptideEndPos = vicleavageSite.at(ibeginCleavagePos) + sMutatedPeptide.length();
+				iRightSubPeptideEndPos = vicleavageSite.at(ibeginCleavagePos) +
+					static_cast<int>(sMutatedPeptide.length());
 			}
 	}
 }

@@ -395,9 +395,9 @@ double protein_probability(
     return static_cast<double>(1.0L - failure);
 }
 
-double proteinprophet_peptide_probability(double probability) {
-    // ProteinProphet represents its peptide-confidence histogram at the
-    // midpoint of 0.002-wide bins (0.991, 0.993, 0.995, ...).
+double binned_peptide_probability(double probability) {
+    // Represent peptide confidence at the midpoint of 0.002-wide bins
+    // (0.991, 0.993, 0.995, ...).
     const double midpoint = std::round(std::clamp(probability, 0.0, 1.0) * 500.0)
         * 0.002 - 0.001;
     return std::clamp(midpoint, 0.0, 0.999);
@@ -2549,7 +2549,7 @@ void ProteinAssembler::sequential_filter(
         auto& evidence = peptides[peptide];
         evidence.probability = std::max(
             evidence.probability,
-            proteinprophet_peptide_probability(1.0 - pep[row]));
+            binned_peptide_probability(1.0 - pep[row]));
         for (const auto& protein :
              protein_ids(data.rows[row], config.decoy_prefix)) {
             evidence.proteins.insert(protein);
@@ -2742,7 +2742,7 @@ ProteinAssemblyResult ProteinAssembler::write(
         auto& evidence = peptides[sequence];
         evidence.probability = std::max(
             evidence.probability,
-            proteinprophet_peptide_probability(1.0 - pep[row]));
+            binned_peptide_probability(1.0 - pep[row]));
         for (const auto& protein : protein_ids(data.rows[row], config.decoy_prefix)) {
             evidence.proteins.insert(protein);
             protein_peptides[protein].insert(sequence);
@@ -2758,11 +2758,10 @@ ProteinAssemblyResult ProteinAssembler::write(
     for (const auto& [protein, evidence] : protein_peptides) {
         group_weight[protein] = protein_probability(evidence, peptides);
     }
-    // Philosopher first accepts peptide weight > 0.5 (the unique case), then
-    // orders shared-peptide candidates by group weight, total peptide count,
-    // and stable sibling/accession order. ProteinProphet's EM group weight is
-    // unavailable without protXML, so use Aerith's evidence probability as
-    // the in-memory group-weight analogue and preserve the remaining order.
+    // Accept peptide weight > 0.5 first (the unique case), then order
+    // shared-peptide candidates by group weight, total peptide count, and
+    // stable sibling/accession order. Use Aerith's evidence probability as
+    // the in-memory group weight and preserve the remaining order.
     for (const auto& [peptide, evidence] : peptides) {
         if (evidence.proteins.empty()) continue;
         auto best = evidence.proteins.begin();

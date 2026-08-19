@@ -16,10 +16,14 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
-#include <unistd.h>
 #include <fcntl.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "windows_posix_compat.h"
+#else
+#include <unistd.h>
+#include <sys/mman.h>
+#endif
 #include <omp.h>
 
 namespace fs = std::filesystem;
@@ -29,6 +33,15 @@ namespace sipros
 
 namespace
 {
+int closeFileDescriptor(int fd)
+{
+#ifdef _WIN32
+	return sipros_close(fd);
+#else
+	return ::close(fd);
+#endif
+}
+
 constexpr std::array<char, 8> Magic{{'S', 'I', 'P', 'S', 'F', 'I', '0', '5'}};
 constexpr uint32_t Version = 5;
 constexpr uint32_t EndianMarker = 0x01020304U;
@@ -385,7 +398,8 @@ bool sectionFits(uint64_t offset, uint64_t count, uint64_t fileSize)
 
 std::string systemError(const std::string &prefix)
 {
-	return prefix + ": " + std::strerror(errno);
+	return prefix + ": " +
+		std::error_code(errno, std::generic_category()).message();
 }
 
 } // namespace
@@ -511,7 +525,7 @@ void SpectraIndex::close()
 	if (mapping_ != nullptr && mappingSize_ != 0)
 		::munmap(mapping_, mappingSize_);
 	if (mappingFd_ >= 0)
-		::close(mappingFd_);
+		closeFileDescriptor(mappingFd_);
 	mapping_ = nullptr;
 	mappingSize_ = 0;
 	mappingFd_ = -1;
@@ -969,7 +983,7 @@ bool SpectraIndex::write(const std::string &path,
 		::ftruncate(outputFd, static_cast<off_t>(header.fileSize)) != 0)
 	{
 		error = systemError("cannot size SIP spectra index " + temporary.string());
-		::close(outputFd);
+		closeFileDescriptor(outputFd);
 		fs::remove(temporary, ec);
 		return false;
 	}
@@ -1047,7 +1061,7 @@ bool SpectraIndex::write(const std::string &path,
 			completed += static_cast<size_t>(count);
 		}
 	});
-	const bool closeOk = ::close(outputFd) == 0;
+	const bool closeOk = closeFileDescriptor(outputFd) == 0;
 	const bool writeOk = !writeFailed.load(std::memory_order_relaxed) && closeOk;
 	if (!writeOk)
 	{
@@ -1092,7 +1106,7 @@ bool SpectraIndex::load(const std::string &path, std::string &error)
 	if (::fstat(fd, &st) != 0 || st.st_size < static_cast<off_t>(sizeof(Header)))
 	{
 		error = "SIP spectra index is truncated: " + path;
-		::close(fd);
+		closeFileDescriptor(fd);
 		return false;
 	}
 	const size_t size = static_cast<size_t>(st.st_size);
@@ -1100,7 +1114,7 @@ bool SpectraIndex::load(const std::string &path, std::string &error)
 	if (mapping == MAP_FAILED)
 	{
 		error = systemError("cannot mmap SIP spectra index " + path);
-		::close(fd);
+		closeFileDescriptor(fd);
 		return false;
 	}
 	const auto *header = static_cast<const Header *>(mapping);
@@ -1108,7 +1122,7 @@ bool SpectraIndex::load(const std::string &path, std::string &error)
 	{
 		error = "invalid SIP spectra index " + path + ": " + reason;
 		::munmap(mapping, size);
-		::close(fd);
+		closeFileDescriptor(fd);
 		return false;
 	};
 	if (std::memcmp(header->magic, Magic.data(), Magic.size()) != 0)

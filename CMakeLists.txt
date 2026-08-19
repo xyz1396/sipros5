@@ -32,17 +32,10 @@ include_directories(${SIPROS_INCLUDE_DIRS})
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
-function(sipros_compile_definitions target_name)
-  if(WIN32)
-    target_compile_definitions(${target_name} PUBLIC _NO_THERMORAW _NOSQLITE)
-  else()
-    target_compile_definitions(${target_name} PUBLIC GCC _FILE_OFFSET_BITS=64 _NOSQLITE)
-  endif()
-endfunction()
-
 function(sipros_optimization_options target_name)
   if(MSVC)
-    target_compile_options(${target_name} PUBLIC "/fp:fast" "/openmp:experimental" "/openmp:llvm" "/arch:AVX2")
+    target_compile_options(${target_name} PUBLIC
+      "/fp:fast" "/arch:AVX2" "/utf-8")
   elseif(BUILD_CONDA)
     target_compile_options(${target_name} PUBLIC -ffast-math -march=native)
   else()
@@ -54,6 +47,7 @@ add_subdirectory(sipros)
 add_subdirectory(aerith)
 
 if(MSVC)
-  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MT")
-  set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MT")
+  # Conda's HDF5 and PyTorch packages use the dynamic MSVC runtime. Mixing
+  # /MT objects with those /MD libraries causes allocator and ABI failures.
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()

@@ -36,7 +36,7 @@ public:
     // Precursor and score fields used for PIN feature extraction.
     std::vector<int> precursorScanNumbers;
     std::vector<double> isolationWindowCenterMZs;
-    std::vector<float> retentionTimes;
+    std::vector<double> retentionTimes;
     std::vector<float> MVHscores;
     std::vector<float> XcorrScores;
     std::vector<float> WDPscores;

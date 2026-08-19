@@ -23,6 +23,9 @@
 #include <memory>
 #include <stdexcept>
 #include <tuple>
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
 
 #include <omp.h>
 
@@ -42,6 +45,29 @@
 
 namespace sipros
 {
+#ifdef _MSC_VER
+unsigned populationCount64(uint64_t value)
+{
+	return static_cast<unsigned>(__popcnt64(value));
+}
+
+unsigned trailingZeroCount64(uint64_t value)
+{
+	unsigned long index = 0;
+	_BitScanForward64(&index, value);
+	return static_cast<unsigned>(index);
+}
+#else
+unsigned populationCount64(uint64_t value)
+{
+	return static_cast<unsigned>(__builtin_popcountll(value));
+}
+
+unsigned trailingZeroCount64(uint64_t value)
+{
+	return static_cast<unsigned>(__builtin_ctzll(value));
+}
+#endif
 // First-gate settings validated for the regular FASTA DDA search.
 constexpr uint32_t kDdaWindowMinMatchedFragments = 4;
 constexpr size_t kDdaWindowTopPeaks = 200;
@@ -1545,7 +1571,7 @@ size_t assignSfiCandidatesToScans(
 				static_cast<size_t>(thread) * recordWordCount + word];
 		combinedRecordBits[word] = combined;
 		recordWordOffsets[word + 1U] = static_cast<size_t>(
-			__builtin_popcountll(combined));
+			populationCount64(combined));
 	}
 	for (size_t word = 0; word < recordWordCount; ++word)
 		recordWordOffsets[word + 1U] += recordWordOffsets[word];
@@ -1557,7 +1583,7 @@ size_t assignSfiCandidatesToScans(
 		size_t output = recordWordOffsets[word];
 		while (bits != 0)
 		{
-			const unsigned bit = static_cast<unsigned>(__builtin_ctzll(bits));
+			const unsigned bit = trailingZeroCount64(bits);
 			candidateRecordIds[output++] = static_cast<uint32_t>(
 				(word << 6U) + bit);
 			bits &= bits - 1U;
@@ -2487,7 +2513,8 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 
 		auto scoreWdpBatch = [&]()
 		{
-#pragma omp parallel for schedule(guided, 32) reduction(+ : batchWdpEnvelopeFailures)
+			size_t wdpEnvelopeFailures = 0;
+#pragma omp parallel for schedule(guided, 32) reduction(+ : wdpEnvelopeFailures)
 			for (size_t recordIndex = 0;
 				 recordIndex < batchRecords.size(); ++recordIndex)
 			{
@@ -2503,7 +2530,7 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 					wdpAbundances.begin(), wdpAbundances.end(), rec.ms2Pct);
 				if (abundance == wdpAbundances.end() || *abundance != rec.ms2Pct)
 				{
-					batchWdpEnvelopeFailures += occurrenceEnd - occurrenceBegin;
+					wdpEnvelopeFailures += occurrenceEnd - occurrenceBegin;
 					continue;
 				}
 				const size_t abundanceIndex = static_cast<size_t>(
@@ -2513,7 +2540,7 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 						wdpYMass[tid], wdpYProb[tid],
 						wdpBMass[tid], wdpBProb[tid]))
 				{
-					batchWdpEnvelopeFailures += occurrenceEnd - occurrenceBegin;
+					wdpEnvelopeFailures += occurrenceEnd - occurrenceBegin;
 					continue;
 				}
 				for (size_t occurrenceIndex = occurrenceBegin;
@@ -2529,6 +2556,7 @@ int processOneHdf5(const Args &args, const std::string &scanPath,
 						&wdpBMass[tid], &wdpBProb[tid]);
 				}
 			}
+			batchWdpEnvelopeFailures += wdpEnvelopeFailures;
 		};
 		std::ostringstream wdpLabel;
 		wdpLabel << "score WDP with record reuse SFI " << (libraryIndex + 1)

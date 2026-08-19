@@ -44,12 +44,11 @@ public:
 
 	double operator[](int index) {
 		// Is the table big enough?
-		int maxIndex = m_table.size() - 1;
-		if (index > maxIndex) {
+		if (index < 0 || static_cast<size_t>(index) >= m_table.size()) {
 			cerr << "error lnFactorialTable " << endl;
 			exit(1);
 		}
-		return m_table.at(index);
+		return m_table.at(static_cast<size_t>(index));
 	}
 
 	double combination(int n, int k) const {

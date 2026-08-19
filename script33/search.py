@@ -2,9 +2,8 @@ from logging import Logger
 import os
 import concurrent.futures
 import shutil
-import shlex
 from pathlib import Path
-from command_runner import run_logged_command
+from command_runner import quote_argument, run_logged_command
 from thread_allocation import (
     MIN_SIPROS_THREADS,
     ThreadAllocation,
@@ -70,7 +69,7 @@ class search:
         self.decoyPrefix = 'DECOY_' if (self.psmTsv or self.unlabeledInput or self.spectraDir) else 'Decoy_'
 
     def q(self, value: str | Path) -> str:
-        return shlex.quote(str(value))
+        return quote_argument(value)
 
     def run_command(self, cmd: str, env: dict[str, str] | None = None,
                     threads: int | None = None):
@@ -260,7 +259,14 @@ class search:
             os.makedirs(os.path.dirname(expected), exist_ok=True)
             if not self.stageHdf5Copies:
                 if not os.path.lexists(expected) and not self.dryrun:
-                    os.symlink(os.path.realpath(hdf5_file), expected)
+                    source = os.path.realpath(hdf5_file)
+                    try:
+                        os.symlink(source, expected)
+                    except OSError:
+                        try:
+                            os.link(source, expected)
+                        except OSError:
+                            shutil.copy2(source, expected)
                 self.hdf5_paths[base] = expected
                 self.logger.info(
                     f'Reusing HDF5 input through lightweight link: {expected}'

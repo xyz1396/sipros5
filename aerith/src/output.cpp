@@ -242,7 +242,11 @@ void ResultWriter::write(
     std::vector<double> held_out_rt_residuals;
     if (has_internal_rt) {
         held_out_rt_residuals.resize(data.rows.size());
+#ifdef _MSC_VER
+        #pragma omp parallel for schedule(static)
+#else
         #pragma omp parallel for simd schedule(static)
+#endif
         for (std::ptrdiff_t row = 0;
              row < static_cast<std::ptrdiff_t>(data.rows.size()); ++row) {
             const auto i = static_cast<std::size_t>(row);

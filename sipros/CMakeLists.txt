@@ -28,13 +28,11 @@ target_include_directories(sipros_core PUBLIC
   ${HDF5_INCLUDE_DIRS}
 )
 target_link_libraries(sipros_core PUBLIC OpenMP::OpenMP_CXX ${SIPROS_HDF5_LIBRARIES})
-sipros_compile_definitions(sipros_core)
 sipros_optimization_options(sipros_core)
 
 add_library(sipros_common STATIC ${SIPROS_COMMON_SOURCE})
 target_include_directories(sipros_common PUBLIC ${SIPROS_INCLUDE_DIRS})
 target_link_libraries(sipros_common PUBLIC sipros_core)
-sipros_compile_definitions(sipros_common)
 sipros_optimization_options(sipros_common)
 
 add_library(sipros_openmp_tools STATIC ${SIPROS_WORKFLOW_SOURCES})
@@ -47,21 +45,27 @@ target_link_libraries(sipros_openmp_tools PUBLIC
   sipros_core
   ${SIPROS_HDF5_LIBRARIES}
 )
-sipros_compile_definitions(sipros_openmp_tools)
 sipros_optimization_options(sipros_openmp_tools)
 
 add_executable(sipros ${PROJECT_SOURCE_DIR}/sipros/src/omp_main.cpp)
 target_include_directories(sipros PUBLIC ${PROJECT_SOURCE_DIR}/sipros/include)
 target_link_libraries(sipros PUBLIC sipros_openmp_tools)
-sipros_compile_definitions(sipros)
 sipros_optimization_options(sipros)
+if(MSVC)
+  # MSVC's 1 MiB default is too small for FASTA cache preparation. Match the
+  # usual Linux process stack so large database searches do not terminate with
+  # STATUS_STACK_OVERFLOW before diagnostics can be emitted.
+  set_property(TARGET sipros APPEND_STRING PROPERTY LINK_FLAGS " /STACK:8388608")
+endif()
 
 if(SIPROS_BUILD_MPI)
   add_executable(siprosMPI ${PROJECT_SOURCE_DIR}/sipros/src/mpi_main.cpp)
   target_include_directories(siprosMPI PUBLIC ${PROJECT_SOURCE_DIR}/sipros/include)
   target_link_libraries(siprosMPI PUBLIC sipros_common sipros_core MPI::MPI_CXX OpenMP::OpenMP_CXX)
   target_compile_options(siprosMPI PUBLIC -ffast-math -march=native -fPIC)
-  sipros_compile_definitions(siprosMPI)
+  if(MSVC)
+    set_property(TARGET siprosMPI APPEND_STRING PROPERTY LINK_FLAGS " /STACK:8388608")
+  endif()
 endif()
 
 if(BUILD_TESTING)
@@ -70,7 +74,6 @@ if(BUILD_TESTING)
   )
   target_include_directories(builtin_config_test PUBLIC ${SIPROS_INCLUDE_DIRS})
   target_link_libraries(builtin_config_test PUBLIC sipros_core)
-  sipros_compile_definitions(builtin_config_test)
   sipros_optimization_options(builtin_config_test)
   add_test(
     NAME builtin_config
@@ -82,7 +85,6 @@ if(BUILD_TESTING)
   )
   target_include_directories(ms1_isotope_envelope_test PUBLIC ${SIPROS_INCLUDE_DIRS})
   target_link_libraries(ms1_isotope_envelope_test PUBLIC sipros_common sipros_core)
-  sipros_compile_definitions(ms1_isotope_envelope_test)
   sipros_optimization_options(ms1_isotope_envelope_test)
   add_test(
     NAME ms1_isotope_envelope
@@ -94,7 +96,6 @@ if(BUILD_TESTING)
   )
   target_include_directories(pin_writer_schema_test PUBLIC ${SIPROS_INCLUDE_DIRS})
   target_link_libraries(pin_writer_schema_test PUBLIC sipros_core)
-  sipros_compile_definitions(pin_writer_schema_test)
   sipros_optimization_options(pin_writer_schema_test)
   add_test(
     NAME pin_writer_schema
@@ -106,7 +107,6 @@ if(BUILD_TESTING)
   )
   target_include_directories(fragment_index_test PUBLIC ${SIPROS_INCLUDE_DIRS})
   target_link_libraries(fragment_index_test PUBLIC sipros_core)
-  sipros_compile_definitions(fragment_index_test)
   sipros_optimization_options(fragment_index_test)
   add_test(
     NAME fragment_index
@@ -118,7 +118,6 @@ if(BUILD_TESTING)
   )
   target_include_directories(spectra_index_test PUBLIC ${SIPROS_INCLUDE_DIRS})
   target_link_libraries(spectra_index_test PUBLIC sipros_core)
-  sipros_compile_definitions(spectra_index_test)
   sipros_optimization_options(spectra_index_test)
   add_test(
     NAME spectra_index
@@ -130,7 +129,6 @@ if(BUILD_TESTING)
   )
   target_include_directories(native_precursor_test PUBLIC ${SIPROS_INCLUDE_DIRS})
   target_link_libraries(native_precursor_test PUBLIC sipros_core)
-  sipros_compile_definitions(native_precursor_test)
   sipros_optimization_options(native_precursor_test)
   add_test(
     NAME native_precursor
@@ -142,7 +140,6 @@ if(BUILD_TESTING)
   )
   target_include_directories(protein_n_terminal_peptides_test PUBLIC ${SIPROS_INCLUDE_DIRS})
   target_link_libraries(protein_n_terminal_peptides_test PUBLIC sipros_core)
-  sipros_compile_definitions(protein_n_terminal_peptides_test)
   sipros_optimization_options(protein_n_terminal_peptides_test)
   add_test(
     NAME protein_n_terminal_peptides
@@ -154,7 +151,6 @@ if(BUILD_TESTING)
   )
   target_include_directories(search_policy_test PUBLIC ${SIPROS_INCLUDE_DIRS})
   target_link_libraries(search_policy_test PUBLIC sipros_common sipros_core)
-  sipros_compile_definitions(search_policy_test)
   sipros_optimization_options(search_policy_test)
   add_test(
     NAME search_policy

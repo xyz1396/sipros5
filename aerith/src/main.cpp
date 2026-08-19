@@ -77,7 +77,7 @@ void CommandLine::usage(std::ostream& out) {
         << "  -h, --help               Show this help\n\n"
         << "Outputs per sample are PREFIX_target_psms.tsv, PREFIX_decoy_psms.tsv,\n"
         << "and PREFIX_filtered_psms.tsv. With target and decoy databases, Aerith writes\n"
-        << "native sample and combined reports without intermediate pepXML.\n";
+        << "native sample and combined reports directly from scored PSMs.\n";
 }
 
 double CommandLine::number(const std::string& value, const char* option) {

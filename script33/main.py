@@ -21,11 +21,21 @@ class SIPROSWorkflow:
         script_path = os.path.abspath(__file__)
         upper_path = os.path.dirname(os.path.dirname(script_path))
         self.upper_path = upper_path
-        # Default paths for tools
+        # Use the native tool set for the host platform. Keep all tools beside
+        # their runtime DLLs and DIA-NN models in the repository/package tools
+        # directory.
+        if os.name == 'nt':
+            raxport_name = 'Raxport-win-x64.exe'
+            sipros_name = 'sipros.exe'
+            aerith_name = 'aerith.exe'
+        else:
+            raxport_name = 'Raxport-linux-x64'
+            sipros_name = 'sipros'
+            aerith_name = 'aerith'
         self.defaultToolsPaths: dict[str, str] = {
-            'raxport': f'{upper_path}/tools/Raxport-linux-x64',
-            'sipros': f'{upper_path}/tools/sipros',
-            'aerith': f'{upper_path}/tools/aerith',
+            'raxport': os.path.join(upper_path, 'tools', raxport_name),
+            'sipros': os.path.join(upper_path, 'tools', sipros_name),
+            'aerith': os.path.join(upper_path, 'tools', aerith_name),
         }
         self.toolsPaths: dict[str, str] = self.defaultToolsPaths.copy()
         self.args: Namespace = self.parse_arguments()
