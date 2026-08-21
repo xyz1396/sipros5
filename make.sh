@@ -8,14 +8,15 @@ set -e
 #   micromamba create -n sipros5-release -c conda-forge \
 #     sysroot_linux-64=2.17 gcc_linux-64 gxx_linux-64 cmake ninja patchelf \
 #     "hdf5=2.*=nompi*" \
-#     "pytorch-cpu=2.12.1=cpu_mkl*"
+#     "pytorch-cpu=2.12.1=cpu_mkl*" imgui=1.92.9 libvulkan-headers libgl-devel
 # 
 # Micromamba/Conda build (./make.sh buildConda):
 #   micromamba create -n sipros5 -c conda-forge \
 #     hdf5 h5py openmpi cmake ninja gcc_linux-64 gxx_linux-64 gdb gperftools \
 #     python=3.12 lxml pandas sysroot_linux-64=2.34 scikit-learn matplotlib \
 #     pytorch-gpu=2.12.1 cuda-cudart-dev=12.9 libcublas-dev=12.9 \
-#     cuda-nvrtc-dev=12.9 cuda-nvcc=12.9 cuda-nvtx-dev=12.9
+#     cuda-nvrtc-dev=12.9 cuda-nvcc=12.9 cuda-nvtx-dev=12.9 \
+#     imgui=1.92.9 libvulkan-headers libgl-devel
 #
 # Activate the environment before running Conda-built binaries so their
 # OpenMP, compiler-runtime, and MPI shared libraries are available:
@@ -38,6 +39,9 @@ assert glob.glob(prefix + "/conda-meta/sysroot_linux-64-2.17-*.json")
 assert glob.glob(prefix + "/conda-meta/gcc_linux-64-*.json")
 assert glob.glob(prefix + "/conda-meta/gxx_linux-64-*.json")
 assert glob.glob(prefix + "/conda-meta/hdf5-2.*-nompi*.json")
+assert glob.glob(prefix + "/conda-meta/imgui-1.92.9-*.json")
+assert glob.glob(prefix + "/conda-meta/libvulkan-headers-*.json")
+assert glob.glob(prefix + "/conda-meta/libgl-devel-*.json")
 assert os.path.isfile(prefix + "/lib/libhdf5.so")
 assert os.path.isfile(prefix + "/lib/libhdf5_cpp.so")
 assert os.access(prefix + "/bin/patchelf", os.X_OK)' \
@@ -54,7 +58,8 @@ assert os.access(prefix + "/bin/patchelf", os.X_OK)' \
         "sysroot_linux-64=2.17" \
         gcc_linux-64 gxx_linux-64 cmake ninja patchelf \
         "hdf5=2.*=nompi*" \
-        "pytorch-cpu=2.12.1=cpu_mkl*"
+        "pytorch-cpu=2.12.1=cpu_mkl*" \
+        imgui=1.92.9 libvulkan-headers libgl-devel
 }
 
 # Only the release build and package commands are isolated in the pinned
@@ -100,6 +105,7 @@ RUNTIME_TOOL_BINARIES=(
     sipros
     siprosMPI
     aerith
+    siproswf
 )
 MKL_DISPATCH_LIBRARIES=(
     libmkl_avx2.so.3
@@ -166,6 +172,10 @@ require_release_libraries() {
     done
     if [ ! -f "$RELEASE_HDF5_DIR/hdf5-config.cmake" ]; then
         echo "Missing release HDF5 CMake package: $RELEASE_HDF5_DIR" >&2
+        exit 1
+    fi
+    if [ ! -f "$RELEASE_PREFIX/lib/cmake/imgui/imgui-config.cmake" ]; then
+        echo "Missing release ImGui CMake package: $RELEASE_PREFIX/lib/cmake/imgui" >&2
         exit 1
     fi
 }
@@ -290,6 +300,22 @@ verify_dynamic_torch() {
        ! grep -Eq 'libtorch(_cpu)?\.so' <<<"$dependencies" ||
        ! grep -Eq 'libc10\.so' <<<"$dependencies"; then
         echo "Aerith does not have a complete dynamic LibTorch linkage: $binary" >&2
+        echo "$dependencies" >&2
+        return 1
+    fi
+}
+
+verify_dynamic_gui() {
+    local binary="$1"
+    local dependencies
+    dependencies=$(ldd "$binary" 2>&1) || {
+        echo "Expected siproswf to dynamically link ImGui: $binary" >&2
+        echo "$dependencies" >&2
+        return 1
+    }
+    if grep -Fq 'not found' <<<"$dependencies" ||
+       ! grep -Eq 'libimgui\.so' <<<"$dependencies"; then
+        echo "siproswf does not have complete ImGui linkage: $binary" >&2
         echo "$dependencies" >&2
         return 1
     fi
@@ -474,9 +500,9 @@ stage_publish_tools() {
     local profile="${2:-full}"
     local binaries
     if [ "$profile" = "cpu-release" ]; then
-        binaries=(sipros aerith)
+        binaries=(sipros aerith siproswf)
     else
-        binaries=(sipros siprosMPI aerith)
+        binaries=(sipros siprosMPI aerith siproswf)
     fi
     local assets=("$DIANN_MODEL_NAME" "$DIANN_RT_MODEL_NAME")
     local destinations=("$REPO_DIR/bin" "$REPO_DIR/tools")
@@ -519,6 +545,7 @@ stage_publish_tools() {
             rm -rf "$destination/lib"
             stage_release_runtime "$destination/sipros" "$destination/lib"
             stage_release_runtime "$destination/aerith" "$destination/lib"
+            stage_release_runtime "$destination/siproswf" "$destination/lib"
         fi
     done
     ensure_runtime_tool_permissions
@@ -543,6 +570,7 @@ case $1 in
         "$REPO_DIR/tools/aerith" \
         "$REPO_DIR/tools/sipros" \
         "$REPO_DIR/tools/siprosMPI" \
+        "$REPO_DIR/tools/siproswf" \
         "$REPO_DIR/siprosRelease.zip"
     rm -rf "$REPO_DIR/tools/lib"
     ;;
@@ -564,16 +592,20 @@ case $1 in
         -DAERITH_TORCH_ROOT="$SYSTEM_TORCH_ROOT" \
         -DHDF5_USE_STATIC_LIBRARIES=OFF \
         -DHDF5_DIR="$RELEASE_HDF5_DIR" "$REPO_DIR"
-    "$SYSTEM_NINJA" sipros aerith
+    "$SYSTEM_NINJA" sipros aerith siproswf
     "$RELEASE_PREFIX/bin/patchelf" --force-rpath --set-rpath '$ORIGIN/lib' \
         "$SYSTEM_BUILD_DIR/bin/sipros"
     "$RELEASE_PREFIX/bin/patchelf" --force-rpath --set-rpath '$ORIGIN/lib' \
         "$SYSTEM_BUILD_DIR/bin/aerith"
+    "$RELEASE_PREFIX/bin/patchelf" --force-rpath --set-rpath '$ORIGIN/lib' \
+        "$SYSTEM_BUILD_DIR/bin/siproswf"
     verify_release_dynamic_binary "$SYSTEM_BUILD_DIR/bin/sipros" \
         'libgomp\.so' 'libhdf5(_cpp)?\.so' 'libstdc\+\+\.so'
     verify_release_dynamic_binary "$SYSTEM_BUILD_DIR/bin/aerith" \
         'libtorch_cpu\.so' 'libc10\.so' 'libgomp\.so' \
         'libhdf5(_cpp)?\.so' 'libstdc\+\+\.so'
+    verify_release_dynamic_binary "$SYSTEM_BUILD_DIR/bin/siproswf" \
+        'libimgui\.so' 'libstdc\+\+\.so'
     
     # copy repo-built runtime commands atomically for publish/workflow use
     stage_publish_tools "$SYSTEM_BUILD_DIR/bin" cpu-release
@@ -581,6 +613,8 @@ case $1 in
     verify_packaged_release_binary "$REPO_DIR/tools/sipros" "$REPO_DIR/tools/lib"
     verify_packaged_release_binary "$REPO_DIR/tools/aerith" "$REPO_DIR/tools/lib" 1
     verify_glibc_217 "$REPO_DIR/tools/aerith" "$REPO_DIR/tools/lib"
+    verify_packaged_release_binary "$REPO_DIR/tools/siproswf" "$REPO_DIR/tools/lib"
+    verify_glibc_217 "$REPO_DIR/tools/siproswf" "$REPO_DIR/tools/lib"
     ;;
 "buildConda")
     export MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-$HOME/micromamba}"
@@ -610,6 +644,7 @@ case $1 in
     ninja
     verify_fully_dynamic_conda "$CONDA_BUILD_DIR/bin"
     verify_dynamic_torch "$CONDA_BUILD_DIR/bin/aerith"
+    verify_dynamic_gui "$CONDA_BUILD_DIR/bin/siproswf"
     # add share lib for mpi version
     cd ..
     # deplist=$(ldd bin/siprosMPI | awk '{if (match($3,"/")){ print $3}}')
@@ -644,27 +679,37 @@ case $1 in
     $0 build
     tmpdir=$(mktemp -d)
     trap 'rm -rf "$tmpdir"' EXIT
-    mkdir -p "$tmpdir/sipros"
-    cp -a tools script33 LICENSE "$tmpdir/sipros"
-    rm -f "$tmpdir/sipros/tools/siprosMPI"
-    rm -rf "$tmpdir/sipros/tools/lib"
-    stage_release_runtime "$tmpdir/sipros/tools/sipros" \
-        "$tmpdir/sipros/tools/lib"
-    stage_release_runtime "$tmpdir/sipros/tools/aerith" \
-        "$tmpdir/sipros/tools/lib"
-    verify_glibc_217 "$tmpdir/sipros/tools/sipros"
-    verify_packaged_release_binary "$tmpdir/sipros/tools/sipros" \
-        "$tmpdir/sipros/tools/lib"
-    verify_packaged_release_binary "$tmpdir/sipros/tools/aerith" \
-        "$tmpdir/sipros/tools/lib" 1
-    verify_glibc_217 "$tmpdir/sipros/tools/aerith" \
-        "$tmpdir/sipros/tools/lib"
+    mkdir -p "$tmpdir/sipros/lib"
+    install -m 0755 "tools/siproswf" "$tmpdir/sipros/siproswf"
+    for binary in sipros aerith Raxport-linux-x64; do
+        install -m 0755 "tools/$binary" "$tmpdir/sipros/lib/$binary"
+    done
+    install -m 0644 LICENSE "$tmpdir/sipros/lib/LICENSE"
+    install -m 0644 "tools/$DIANN_MODEL_NAME" \
+        "$tmpdir/sipros/lib/$DIANN_MODEL_NAME"
+    install -m 0644 "tools/$DIANN_RT_MODEL_NAME" \
+        "$tmpdir/sipros/lib/$DIANN_RT_MODEL_NAME"
+    "$RELEASE_PREFIX/bin/patchelf" --force-rpath --set-rpath '$ORIGIN' \
+        "$tmpdir/sipros/lib/sipros"
+    "$RELEASE_PREFIX/bin/patchelf" --force-rpath --set-rpath '$ORIGIN' \
+        "$tmpdir/sipros/lib/aerith"
+    stage_release_runtime "$tmpdir/sipros/lib/sipros" "$tmpdir/sipros/lib"
+    stage_release_runtime "$tmpdir/sipros/lib/aerith" "$tmpdir/sipros/lib"
+    stage_release_runtime "$tmpdir/sipros/siproswf" "$tmpdir/sipros/lib"
+    verify_glibc_217 "$tmpdir/sipros/lib/sipros"
+    verify_packaged_release_binary "$tmpdir/sipros/lib/sipros" \
+        "$tmpdir/sipros/lib"
+    verify_packaged_release_binary "$tmpdir/sipros/lib/aerith" \
+        "$tmpdir/sipros/lib" 1
+    verify_glibc_217 "$tmpdir/sipros/lib/aerith" "$tmpdir/sipros/lib"
+    verify_packaged_release_binary "$tmpdir/sipros/siproswf" \
+        "$tmpdir/sipros/lib"
+    verify_glibc_217 "$tmpdir/sipros/siproswf" "$tmpdir/sipros/lib"
     if [ -f siprosRelease.zip ]; then
         rm siprosRelease.zip
     fi
     cd "$tmpdir"
     zip -r "$OLDPWD/siprosRelease.zip" "sipros" \
-        -x "sipros/script33/debugProxy.py" \
         -x "*/__pycache__/*"
     cd "$OLDPWD"
     rm -rf "$tmpdir"
@@ -672,8 +717,9 @@ case $1 in
     echo "Package created: siprosRelease.zip"
     ;;
 "run")
-    echo "Use the HDF5 workflow entrypoint, for example:"
-    echo "  python script33/main.py -i data/pct1/raw/Pan_062822_X1iso5.raw -f data/EcoliWithCrapNodup.fasta -o data/tmp/raxport_hdf5_workflow_test/direct_fasta -t 4"
+    echo "Open the ImGui workflow or run a headless search, for example:"
+    echo "  tools/siproswf"
+    echo "  tools/siproswf --regular-fasta-search -i input.h5 -f db.faa -o output"
     ;;
 *)
     ./make "build"

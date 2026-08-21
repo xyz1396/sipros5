@@ -2,9 +2,9 @@
 """Legacy pct benchmark entrypoint.
 
 The FT text benchmark workflow has been removed. Use the universal HDF5
-search-spectra workflow through script33/main.py, for example:
+search-spectra workflow through the native siproswf binary, for example:
 
-  python script33/main.py -i data/pct1/raw/Pan_062822_X1iso5.raw \
+  tools/siproswf -i data/pct1/raw/Pan_062822_X1iso5.raw \
       -f data/EcoliWithCrapNodup.fasta -e C13 --range 0-5 --precision 1 \
       --psm-tsv data/pct1/frag/Pan_062822_X1iso5/psm.tsv \
       --unlabeled-input data/pct1/raw/Pan_062822_X1iso5.raw \

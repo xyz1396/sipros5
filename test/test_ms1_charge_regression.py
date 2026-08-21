@@ -8,7 +8,6 @@ fixtures.
 
 from __future__ import annotations
 
-import logging
 import shutil
 import subprocess
 import sys
@@ -20,7 +19,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 TMP = ROOT / "data" / "tmp" / "raxport_hdf5_workflow_test"
-SIPROS = ROOT / "bin" / "sipros"
+SIPROS = ROOT / "bin" / ("sipros.exe" if sys.platform == "win32" else "sipros")
+SIPROSWF = ROOT / "bin" / ("siproswf.exe" if sys.platform == "win32" else "siproswf")
 FASTA = TMP / "synthetic.fasta"
 
 
@@ -178,39 +178,24 @@ def read_pin(path: Path) -> tuple[list[str], list[list[str]]]:
 
 
 def run_flat_fasta_layout(scan_file: Path) -> None:
-    script_dir = str(ROOT / "script33")
-    if script_dir not in sys.path:
-        sys.path.insert(0, script_dir)
-    from search import search as SearchWorkflow
-
     output = TMP / "flat_fasta_workflow"
-    output.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("sipros_flat_fasta_layout_regression")
-    logger.handlers.clear()
-    logger.addHandler(logging.NullHandler())
-    logger.propagate = False
-
-    workflow = SearchWorkflow(
-        toleranceMS1=0.01,
-        toleranceMS2=0.01,
-        sipRange="0-100",
-        step="1",
-        raxportPath=str(ROOT / "tools" / "Raxport-linux-x64"),
-        siprosPath=str(SIPROS),
-        fastaPath=str(FASTA),
-        inputPath=str(scan_file),
-        outputPath=str(output),
-        negative_control="",
-        threadNumber=8,
-        logger=logger,
-        element="R",
-        topPsmsPerScan=2,
+    result = subprocess.run(
+        [
+            str(SIPROSWF),
+            "--regular-fasta-search",
+            "-i", str(scan_file),
+            "-f", str(FASTA),
+            "-o", str(output),
+            "-t", "8",
+            "--topN", "2",
+        ],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
     )
-    workflow.reverse_fasta_sequences()
-    workflow.getInputFiles()
-    workflow.create_sample_directories()
-    workflow.prepare_hdf5_inputs()
-    workflow.sipros_search()
+    assert result.returncode == 0, result.stdout
 
     base = scan_file.stem
     sample_dir = output / base
@@ -243,6 +228,8 @@ def run_flat_fasta_layout(scan_file: Path) -> None:
 def main() -> None:
     if not SIPROS.exists():
         raise SystemExit(f"Build sipros first: {SIPROS}")
+    if not SIPROSWF.exists():
+        raise SystemExit(f"Build siproswf first: {SIPROSWF}")
     if TMP.exists():
         shutil.rmtree(TMP)
     TMP.mkdir(parents=True)

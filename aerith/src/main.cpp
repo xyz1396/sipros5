@@ -356,6 +356,8 @@ int main(int argc, char** argv) {
         const auto locate_model = [&](const char* name) {
             const auto sibling = executable / name;
             if (std::filesystem::exists(sibling)) return sibling.string();
+            const auto packaged = executable / "lib" / name;
+            if (std::filesystem::exists(packaged)) return packaged.string();
             return std::string{};
         };
         config.spectrum_model_path = locate_model("diann-2.6.1-fragmentation.pt");

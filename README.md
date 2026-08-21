@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="script33/sipros_logo.png" alt="Sipros5 logo" width="240">
+  <img src="wf33/sipros_logo.png" alt="Sipros5 logo" width="240">
 </p>
 
 ## Sipros5 Setup Guide
@@ -32,7 +32,7 @@ gunzip UP000000625_83333.fasta.gz -c > Ecoli.fasta
 #### Regular Search
 
 ```bash
-siproswf -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o regular_output
+siproswf --regular-fasta-search -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o regular_output
 ```
 
 #### Extract protein sequences identified in Regular search
@@ -47,17 +47,24 @@ extractPro Ecoli.fasta regular_output/combined_protein.tsv db.faa
 #### Label Search
 
 ```bash
-siproswf -i raw -f db.faa -e C13 -o sip_output
+siproswf --sip-fasta-search -i raw -f db.faa -e C13 -o sip_output
 ```
 
 #### Label Search with negative control using unlabeled sample
 
 ```bash
-siproswf -i raw -f db.faa -e C13 --negative_control Pan_062822_X1iso5 -o sip2_output
+siproswf --sip-fasta-search -i raw -f db.faa -e C13 --negative_control Pan_062822_X1iso5 -o sip2_output
 ```
 
 Use a comma-separated `-r` list to search disjoint SIP enrichments in one
 joint filtering run, for example `-r 1,2,3,49,50,51 -p 1`.
+
+Run `siproswf` without arguments (or use `siproswf --gui`) to open the native
+Dear ImGui interface. The GUI provides Regular FASTA, SIP FASTA, and Fast SIP
+modes, advanced search settings, command preview, live logs, and cancellation.
+Supplying workflow arguments keeps execution headless for scripts and batch
+systems. Existing commands that infer regular versus SIP search from `-e`
+remain supported.
 
 #### Search chemistry and defaults
 
@@ -341,8 +348,8 @@ reports. MBR is controlled with `--mbr-rt-window`, `--mbr-top-runs`,
 Aerith computes median pairwise log ion ratios, solves each connected sample
 graph, and anchors its absolute scale to the contributing ion intensities.
 
-The Python workflow has one post-search module, `script33/filter.py`, which
-launches one cross-sample Aerith process for filtering, chromatographic
+The native C++ workflow in `wf33` launches one cross-sample Aerith process for
+filtering, chromatographic
 quantification, normalization, MaxLFQ, and protein assembly. The optional SIP
 negative-control pass selects only primary target PSMs that already passed the
 normal target/decoy filter, relabels the designated control samples, and
@@ -350,7 +357,7 @@ rescores them inside that same Aerith process using the in-memory dataset.
 The secondary SVM reuses each PSM's primary `delta_RT_loess` value and does
 not rerun RT prediction or calibration. It does not perform a second
 peptide-collision filter, write
-or reread `SIP.pin`, launch another Aerith process, or fall back to Python
+or reread `SIP.pin`, launch another Aerith process, or use a Python filtering
 filtering. The Aerith report includes the total and per-stage native
 negative-control timings, the configured SIP label threshold, counts before
 and below that threshold, and the three-fold secondary SVM feature weights.
@@ -385,10 +392,11 @@ Build the release binaries with:
 
 For `build` and `package` only, the script creates or reuses the
 `sipros5-release` micromamba environment. It pins the glibc 2.17 sysroot,
-non-MPI HDF5 2.x, and PyTorch 2.12.1 CPU/MKL build. Sipros and Aerith
+non-MPI HDF5 2.x, PyTorch 2.12.1 CPU/MKL, and Dear ImGui 1.92.9 builds.
+Sipros, Aerith, and `siproswf`
 dynamically link their external Conda libraries. `package` bundles the complete
-non-glibc runtime closure, including HDF5, OpenMP, compiler runtimes, Torch, and
-MKL, under `tools/lib`.
+non-glibc runtime closure, including HDF5, OpenMP, compiler runtimes, Torch,
+MKL, ImGui, GLFW, and OpenGL support libraries, under `tools/lib`.
 The resulting binaries require host glibc 2.17 or newer. Neither command
 configures, builds, or packages `siprosMPI`.
 
@@ -478,7 +486,7 @@ Aerith skips its legacy nested chemical RT model and does not add the redundant
 `sqrtAbsDeltaRT` feature. Use `--no-predicted-rt` to disable DIA-NN RT and use
 the legacy Aerith RT model instead.
 
-## Sipros5 Setup Guide (set the python and binary by yourself)
+## Sipros5 Release Setup Guide
 
 ### 1. Create Conda Environment
 
@@ -492,7 +500,7 @@ conda activate sipros5
 ```bash
 wget https://github.com/xyz1396/sipros5/releases/download/5.0.1/siprosRelease.zip
 unzip siprosRelease.zip
-chmod +x sipros/tools/* sipros/script33/extractPro.sh
+chmod +x sipros/tools/* sipros/wf33/extractPro.sh
 ```
 
 ### 3. Example Commands
@@ -500,25 +508,25 @@ chmod +x sipros/tools/* sipros/script33/extractPro.sh
 #### Regular Search
 
 ```bash
-python sipros/script33/main.py -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o regular_output
+sipros/tools/siproswf --regular-fasta-search -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o regular_output
 ```
 
 #### Extract protein sequences identified in Regular search
 
 ```bash
-sipros/script33/extractPro.sh Ecoli.fasta regular_output/combined_protein.tsv db.faa
+sipros/wf33/extractPro.sh Ecoli.fasta regular_output/combined_protein.tsv db.faa
 ```
 
 #### Label Search
 
 ```bash
-python sipros/script33/main.py -i raw -f db.faa -e C13 -o sip_output
+sipros/tools/siproswf --sip-fasta-search -i raw -f db.faa -e C13 -o sip_output
 ```
 
 #### Label Search with negative control using unlabeled sample
 
 ```bash
-python sipros/script33/main.py -i raw -f db.faa -e C13 --negative_control Pan_062822_X1iso5 -o sip2_output
+sipros/tools/siproswf --sip-fasta-search -i raw -f db.faa -e C13 --negative_control Pan_062822_X1iso5 -o sip2_output
 ```
 
 ### 6. Citations

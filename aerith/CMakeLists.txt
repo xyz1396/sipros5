@@ -145,7 +145,35 @@ if(AERITH_ENABLE_TORCH)
         set(kineto_LIBRARY "${AERITH_KINETO_LINK_SENTINEL}")
       endif()
     endif()
+    # Torch uses TORCH_CUDA_ARCH_LIST and emits a warning whenever CMake's
+    # separate architecture variable is visible. Preserve the project value
+    # around TorchConfig so both systems retain their intended settings.
+    if(AERITH_ENABLE_CUDA AND NOT CMAKE_CUDA_COMPILER_LOADED)
+      enable_language(CUDA)
+    endif()
+    set(AERITH_CUDA_ARCHITECTURES_DEFINED FALSE)
+    if(DEFINED CMAKE_CUDA_ARCHITECTURES)
+      set(AERITH_CUDA_ARCHITECTURES_DEFINED TRUE)
+      set(AERITH_CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+    endif()
+    get_property(AERITH_CUDA_ARCHITECTURES_CACHE_TYPE CACHE
+      CMAKE_CUDA_ARCHITECTURES PROPERTY TYPE)
+    if(AERITH_CUDA_ARCHITECTURES_CACHE_TYPE)
+      get_property(AERITH_CUDA_ARCHITECTURES_CACHE_VALUE CACHE
+        CMAKE_CUDA_ARCHITECTURES PROPERTY VALUE)
+      unset(CMAKE_CUDA_ARCHITECTURES CACHE)
+    endif()
+    unset(CMAKE_CUDA_ARCHITECTURES)
     find_package(Torch 2.12.1 REQUIRED)
+    unset(CMAKE_CUDA_ARCHITECTURES)
+    if(AERITH_CUDA_ARCHITECTURES_CACHE_TYPE)
+      set(CMAKE_CUDA_ARCHITECTURES
+        "${AERITH_CUDA_ARCHITECTURES_CACHE_VALUE}"
+        CACHE ${AERITH_CUDA_ARCHITECTURES_CACHE_TYPE}
+        "CUDA architectures selected outside TorchConfig" FORCE)
+    elseif(AERITH_CUDA_ARCHITECTURES_DEFINED)
+      set(CMAKE_CUDA_ARCHITECTURES "${AERITH_CUDA_ARCHITECTURES}")
+    endif()
     if(AERITH_KINETO_LINK_SENTINEL)
       list(REMOVE_ITEM TORCH_LIBRARIES "${AERITH_KINETO_LINK_SENTINEL}")
       unset(kineto_LIBRARY)
@@ -207,6 +235,7 @@ endif()
 
 add_executable(aerith src/main.cpp)
 target_link_libraries(aerith PRIVATE aerith_filter)
+sipros_windows_conda_openmp(aerith)
 if(AERITH_TORCH_CPU_ONLY AND NOT MSVC)
   # The packaged CPU release resolves its complete non-glibc runtime from the
   # adjacent lib directory.

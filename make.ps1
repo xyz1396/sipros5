@@ -11,14 +11,15 @@
 # CPU release environment:
 #   micromamba create -n sipros5-release -c conda-forge --strict-channel-priority `
 #     python=3.12 cmake ninja "hdf5=2.*=nompi*" `
-#     "pytorch-cpu=2.12.1=cpu_mkl*"
+#     "pytorch-cpu=2.12.1=cpu_mkl*" imgui=1.92.9 libvulkan-headers
 #
 # NVIDIA GPU environment (PyTorch 2.12.1, CUDA 12.8, Python 3.12):
 #   micromamba create -n sipros5 -c conda-forge --strict-channel-priority `
 #     python=3.12 cmake ninja "hdf5=2.*=nompi*" `
 #     "pytorch-gpu=2.12.1=*cuda128*" "cuda-version=12.8" `
 #     "cuda-cudart-dev=12.8" "libcublas-dev=12.8" `
-#     "cuda-nvrtc-dev=12.8" "cuda-nvcc=12.8" "cuda-nvtx-dev=12.8"
+#     "cuda-nvrtc-dev=12.8" "cuda-nvcc=12.8" "cuda-nvtx-dev=12.8" `
+#     imgui=1.92.9 libvulkan-headers
 #
 # Visual Studio 2022 with the "Desktop development with C++" workload must be
 # installed separately; conda-forge cannot redistribute the MSVC compiler.
@@ -30,7 +31,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('load', 'clean', 'build', 'buildConda', 'debug', 'make', 'package', 'run')]
+    [ValidateSet('load', 'clean', 'build', 'buildConda', 'debug', 'make', 'wfTest', 'wfTestConda', 'package', 'run')]
     [string]$Command = 'build',
     [switch]$EnvironmentActive
 )
@@ -51,6 +52,32 @@ $ReleaseBuildDir = Join-Path $BuildRoot 'system'
 $CondaBuildDir = Join-Path $BuildRoot 'conda'
 $DebugBuildDir = Join-Path $BuildRoot 'conda-debug'
 
+function Invoke-CheckedNative(
+    [string]$Executable,
+    [string[]]$ArgumentList,
+    [string]$Description
+) {
+    & $Executable @ArgumentList
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "$Description failed with exit code $exitCode."
+    }
+}
+
+function Enter-WindowsBuildLock {
+    $lockKey = $RepoDir.ToLowerInvariant() -replace '[^a-z0-9.-]', '_'
+    $lockPath = Join-Path $env:TEMP ("sipros5-build-$lockKey.lock")
+    try {
+        return [System.IO.FileStream]::new(
+            $lockPath,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None)
+    } catch [System.IO.IOException] {
+        throw "Another Sipros build, test, or package command is already running for $RepoDir. Wait for it to finish and retry."
+    }
+}
+
 function Clear-WindowsOutputs {
     $buildDirectory = Join-Path $RepoDir 'build'
     $binDirectory = Join-Path $RepoDir 'bin'
@@ -66,6 +93,7 @@ function Clear-WindowsOutputs {
     foreach ($path in @(
         (Join-Path $RepoDir 'tools\aerith.exe'),
         (Join-Path $RepoDir 'tools\sipros.exe'),
+        (Join-Path $RepoDir 'tools\siproswf.exe'),
         (Join-Path $RepoDir 'tools\siprosMPI.exe'),
         (Join-Path $RepoDir 'siprosRelease.zip')
     )) {
@@ -81,12 +109,13 @@ function Import-VisualStudioEnvironment {
     }
     $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
     if (-not $installation) { throw 'Install the Visual Studio 2022 Desktop development with C++ workload.' }
-    $devShell = Join-Path $installation 'Common7\Tools\VsDevCmd.bat'
-    cmd.exe /s /c "`"$devShell`" -no_logo -arch=x64 -host_arch=x64 && set" | ForEach-Object {
-        if ($_ -match '^([^=]+)=(.*)$') {
-            [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process')
-        }
+    $devShellModule = Join-Path $installation 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
+    if (-not (Test-Path -LiteralPath $devShellModule)) {
+        throw "Visual Studio's PowerShell developer-shell module was not found: $devShellModule"
     }
+    Import-Module -Name $devShellModule
+    Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation `
+        -DevCmdArguments '-no_logo -arch=x64 -host_arch=x64'
     if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
         throw 'Visual Studio was found, but its x64 C++ compiler could not be activated.'
     }
@@ -104,7 +133,7 @@ function Test-Environment([string]$Name, [bool]$RequireExactTorch, [bool]$Requir
     $operator = if ($RequireExactTorch) { '==' } else { '>=' }
     $cpuCheck = if ($RequireExactTorch) { ";assert glob.glob(os.path.join(p,'conda-meta','pytorch-2.12.1-cpu_mkl*.json'))" } else { '' }
     $gpuCheck = if ($RequireGpu) { ";assert torch.version.cuda and torch.version.cuda.startswith('12.8')" } else { '' }
-    $check = "import glob,os,re,torch;p=os.environ['CONDA_PREFIX'];v=tuple(map(int,re.match(r'\d+(?:\.\d+)+',torch.__version__).group().split('.')));assert v$operator(2,12,1);assert glob.glob(os.path.join(p,'conda-meta','hdf5-2.*-nompi*.json'))$cpuCheck$gpuCheck"
+    $check = "import glob,os,re,torch;p=os.environ['CONDA_PREFIX'];v=tuple(map(int,re.match(r'\d+(?:\.\d+)+',torch.__version__).group().split('.')));assert v$operator(2,12,1);assert glob.glob(os.path.join(p,'conda-meta','hdf5-2.*-nompi*.json'));assert glob.glob(os.path.join(p,'conda-meta','imgui-1.92.9-*.json'));assert glob.glob(os.path.join(p,'conda-meta','libvulkan-headers-*.json'))$cpuCheck$gpuCheck"
     & $MambaExe run -n $Name python -c $check 2>$null
     return $LASTEXITCODE -eq 0
 }
@@ -139,7 +168,10 @@ function Enter-MicromambaEnvironment([string]$Name) {
     $powershell = (Get-Process -Id $PID).Path
     & $MambaExe run -n $Name $powershell -NoProfile -ExecutionPolicy Bypass `
         -File $PSCommandPath -Command $Command -EnvironmentActive
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "The '$Command' command failed in micromamba environment '$Name' with exit code $exitCode."
+    }
 }
 
 function Invoke-WindowsBuild([string]$Directory, [string]$Configuration) {
@@ -173,14 +205,18 @@ function Invoke-WindowsBuild([string]$Directory, [string]$Configuration) {
     } else {
         $arguments += '-DAERITH_ENABLE_CUDA=OFF'
     }
-    & cmake @arguments
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cmake --build $Directory --target sipros aerith
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Invoke-CheckedNative -Executable 'cmake' -ArgumentList $arguments `
+        -Description 'CMake configuration'
+    Invoke-CheckedNative -Executable 'cmake' `
+        -ArgumentList @(
+            '--build', $Directory, '--target',
+            'sipros', 'aerith', 'siproswf'
+        ) `
+        -Description 'Native build'
 }
 
 function Publish-WindowsTools([string]$SourceBinDirectory) {
-    $executables = @('sipros.exe', 'aerith.exe')
+    $executables = @('sipros.exe', 'aerith.exe', 'siproswf.exe')
     $models = @(
         'diann-2.6.1-fragmentation.pt',
         'diann-2.6.1-retention-time.pt'
@@ -211,22 +247,80 @@ function Publish-WindowsTools([string]$SourceBinDirectory) {
     }
 }
 
+function Test-PackagedExecutable(
+    [string]$Executable,
+    [string[]]$ArgumentList
+) {
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Executable
+    $startInfo.WorkingDirectory = Split-Path -Parent $Executable
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.Environment['PATH'] = "$env:SystemRoot\System32;$env:SystemRoot"
+    foreach ($argument in $ArgumentList) { $startInfo.ArgumentList.Add($argument) }
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) { throw "Unable to start packaged executable: $Executable" }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(30000)) {
+            $process.Kill($true)
+            throw "Packaged executable did not finish its startup check: $Executable"
+        }
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) {
+            $details = ($stdout + "`n" + $stderr).Trim()
+            if ($details.Length -gt 2000) { $details = $details.Substring(0, 2000) }
+            throw "Packaged executable failed its startup check with exit code $($process.ExitCode): $Executable`n$details"
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
+
 function New-WindowsPackage([string]$SourceBinDirectory) {
     $stageRoot = Join-Path $env:TEMP ("sipros5-package-" + [guid]::NewGuid().ToString('N'))
     $stage = Join-Path $stageRoot 'sipros'
     $archive = Join-Path $RepoDir 'siprosRelease.zip'
     try {
-        $tools = Join-Path $stage 'tools'
-        New-Item -ItemType Directory -Path $tools -Force | Out-Null
-        Copy-Item -LiteralPath (Join-Path $RepoDir 'script33') -Destination $stage -Recurse
-        Copy-Item -LiteralPath (Join-Path $RepoDir 'LICENSE') -Destination $stage
-        foreach ($name in 'sipros.exe', 'aerith.exe', 'diann-2.6.1-fragmentation.pt', 'diann-2.6.1-retention-time.pt') {
+        $lib = Join-Path $stage 'lib'
+        New-Item -ItemType Directory -Path $lib -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $RepoDir 'LICENSE') -Destination $lib
+        $workflow = Join-Path $SourceBinDirectory 'siproswf.exe'
+        if (-not (Test-Path -LiteralPath $workflow)) { throw "Missing built runtime file: $workflow" }
+        Copy-Item -LiteralPath $workflow -Destination $stage
+        foreach ($name in 'sipros.exe', 'aerith.exe') {
             $source = Join-Path $SourceBinDirectory $name
             if (-not (Test-Path -LiteralPath $source)) { throw "Missing built runtime file: $source" }
-            Copy-Item -LiteralPath $source -Destination $tools
+            Copy-Item -LiteralPath $source -Destination $lib
         }
-        # Windows searches beside the executable for dependent DLLs.
-        Get-ChildItem -LiteralPath (Join-Path $env:CONDA_PREFIX 'Library\bin') -Filter '*.dll' | Copy-Item -Destination $tools
+        $raxport = Join-Path $RepoDir 'tools\Raxport-win-x64.exe'
+        if (-not (Test-Path -LiteralPath $raxport)) { throw "Missing runtime binary: $raxport" }
+        Copy-Item -LiteralPath $raxport -Destination $lib
+        foreach ($name in 'diann-2.6.1-fragmentation.pt', 'diann-2.6.1-retention-time.pt') {
+            $source = Join-Path $SourceBinDirectory $name
+            if (-not (Test-Path -LiteralPath $source)) { throw "Missing model file: $source" }
+            Copy-Item -LiteralPath $source -Destination $lib
+        }
+        Get-ChildItem -LiteralPath (Join-Path $env:CONDA_PREFIX 'Library\bin') -Filter '*.dll' |
+            Copy-Item -Destination $lib
+        foreach ($name in @(
+            'hdf5.dll', 'hdf5_cpp.dll', 'torch_cpu.dll', 'c10.dll',
+            'libomp.dll', 'imgui.dll', 'glfw3.dll'
+        )) {
+            $runtime = Join-Path $lib $name
+            if (-not (Test-Path -LiteralPath $runtime)) {
+                throw "Missing required packaged runtime DLL: $runtime"
+            }
+        }
+        Test-PackagedExecutable (Join-Path $lib 'sipros.exe') @('--help')
+        Test-PackagedExecutable (Join-Path $lib 'aerith.exe') @('--help')
+        Write-Host 'Packaged Sipros and Aerith runtime checks passed.'
         if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
         Compress-Archive -LiteralPath $stage -DestinationPath $archive -CompressionLevel Optimal
         Write-Host "Package created: $archive"
@@ -237,23 +331,26 @@ function New-WindowsPackage([string]$SourceBinDirectory) {
 
 $env:MAMBA_ROOT_PREFIX = $MambaRootPrefix
 if ($Command -eq 'clean') {
-    Clear-WindowsOutputs
+    $buildLock = Enter-WindowsBuildLock
+    try { Clear-WindowsOutputs } finally { $buildLock.Dispose() }
     return
 }
 if ($Command -eq 'load') { return }
 
 Import-VisualStudioEnvironment
 if (-not $EnvironmentActive) {
-    if ($Command -in 'build', 'package', 'make', 'run') {
+    if ($Command -in 'build', 'package', 'make', 'wfTest', 'run') {
         Require-ReleaseEnvironment
         Enter-MicromambaEnvironment $ReleaseEnvironmentName
-    } elseif ($Command -in 'buildConda', 'debug') {
+    } elseif ($Command -in 'buildConda', 'debug', 'wfTestConda') {
         Require-CondaEnvironment
         Enter-MicromambaEnvironment $CondaEnvironmentName
     }
     return
 }
 
+$buildLock = Enter-WindowsBuildLock
+try {
 switch ($Command) {
     'build' {
         Invoke-WindowsBuild $ReleaseBuildDir 'Release'
@@ -267,8 +364,25 @@ switch ($Command) {
     }
     'debug' { Invoke-WindowsBuild $DebugBuildDir 'Debug' }
     'make' {
-        & cmake --build $ReleaseBuildDir
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        Invoke-CheckedNative -Executable 'cmake' `
+            -ArgumentList @('--build', $ReleaseBuildDir) `
+            -Description 'Native build'
+    }
+    'wfTest' {
+        Invoke-CheckedNative -Executable 'cmake' `
+            -ArgumentList @('--build', $ReleaseBuildDir, '--target', 'siproswf_test') `
+            -Description 'siproswf test build'
+        Invoke-CheckedNative -Executable 'ctest' `
+            -ArgumentList @('--test-dir', $ReleaseBuildDir, '-R', '^siproswf_core$', '--output-on-failure') `
+            -Description 'siproswf tests'
+    }
+    'wfTestConda' {
+        Invoke-CheckedNative -Executable 'cmake' `
+            -ArgumentList @('--build', $CondaBuildDir, '--target', 'siproswf_test') `
+            -Description 'siproswf Conda test build'
+        Invoke-CheckedNative -Executable 'ctest' `
+            -ArgumentList @('--test-dir', $CondaBuildDir, '-R', '^siproswf_core$', '--output-on-failure') `
+            -Description 'siproswf Conda tests'
     }
     'package' {
         Clear-WindowsOutputs
@@ -277,7 +391,11 @@ switch ($Command) {
         New-WindowsPackage (Join-Path $ReleaseBuildDir 'bin')
     }
     'run' {
-        Write-Host 'Use the HDF5 workflow entrypoint, for example:'
-        Write-Host '  micromamba run -n sipros5 python script33/main.py <arguments>'
+        Write-Host 'Open the ImGui workflow or run a headless search, for example:'
+        Write-Host '  micromamba run -n sipros5 tools\siproswf.exe'
+        Write-Host '  micromamba run -n sipros5 tools\siproswf.exe --regular-fasta-search -i input.h5 -f db.faa -o output'
     }
+}
+} finally {
+    $buildLock.Dispose()
 }

@@ -43,8 +43,26 @@ function(sipros_optimization_options target_name)
   endif()
 endfunction()
 
+function(sipros_windows_conda_openmp target_name)
+  if(NOT (MSVC AND BUILD_CONDA))
+    return()
+  endif()
+
+  set(conda_openmp_import "$ENV{CONDA_PREFIX}/Library/lib/libomp.lib")
+  if(NOT EXISTS "${conda_openmp_import}")
+    message(FATAL_ERROR
+      "The Conda OpenMP import library is required for Windows packaging: ${conda_openmp_import}")
+  endif()
+  # /openmp:llvm embeds /DEFAULTLIB:libomp.lib in each OpenMP object. Ignore
+  # that implicit MSVC library and explicitly use Conda's redistributable
+  # import library, whose runtime name is libomp.dll.
+  target_link_options(${target_name} PRIVATE "/NODEFAULTLIB:libomp.lib")
+  target_link_libraries(${target_name} PRIVATE "${conda_openmp_import}")
+endfunction()
+
 add_subdirectory(sipros)
 add_subdirectory(aerith)
+add_subdirectory(wf33)
 
 if(MSVC)
   # Conda's HDF5 and PyTorch packages use the dynamic MSVC runtime. Mixing

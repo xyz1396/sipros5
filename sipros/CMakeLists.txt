@@ -51,6 +51,7 @@ add_executable(sipros ${PROJECT_SOURCE_DIR}/sipros/src/omp_main.cpp)
 target_include_directories(sipros PUBLIC ${PROJECT_SOURCE_DIR}/sipros/include)
 target_link_libraries(sipros PUBLIC sipros_openmp_tools)
 sipros_optimization_options(sipros)
+sipros_windows_conda_openmp(sipros)
 if(MSVC)
   # MSVC's 1 MiB default is too small for FASTA cache preparation. Match the
   # usual Linux process stack so large database searches do not terminate with
