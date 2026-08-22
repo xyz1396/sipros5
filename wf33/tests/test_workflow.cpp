@@ -98,6 +98,44 @@ void test_environment_limits() {
             "explicit thread count must be capped to physical cores");
 }
 
+void test_persistent_workflow_log() {
+    const std::filesystem::path root = std::filesystem::temp_directory_path() /
+        ("siproswf-log-test-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    const std::filesystem::path log_path = root / "output" / kWorkflowLogFilename;
+    try {
+        {
+            Logger logger(log_path);
+            logger.info("\n\npersistent-info\r\n\r\n  \t\r\npersistent-detail\n");
+            logger.error("persistent-error");
+        }
+        std::ifstream input(log_path);
+        const std::string contents((std::istreambuf_iterator<char>(input)), {});
+        require(input.good() || input.eof(), "workflow log must be readable");
+        require(contents.find("SIPROS WORKFLOW LOG") != std::string::npos,
+                "workflow log must contain a readable session header");
+        require(contents.find("| INFO  | persistent-info") !=
+                    std::string::npos,
+                "workflow INFO message must be written to the output log");
+        require(contents.find("| INFO  | persistent-detail") !=
+                    std::string::npos,
+                "multiline workflow messages must retain meaningful lines");
+        require(contents.find("| ERROR | persistent-error") !=
+                    std::string::npos,
+                "workflow terminal error must be written to the output log");
+        require(contents.find("\n\n") == std::string::npos,
+                "workflow log must not contain redundant empty lines");
+        require(contents.find("Session closed : ") != std::string::npos,
+                "workflow log must contain a clean session footer");
+    } catch (...) {
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+        throw;
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+}
+
 void test_packaged_tool_layout() {
     if (std::getenv("SIPROSWF_RAXPORT") != nullptr ||
         std::getenv("SIPROSWF_SIPROS") != nullptr ||
@@ -129,6 +167,45 @@ void test_packaged_tool_layout() {
         require(tools.raxport == raxport, "packaged Raxport must resolve from lib");
         require(tools.sipros == sipros, "packaged Sipros must resolve from lib");
         require(tools.aerith == aerith, "packaged Aerith must resolve from lib");
+    } catch (...) {
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+        throw;
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+}
+
+void test_bin_tool_layout() {
+    if (std::getenv("SIPROSWF_RAXPORT") != nullptr ||
+        std::getenv("SIPROSWF_SIPROS") != nullptr ||
+        std::getenv("SIPROSWF_AERITH") != nullptr) {
+        return;
+    }
+    const std::filesystem::path root = std::filesystem::temp_directory_path() /
+        ("siproswf-bin-tools-test-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+#ifdef _WIN32
+    const std::filesystem::path workflow = root / "siproswf.exe";
+    const std::filesystem::path raxport = root / "Raxport-win-x64.exe";
+    const std::filesystem::path sipros = root / "sipros.exe";
+    const std::filesystem::path aerith = root / "aerith.exe";
+#else
+    const std::filesystem::path workflow = root / "siproswf";
+    const std::filesystem::path raxport = root / "Raxport-linux-x64";
+    const std::filesystem::path sipros = root / "sipros";
+    const std::filesystem::path aerith = root / "aerith";
+#endif
+    std::filesystem::create_directories(root);
+    try {
+        for (const auto& tool : {raxport, sipros, aerith}) {
+            std::ofstream output(tool);
+            output << "test";
+        }
+        const siproswf::ToolPaths tools = siproswf::locate_tools(workflow);
+        require(tools.raxport == raxport, "bin Raxport must resolve beside siproswf");
+        require(tools.sipros == sipros, "bin Sipros must resolve beside siproswf");
+        require(tools.aerith == aerith, "bin Aerith must resolve beside siproswf");
     } catch (...) {
         std::error_code ignored;
         std::filesystem::remove_all(root, ignored);
@@ -211,6 +288,28 @@ void test_process_runner(const std::filesystem::path& fake_tool) {
         require(combined.find("fake-tool-stderr") != std::string::npos,
                 "stderr must stream into the workflow log");
 
+        logs.clear();
+        command.arguments = {"--split-line"};
+        require(siproswf::run_process(command, logger, cancelled) == 0,
+                "fake child with split output should succeed");
+        combined.clear();
+        for (const auto& line : logs) combined += line + "\n";
+        require(combined.find(std::string(88, '-')) != std::string::npos,
+                "one child output line split across pipe reads must remain one log line");
+        const auto contains_payload = [&](const std::string& payload) {
+            const std::string marker = "| INFO  | ";
+            return std::any_of(logs.begin(), logs.end(), [&](const std::string& line) {
+                const auto found = line.find(marker);
+                return found != std::string::npos &&
+                       line.substr(found + marker.size()) == payload;
+            });
+        };
+        require(contains_payload(std::string(88, '-')),
+                "the reassembled child output must be one complete log payload");
+        require(!contains_payload(std::string(66, '-')) &&
+                    !contains_payload(std::string(22, '-')),
+                "a partial pipe-read fragment must not be logged as a complete line");
+
         command.arguments = {"--exit", "7"};
         require_throws([&] { siproswf::run_process(command, logger, cancelled); },
                        "nonzero child status must fail the workflow");
@@ -238,7 +337,9 @@ int main(int argc, char** argv) {
         siproswf::test_thread_allocation();
         siproswf::test_cli_modes();
         siproswf::test_environment_limits();
+        siproswf::test_persistent_workflow_log();
         siproswf::test_packaged_tool_layout();
+        siproswf::test_bin_tool_layout();
         siproswf::test_decoy_rules();
         siproswf::require(argc == 2, "fake-tool path argument is required");
         siproswf::test_process_runner(argv[1]);

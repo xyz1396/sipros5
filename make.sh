@@ -122,7 +122,7 @@ MKL_DISPATCH_LIBRARIES=(
 ensure_runtime_tool_permissions() {
     local binary path
     for binary in "${RUNTIME_TOOL_BINARIES[@]}"; do
-        path="$REPO_DIR/tools/$binary"
+        path="$REPO_DIR/bin/$binary"
         if [ -f "$path" ]; then
             chmod 0755 "$path"
         fi
@@ -495,7 +495,7 @@ stage_release_runtime() {
     done
 }
 
-stage_publish_tools() {
+stage_publish_bin() {
     local source_bin_dir="$1"
     local profile="${2:-full}"
     local binaries
@@ -505,8 +505,8 @@ stage_publish_tools() {
         binaries=(sipros siprosMPI aerith siproswf)
     fi
     local assets=("$DIANN_MODEL_NAME" "$DIANN_RT_MODEL_NAME")
-    local destinations=("$REPO_DIR/bin" "$REPO_DIR/tools")
-    local asset binary destination tmpdir
+    local destination="$REPO_DIR/bin"
+    local asset binary tmpdir
 
     # Validate the complete build before replacing any published executable.
     for binary in "${binaries[@]}"; do
@@ -522,32 +522,30 @@ stage_publish_tools() {
         fi
     done
 
-    for destination in "${destinations[@]}"; do
-        mkdir -p "$destination"
-        tmpdir=$(mktemp -d "$destination/.stage.XXXXXX")
-        for binary in "${binaries[@]}"; do
-            install -m 0755 "$source_bin_dir/$binary" "$tmpdir/$binary"
-        done
-        for asset in "${assets[@]}"; do
-            install -m 0644 "$source_bin_dir/$asset" "$tmpdir/$asset"
-        done
-        for binary in "${binaries[@]}"; do
-            mv -f "$tmpdir/$binary" "$destination/$binary"
-        done
-        if [ "$profile" = "cpu-release" ]; then
-            rm -f "$destination/siprosMPI"
-        fi
-        for asset in "${assets[@]}"; do
-            mv -f "$tmpdir/$asset" "$destination/$asset"
-        done
-        rmdir "$tmpdir"
-        if [ "$profile" = "cpu-release" ]; then
-            rm -rf "$destination/lib"
-            stage_release_runtime "$destination/sipros" "$destination/lib"
-            stage_release_runtime "$destination/aerith" "$destination/lib"
-            stage_release_runtime "$destination/siproswf" "$destination/lib"
-        fi
+    mkdir -p "$destination"
+    tmpdir=$(mktemp -d "$destination/.stage.XXXXXX")
+    for binary in "${binaries[@]}"; do
+        install -m 0755 "$source_bin_dir/$binary" "$tmpdir/$binary"
     done
+    for asset in "${assets[@]}"; do
+        install -m 0644 "$source_bin_dir/$asset" "$tmpdir/$asset"
+    done
+    for binary in "${binaries[@]}"; do
+        mv -f "$tmpdir/$binary" "$destination/$binary"
+    done
+    if [ "$profile" = "cpu-release" ]; then
+        rm -f "$destination/siprosMPI"
+    fi
+    for asset in "${assets[@]}"; do
+        mv -f "$tmpdir/$asset" "$destination/$asset"
+    done
+    rmdir "$tmpdir"
+    if [ "$profile" = "cpu-release" ]; then
+        rm -rf "$destination/lib"
+        stage_release_runtime "$destination/sipros" "$destination/lib"
+        stage_release_runtime "$destination/aerith" "$destination/lib"
+        stage_release_runtime "$destination/siproswf" "$destination/lib"
+    fi
     ensure_runtime_tool_permissions
 }
 
@@ -564,15 +562,14 @@ case $1 in
 "clean")
     rm -rf "$BUILD_ROOT"
     mkdir "$BUILD_ROOT"
-    rm -rf bin
-    mkdir bin
+    mkdir -p "$REPO_DIR/bin"
     rm -f \
-        "$REPO_DIR/tools/aerith" \
-        "$REPO_DIR/tools/sipros" \
-        "$REPO_DIR/tools/siprosMPI" \
-        "$REPO_DIR/tools/siproswf" \
+        "$REPO_DIR/bin/aerith" \
+        "$REPO_DIR/bin/sipros" \
+        "$REPO_DIR/bin/siprosMPI" \
+        "$REPO_DIR/bin/siproswf" \
         "$REPO_DIR/siprosRelease.zip"
-    rm -rf "$REPO_DIR/tools/lib"
+    rm -rf "$REPO_DIR/bin/lib"
     ;;
 "build")
     require_executable "$SYSTEM_CMAKE"
@@ -581,7 +578,6 @@ case $1 in
     require_executable "$SYSTEM_CXX"
     require_release_libraries
     prepare_release_build_dir "$SYSTEM_BUILD_DIR"
-    mkdir -p tools
     cd "$SYSTEM_BUILD_DIR"
     CC="$SYSTEM_CC" CXX="$SYSTEM_CXX" "$SYSTEM_CMAKE" -G Ninja "${cmake_args[@]}" \
         -DCMAKE_MAKE_PROGRAM="$SYSTEM_NINJA" \
@@ -608,13 +604,13 @@ case $1 in
         'libimgui\.so' 'libstdc\+\+\.so'
     
     # copy repo-built runtime commands atomically for publish/workflow use
-    stage_publish_tools "$SYSTEM_BUILD_DIR/bin" cpu-release
-    verify_glibc_217 "$REPO_DIR/tools/sipros"
-    verify_packaged_release_binary "$REPO_DIR/tools/sipros" "$REPO_DIR/tools/lib"
-    verify_packaged_release_binary "$REPO_DIR/tools/aerith" "$REPO_DIR/tools/lib" 1
-    verify_glibc_217 "$REPO_DIR/tools/aerith" "$REPO_DIR/tools/lib"
-    verify_packaged_release_binary "$REPO_DIR/tools/siproswf" "$REPO_DIR/tools/lib"
-    verify_glibc_217 "$REPO_DIR/tools/siproswf" "$REPO_DIR/tools/lib"
+    stage_publish_bin "$SYSTEM_BUILD_DIR/bin" cpu-release
+    verify_glibc_217 "$REPO_DIR/bin/sipros"
+    verify_packaged_release_binary "$REPO_DIR/bin/sipros" "$REPO_DIR/bin/lib"
+    verify_packaged_release_binary "$REPO_DIR/bin/aerith" "$REPO_DIR/bin/lib" 1
+    verify_glibc_217 "$REPO_DIR/bin/aerith" "$REPO_DIR/bin/lib"
+    verify_packaged_release_binary "$REPO_DIR/bin/siproswf" "$REPO_DIR/bin/lib"
+    verify_glibc_217 "$REPO_DIR/bin/siproswf" "$REPO_DIR/bin/lib"
     ;;
 "buildConda")
     export MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-$HOME/micromamba}"
@@ -652,7 +648,7 @@ case $1 in
     # cp -L -n $deplist bin/libSiprosMPI
 
     # copy repo-built runtime commands atomically for publish/workflow use
-    stage_publish_tools "$CONDA_BUILD_DIR/bin"
+    stage_publish_bin "$CONDA_BUILD_DIR/bin"
     ;;
 "debug")
     export MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-$HOME/micromamba}"
@@ -680,14 +676,14 @@ case $1 in
     tmpdir=$(mktemp -d)
     trap 'rm -rf "$tmpdir"' EXIT
     mkdir -p "$tmpdir/sipros/lib"
-    install -m 0755 "tools/siproswf" "$tmpdir/sipros/siproswf"
+    install -m 0755 "bin/siproswf" "$tmpdir/sipros/siproswf"
     for binary in sipros aerith Raxport-linux-x64; do
-        install -m 0755 "tools/$binary" "$tmpdir/sipros/lib/$binary"
+        install -m 0755 "bin/$binary" "$tmpdir/sipros/lib/$binary"
     done
     install -m 0644 LICENSE "$tmpdir/sipros/lib/LICENSE"
-    install -m 0644 "tools/$DIANN_MODEL_NAME" \
+    install -m 0644 "bin/$DIANN_MODEL_NAME" \
         "$tmpdir/sipros/lib/$DIANN_MODEL_NAME"
-    install -m 0644 "tools/$DIANN_RT_MODEL_NAME" \
+    install -m 0644 "bin/$DIANN_RT_MODEL_NAME" \
         "$tmpdir/sipros/lib/$DIANN_RT_MODEL_NAME"
     "$RELEASE_PREFIX/bin/patchelf" --force-rpath --set-rpath '$ORIGIN' \
         "$tmpdir/sipros/lib/sipros"
@@ -718,8 +714,8 @@ case $1 in
     ;;
 "run")
     echo "Open the ImGui workflow or run a headless search, for example:"
-    echo "  tools/siproswf"
-    echo "  tools/siproswf --regular-fasta-search -i input.h5 -f db.faa -o output"
+    echo "  bin/siproswf"
+    echo "  bin/siproswf --regular-fasta-search -i input.h5 -f db.faa -o output"
     ;;
 *)
     ./make "build"

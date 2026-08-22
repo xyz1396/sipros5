@@ -15,6 +15,8 @@
 
 namespace siproswf {
 
+inline constexpr const char kWorkflowLogFilename[] = "sipros_workflow.log";
+
 constexpr int kMinimumSiprosThreads = 8;
 
 enum class WorkflowMode {

@@ -794,7 +794,7 @@ void Workflow::run_fast_sip() {
 void Workflow::run() {
     const auto started = std::chrono::steady_clock::now();
     std::filesystem::create_directories(options_.output);
-    logger_.info("sipros_workflow begin");
+    logger_.info("Workflow started: " + mode_name(options_.mode));
     if (options_.mode == WorkflowMode::FastSip) {
         run_fast_sip();
     } else if (options_.mode == WorkflowMode::Spectra) {
@@ -813,7 +813,8 @@ void Workflow::run() {
                    options_.negative_control, true);
     }
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-    logger_.info("All job done. Results are in " + options_.output + ".");
+    logger_.info("Workflow completed successfully");
+    logger_.info("Results directory: " + options_.output);
     logger_.info("Total wall time: " + number(seconds) + " s");
 }
 

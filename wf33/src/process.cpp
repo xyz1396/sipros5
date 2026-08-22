@@ -36,12 +36,14 @@ static std::string lower_copy(std::string value) {
     return value;
 }
 
+#ifdef _WIN32
 static std::string trim_copy(std::string value) {
     const auto first = value.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) return {};
     const auto last = value.find_last_not_of(" \t\r\n");
     return value.substr(first, last - first + 1);
 }
+#endif
 
 int parse_integer(const std::string& option, const std::string& value) {
     try {
@@ -180,44 +182,92 @@ std::string windows_error(const std::string& context) {
 }
 #endif
 
-void log_process_chunk(Logger& logger, const char* data, std::size_t size) {
-    std::string text(data, size);
-    while (!text.empty() && (text.back() == '\r' || text.back() == '\n')) text.pop_back();
-    if (!text.empty()) logger.info(text);
+void log_process_chunk(Logger& logger, std::string& pending,
+                       const char* data, std::size_t size) {
+    pending.append(data, size);
+    std::size_t begin = 0;
+    while (begin < pending.size()) {
+        const std::size_t end = pending.find_first_of("\r\n", begin);
+        if (end == std::string::npos) break;
+        if (end > begin) logger.info(pending.substr(begin, end - begin));
+        begin = end + 1;
+        if (pending[end] == '\r' && begin < pending.size() &&
+            pending[begin] == '\n') {
+            ++begin;
+        }
+    }
+    pending.erase(0, begin);
+}
+
+void flush_process_output(Logger& logger, std::string& pending) {
+    if (!pending.empty()) logger.info(pending);
+    pending.clear();
+}
+
+constexpr const char kLogRule[] =
+    "================================================================================";
+
+std::string clean_log_message(std::string message) {
+    std::replace(message.begin(), message.end(), '\r', '\n');
+    return message;
 }
 
 Logger::Logger(const std::filesystem::path& log_path, Sink sink) : sink_(std::move(sink)) {
     if (!log_path.empty()) {
+        const std::filesystem::path parent = log_path.parent_path();
+        if (!parent.empty()) {
+            std::error_code error;
+            std::filesystem::create_directories(parent, error);
+            if (error) {
+                throw std::runtime_error("Unable to create workflow log directory " +
+                                         parent.string() + ": " + error.message());
+            }
+        }
         stream_.open(log_path, std::ios::out | std::ios::trunc);
         if (!stream_) throw std::runtime_error("Unable to create workflow log: " + log_path.string());
+        stream_ << kLogRule << '\n'
+                << "SIPROS WORKFLOW LOG" << '\n'
+                << "Session started: " << timestamp() << '\n'
+                << kLogRule << '\n';
+        stream_.flush();
     }
 }
 
-Logger::~Logger() = default;
+Logger::~Logger() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (stream_) {
+        stream_ << kLogRule << '\n'
+                << "Session closed : " << timestamp() << '\n'
+                << kLogRule << '\n';
+        stream_.flush();
+    }
+}
 
 void Logger::info(const std::string& message) { write("INFO", message); }
-void Logger::warning(const std::string& message) { write("WARNING", message); }
+void Logger::warning(const std::string& message) { write("WARN", message); }
 void Logger::error(const std::string& message) { write("ERROR", message); }
 void Logger::debug(const std::string& message) { write("DEBUG", message); }
 
 void Logger::write(const char* level, const std::string& message) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::istringstream lines(message);
+    std::istringstream lines(clean_log_message(message));
     std::string line;
     bool wrote = false;
+    const std::string when = timestamp();
     while (std::getline(lines, line)) {
-        const std::string formatted = timestamp() + " - sipros_workflow - " + level + " - " + line;
-        if (stream_) { stream_ << formatted << '\n'; stream_.flush(); }
+        const auto last = line.find_last_not_of(" \t");
+        if (last == std::string::npos) continue;
+        line.erase(last + 1);
+        std::ostringstream formatted_line;
+        formatted_line << when << " | " << std::left << std::setw(5) << level
+                       << " | " << line;
+        const std::string formatted = formatted_line.str();
+        if (stream_) stream_ << formatted << '\n';
         std::cerr << formatted << '\n';
         if (sink_) sink_(formatted);
         wrote = true;
     }
-    if (!wrote) {
-        const std::string formatted = timestamp() + " - sipros_workflow - " + level + " - ";
-        if (stream_) { stream_ << formatted << '\n'; stream_.flush(); }
-        std::cerr << formatted << '\n';
-        if (sink_) sink_(formatted);
-    }
+    if (stream_ && wrote) stream_.flush();
 }
 
 int ThreadAllocation::peak_threads() const {
@@ -397,6 +447,7 @@ int run_process(const Command& command, Logger& logger, std::atomic_bool& cancel
     }
     CloseHandle(process.hThread);
     char buffer[8192];
+    std::string pending_output;
     bool running = true;
     while (running) {
         DWORD available = 0;
@@ -404,7 +455,7 @@ int run_process(const Command& command, Logger& logger, std::atomic_bool& cancel
             DWORD read = 0;
             const DWORD amount = std::min<DWORD>(available, sizeof(buffer));
             if (!ReadFile(read_pipe, buffer, amount, &read, nullptr) || read == 0) break;
-            log_process_chunk(logger, buffer, read);
+            log_process_chunk(logger, pending_output, buffer, read);
         }
         if (cancelled.load()) {
             if (job) TerminateJobObject(job, 130);
@@ -418,8 +469,9 @@ int run_process(const Command& command, Logger& logger, std::atomic_bool& cancel
     while (PeekNamedPipe(read_pipe, nullptr, 0, nullptr, &available, nullptr) && available > 0) {
         DWORD read = 0;
         if (!ReadFile(read_pipe, buffer, std::min<DWORD>(available, sizeof(buffer)), &read, nullptr) || read == 0) break;
-        log_process_chunk(logger, buffer, read);
+        log_process_chunk(logger, pending_output, buffer, read);
     }
+    flush_process_output(logger, pending_output);
     DWORD exit_code = 1;
     GetExitCodeProcess(process.hProcess, &exit_code);
     CloseHandle(read_pipe);
@@ -473,9 +525,13 @@ int run_process(const Command& command, Logger& logger, std::atomic_bool& cancel
     bool sent_term = false;
     auto cancel_started = std::chrono::steady_clock::time_point{};
     char buffer[8192];
+    std::string pending_output;
     while (true) {
         const ssize_t count = read(pipes[0], buffer, sizeof(buffer));
-        if (count > 0) log_process_chunk(logger, buffer, static_cast<std::size_t>(count));
+        if (count > 0) {
+            log_process_chunk(logger, pending_output, buffer,
+                              static_cast<std::size_t>(count));
+        }
         const pid_t waited = waitpid(pid, &status, WNOHANG);
         if (waited == pid) break;
         if (waited < 0 && errno != EINTR) break;
@@ -491,8 +547,10 @@ int run_process(const Command& command, Logger& logger, std::atomic_bool& cancel
     while (true) {
         const ssize_t count = read(pipes[0], buffer, sizeof(buffer));
         if (count <= 0) break;
-        log_process_chunk(logger, buffer, static_cast<std::size_t>(count));
+        log_process_chunk(logger, pending_output, buffer,
+                          static_cast<std::size_t>(count));
     }
+    flush_process_output(logger, pending_output);
     close(pipes[0]);
     const int result = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
 #endif
@@ -710,8 +768,6 @@ ToolPaths locate_tools(const std::filesystem::path& executable_path) {
     const std::vector<std::filesystem::path> roots = {
         executable_dir / "lib",
         executable_dir,
-        executable_dir.parent_path() / "tools",
-        std::filesystem::current_path(error) / "tools",
     };
     auto locate = [&](const char* override_name, const std::string& filename) {
         if (const char* override_value = std::getenv(override_name); override_value && *override_value) {

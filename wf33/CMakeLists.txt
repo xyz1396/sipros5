@@ -32,7 +32,7 @@ set(SIPROSWF_SOURCES
   src/native_dialog.cpp
 )
 if(WIN32)
-  list(APPEND SIPROSWF_SOURCES siproswf.rc siproswf.ico)
+  list(APPEND SIPROSWF_SOURCES siproswf.rc siproswf.ico siproswf.manifest)
   add_executable(siproswf WIN32 ${SIPROSWF_SOURCES})
 else()
   add_executable(siproswf ${SIPROSWF_SOURCES})

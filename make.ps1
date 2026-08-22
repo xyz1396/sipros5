@@ -85,16 +85,14 @@ function Clear-WindowsOutputs {
         Remove-Item -LiteralPath $buildDirectory -Recurse -Force
     }
     New-Item -ItemType Directory -Path $buildDirectory | Out-Null
-    if (Test-Path -LiteralPath $binDirectory) {
-        Remove-Item -LiteralPath $binDirectory -Recurse -Force
-    }
-    New-Item -ItemType Directory -Path $binDirectory | Out-Null
-
+    New-Item -ItemType Directory -Path $binDirectory -Force | Out-Null
+    # Keep checked-in/downloaded runtime inputs (Raxport and DIA-NN models)
+    # available for the next configure. Only remove generated Windows outputs.
     foreach ($path in @(
-        (Join-Path $RepoDir 'tools\aerith.exe'),
-        (Join-Path $RepoDir 'tools\sipros.exe'),
-        (Join-Path $RepoDir 'tools\siproswf.exe'),
-        (Join-Path $RepoDir 'tools\siprosMPI.exe'),
+        (Join-Path $binDirectory 'aerith.exe'),
+        (Join-Path $binDirectory 'sipros.exe'),
+        (Join-Path $binDirectory 'siproswf.exe'),
+        (Join-Path $binDirectory 'siprosMPI.exe'),
         (Join-Path $RepoDir 'siprosRelease.zip')
     )) {
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
@@ -215,7 +213,7 @@ function Invoke-WindowsBuild([string]$Directory, [string]$Configuration) {
         -Description 'Native build'
 }
 
-function Publish-WindowsTools([string]$SourceBinDirectory) {
+function Publish-WindowsBinaries([string]$SourceBinDirectory) {
     $executables = @('sipros.exe', 'aerith.exe', 'siproswf.exe')
     $models = @(
         'diann-2.6.1-fragmentation.pt',
@@ -228,22 +226,10 @@ function Publish-WindowsTools([string]$SourceBinDirectory) {
         }
     }
     $binDestination = Join-Path $RepoDir 'bin'
-    $toolsDestination = Join-Path $RepoDir 'tools'
     New-Item -ItemType Directory -Path $binDestination -Force | Out-Null
-    New-Item -ItemType Directory -Path $toolsDestination -Force | Out-Null
-    foreach ($name in $models) {
-        $staleModel = Join-Path $binDestination $name
-        if (Test-Path -LiteralPath $staleModel) {
-            Remove-Item -LiteralPath $staleModel -Force
-        }
-    }
-    foreach ($name in $executables) {
-        Copy-Item -LiteralPath (Join-Path $SourceBinDirectory $name) `
-            -Destination (Join-Path $binDestination $name) -Force
-    }
     foreach ($name in @($executables + $models)) {
         Copy-Item -LiteralPath (Join-Path $SourceBinDirectory $name) `
-            -Destination (Join-Path $toolsDestination $name) -Force
+            -Destination (Join-Path $binDestination $name) -Force
     }
 }
 
@@ -299,7 +285,7 @@ function New-WindowsPackage([string]$SourceBinDirectory) {
             if (-not (Test-Path -LiteralPath $source)) { throw "Missing built runtime file: $source" }
             Copy-Item -LiteralPath $source -Destination $lib
         }
-        $raxport = Join-Path $RepoDir 'tools\Raxport-win-x64.exe'
+        $raxport = Join-Path $RepoDir 'bin\Raxport-win-x64.exe'
         if (-not (Test-Path -LiteralPath $raxport)) { throw "Missing runtime binary: $raxport" }
         Copy-Item -LiteralPath $raxport -Destination $lib
         foreach ($name in 'diann-2.6.1-fragmentation.pt', 'diann-2.6.1-retention-time.pt') {
@@ -354,12 +340,12 @@ try {
 switch ($Command) {
     'build' {
         Invoke-WindowsBuild $ReleaseBuildDir 'Release'
-        Publish-WindowsTools (Join-Path $ReleaseBuildDir 'bin')
+        Publish-WindowsBinaries (Join-Path $ReleaseBuildDir 'bin')
         Write-Host "Windows release binaries published in $RepoDir\bin"
     }
     'buildConda' {
         Invoke-WindowsBuild $CondaBuildDir 'Release'
-        Publish-WindowsTools (Join-Path $CondaBuildDir 'bin')
+        Publish-WindowsBinaries (Join-Path $CondaBuildDir 'bin')
         Write-Host "Windows Conda binaries published in $RepoDir\bin"
     }
     'debug' { Invoke-WindowsBuild $DebugBuildDir 'Debug' }
@@ -387,13 +373,13 @@ switch ($Command) {
     'package' {
         Clear-WindowsOutputs
         Invoke-WindowsBuild $ReleaseBuildDir 'Release'
-        Publish-WindowsTools (Join-Path $ReleaseBuildDir 'bin')
+        Publish-WindowsBinaries (Join-Path $ReleaseBuildDir 'bin')
         New-WindowsPackage (Join-Path $ReleaseBuildDir 'bin')
     }
     'run' {
         Write-Host 'Open the ImGui workflow or run a headless search, for example:'
-        Write-Host '  micromamba run -n sipros5 tools\siproswf.exe'
-        Write-Host '  micromamba run -n sipros5 tools\siproswf.exe --regular-fasta-search -i input.h5 -f db.faa -o output'
+        Write-Host '  micromamba run -n sipros5 bin\siproswf.exe'
+        Write-Host '  micromamba run -n sipros5 bin\siproswf.exe --regular-fasta-search -i input.h5 -f db.faa -o output'
     }
 }
 } finally {

@@ -160,6 +160,7 @@ std::optional<std::string> show_native_dialog(
 #else
     (void)owner;
     (void)kind;
+    (void)title;
     return std::nullopt;
 #endif
 }

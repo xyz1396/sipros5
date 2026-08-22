@@ -10,7 +10,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -45,6 +47,10 @@ constexpr int kBaseMinimumWidth = 760;
 constexpr int kBaseMinimumHeight = 560;
 constexpr int kSiprosIconResource = 101;
 constexpr int kRegularDefaultMaxPtmCount = 3;
+constexpr float kMaximumDpiScale = 5.0f;
+constexpr float kDpiScaleEpsilon = 0.01f;
+constexpr std::size_t kMaximumGuiLogLines = 10000;
+constexpr double kActiveEventWaitSeconds = 0.50;
 
 struct PtmChoice {
     const char* selector;
@@ -85,7 +91,8 @@ enum class PathTarget {
 
 struct GuiState {
     std::mutex mutex;
-    std::vector<std::string> logs;
+    std::deque<std::string> logs;
+    std::size_t hidden_log_lines = 0;
     std::string status = "Ready";
     std::thread worker;
     std::atomic_bool running{false};
@@ -133,11 +140,50 @@ struct ExitState {
     bool confirmed = false;
 };
 
+struct WindowState {
+    ExitState exit;
+    float content_scale = 1.0f;
+    bool dpi_change_pending = false;
+    GLFWwindowcontentscalefun previous_content_scale_callback = nullptr;
+};
+
+struct MonitorWorkArea {
+    int x = 0;
+    int y = 0;
+    int width = 1024;
+    int height = 768;
+};
+
 enum class TitleControl {
     Minimize,
     Maximize,
     Close,
 };
+
+bool initialize_glfw(bool& use_custom_frame) {
+#if defined(__linux__)
+    use_custom_frame = false;
+#  if defined(GLFW_PLATFORM_X11)
+    // GLFW otherwise prefers Wayland when both WSLg display servers are
+    // available.  Wayland requires EGL and does not allow glfwSetWindowPos,
+    // while the X11/GLX path supports the custom movable frame used here.
+    const char* display = std::getenv("DISPLAY");
+    if (display != nullptr && *display != '\0' &&
+        glfwPlatformSupported(GLFW_PLATFORM_X11) == GLFW_TRUE) {
+        glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
+        if (glfwInit() == GLFW_TRUE) {
+            use_custom_frame = true;
+            return true;
+        }
+        glfwInitHint(GLFW_PLATFORM, GLFW_ANY_PLATFORM);
+    }
+#  endif
+    return glfwInit() == GLFW_TRUE;
+#else
+    use_custom_frame = true;
+    return glfwInit() == GLFW_TRUE;
+#endif
+}
 
 static std::string lower_copy(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -278,19 +324,45 @@ unsigned int create_title_icon_texture(int) { return 0; }
 #endif
 
 void append_log(GuiState& state, const std::string& message) {
+    if (trim_copy(message).empty()) return;
     std::lock_guard<std::mutex> lock(state.mutex);
+    if (state.logs.size() == kMaximumGuiLogLines) {
+        state.logs.pop_front();
+        ++state.hidden_log_lines;
+    }
     state.logs.push_back(message);
     state.scroll_to_bottom = true;
 }
 
 void set_status(GuiState& state, const std::string& status) {
-    std::lock_guard<std::mutex> lock(state.mutex);
-    state.status = status;
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        changed = state.status != status;
+        state.status = status;
+    }
+    if (changed) glfwPostEmptyEvent();
 }
 
 std::string current_status(GuiState& state) {
     std::lock_guard<std::mutex> lock(state.mutex);
     return state.status;
+}
+
+Logger::Sink gui_log_sink(GuiState& state) {
+    return [&state](const std::string& line) {
+        append_log(state, line);
+        for (const auto* marker : {
+                 "Fast SIP phase", "Preparing Raxport",
+                 "cache preparation", "paired target/decoy",
+                 "Running Aerith"}) {
+            const auto position = line.find(marker);
+            if (position != std::string::npos) {
+                set_status(state, line.substr(position));
+                break;
+            }
+        }
+    };
 }
 
 std::string preview(const WorkflowOptions& options) {
@@ -536,10 +608,28 @@ void render_title_bar(GLFWwindow* window, float scale, float title_height,
     }
 }
 
+float normalized_content_scale(float scale_x, float scale_y) {
+    const float scale = std::max(scale_x, scale_y);
+    if (!std::isfinite(scale) || scale <= 0.0f) return 1.0f;
+    return std::clamp(scale, 1.0f, kMaximumDpiScale);
+}
+
+void handle_window_content_scale(GLFWwindow* window, float scale_x,
+                                 float scale_y) {
+    auto* state = static_cast<WindowState*>(glfwGetWindowUserPointer(window));
+    if (state == nullptr) return;
+    state->content_scale = normalized_content_scale(scale_x, scale_y);
+    state->dpi_change_pending = true;
+    if (state->previous_content_scale_callback != nullptr &&
+        state->previous_content_scale_callback != handle_window_content_scale) {
+        state->previous_content_scale_callback(window, scale_x, scale_y);
+    }
+}
+
 void handle_window_close(GLFWwindow* window) {
-    auto* state = static_cast<ExitState*>(glfwGetWindowUserPointer(window));
-    if (state == nullptr || state->confirmed) return;
-    state->confirmation_requested = true;
+    auto* state = static_cast<WindowState*>(glfwGetWindowUserPointer(window));
+    if (state == nullptr || state->exit.confirmed) return;
+    state->exit.confirmation_requested = true;
     glfwSetWindowShouldClose(window, GLFW_FALSE);
 }
 
@@ -1097,30 +1187,32 @@ void launch_workflow(GuiState& state, WorkflowOptions options,
                 std::error_code error;
                 const bool existed = std::filesystem::exists(options.output, error);
                 std::filesystem::create_directories(options.output);
-                Logger logger(std::filesystem::path(options.output) / "sipros_workflow.log",
-                              [&state](const std::string& line) {
-                    append_log(state, line);
-                    for (const auto* marker : {
-                             "Fast SIP phase", "Preparing Raxport",
-                             "cache preparation", "paired target/decoy",
-                             "Running Aerith"}) {
-                        const auto position = line.find(marker);
-                        if (position != std::string::npos) {
-                            set_status(state, line.substr(position));
-                            break;
-                        }
+                const std::filesystem::path log_path =
+                    std::filesystem::path(options.output) / kWorkflowLogFilename;
+                Logger logger(log_path, gui_log_sink(state));
+                try {
+                    logger.info("Workflow log: " + log_path.string());
+                    if (existed) logger.warning(options.output + " exists and will be overwritten");
+                    for (const auto& warning : warnings) logger.warning(warning);
+                    Workflow workflow(options, locate_tools(executable_path), logger,
+                                      state.cancelled);
+                    workflow.run();
+                    set_status(state, "Completed successfully");
+                } catch (const std::exception& error) {
+                    if (state.cancelled.load()) {
+                        logger.warning(std::string("Workflow cancelled: ") + error.what());
+                        set_status(state, "Cancelled");
+                    } else {
+                        logger.error(std::string("Workflow failed: ") + error.what());
+                        set_status(state, "Failed");
                     }
-                });
-                if (existed) logger.warning(options.output + " exists and will be overwritten");
-                for (const auto& warning : warnings) logger.warning(warning);
-                Workflow workflow(options, locate_tools(executable_path), logger, state.cancelled);
-                workflow.run();
-                set_status(state, "Completed successfully");
+                }
             } catch (const std::exception& error) {
                 append_log(state, std::string("ERROR: ") + error.what());
-                set_status(state, state.cancelled.load() ? "Cancelled" : "Failed");
+                set_status(state, "Failed");
             }
             state.running.store(false);
+            glfwPostEmptyEvent();
         });
     } catch (const std::exception& error) {
         state.running.store(false);
@@ -1171,17 +1263,31 @@ bool render_command_and_actions(WorkflowOptions& form, GuiState& state,
 }
 
 void render_log(GuiState& state, float scale) {
+    std::size_t shown_lines = 0;
+    std::size_t hidden_lines = 0;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        shown_lines = state.logs.size();
+        hidden_lines = state.hidden_log_lines;
+    }
+
     ImGui::Spacing();
     if (ImGui::BeginTable("##log_header", 2, ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("Title", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 92.0f * scale);
         ImGui::TableNextColumn();
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Workflow log");
+        if (hidden_lines == 0) {
+            ImGui::Text("Workflow log  (%zu lines)", shown_lines);
+        } else {
+            ImGui::Text("Workflow log  (%zu shown, %zu older hidden)",
+                        shown_lines, hidden_lines);
+        }
         ImGui::TableNextColumn();
         if (ImGui::Button("Clear##clear_log", ImVec2(-FLT_MIN, 0.0f))) {
             std::lock_guard<std::mutex> lock(state.mutex);
             state.logs.clear();
+            state.hidden_log_lines = 0;
             state.scroll_to_bottom = false;
         }
         ImGui::EndTable();
@@ -1189,13 +1295,32 @@ void render_log(GuiState& state, float scale) {
     ImGui::Separator();
     const float height = std::max(180.0f * scale, ImGui::GetContentRegionAvail().y);
     if (ImGui::BeginChild("##workflow_log", ImVec2(0.0f, height),
-                          ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding)) {
+                          ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding,
+                          ImGuiWindowFlags_HorizontalScrollbar)) {
         std::lock_guard<std::mutex> lock(state.mutex);
         if (state.logs.empty()) ImGui::TextDisabled("Workflow output will appear here.");
         else {
-            ImGui::PushTextWrapPos(0.0f);
-            for (const auto& line : state.logs) ImGui::TextUnformatted(line.c_str());
-            ImGui::PopTextWrapPos();
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(state.logs.size()));
+            while (clipper.Step()) {
+                for (int index = clipper.DisplayStart;
+                     index < clipper.DisplayEnd; ++index) {
+                    const std::string& line =
+                        state.logs[static_cast<std::size_t>(index)];
+                    ImVec4 color = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+                    if (line.find(" | ERROR | ") != std::string::npos ||
+                        line.rfind("ERROR:", 0) == 0) {
+                        color = ImVec4(1.0f, 0.43f, 0.38f, 1.0f);
+                    } else if (line.find(" | WARN  | ") != std::string::npos) {
+                        color = ImVec4(1.0f, 0.76f, 0.32f, 1.0f);
+                    } else if (line.find(" | DEBUG | ") != std::string::npos) {
+                        color = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+                    }
+                    ImGui::PushStyleColor(ImGuiCol_Text, color);
+                    ImGui::TextUnformatted(line.c_str());
+                    ImGui::PopStyleColor();
+                }
+            }
         }
         if (state.scroll_to_bottom) {
             ImGui::SetScrollHereY(1.0f);
@@ -1205,10 +1330,73 @@ void render_log(GuiState& state, float scale) {
     ImGui::EndChild();
 }
 
+MonitorWorkArea monitor_work_area(GLFWmonitor* monitor) {
+    MonitorWorkArea area;
+    if (monitor != nullptr) {
+        glfwGetMonitorWorkarea(monitor, &area.x, &area.y, &area.width,
+                               &area.height);
+        if (area.width <= 0 || area.height <= 0) area = MonitorWorkArea{};
+    }
+    return area;
+}
+
+GLFWmonitor* monitor_for_window(GLFWwindow* window) {
+    if (GLFWmonitor* monitor = glfwGetWindowMonitor(window); monitor != nullptr) {
+        return monitor;
+    }
+#if defined(__linux__) && defined(GLFW_PLATFORM_WAYLAND)
+    if (glfwGetPlatform() == GLFW_PLATFORM_WAYLAND) {
+        return glfwGetPrimaryMonitor();
+    }
+#endif
+    int window_x = 0, window_y = 0, window_width = 0, window_height = 0;
+    glfwGetWindowPos(window, &window_x, &window_y);
+    glfwGetWindowSize(window, &window_width, &window_height);
+
+    int monitor_count = 0;
+    GLFWmonitor** monitors = glfwGetMonitors(&monitor_count);
+    GLFWmonitor* best_monitor = nullptr;
+    std::int64_t best_overlap = -1;
+    for (int index = 0; index < monitor_count; ++index) {
+        const MonitorWorkArea area = monitor_work_area(monitors[index]);
+        const int overlap_width = std::max(
+            0, std::min(window_x + window_width, area.x + area.width) -
+                   std::max(window_x, area.x));
+        const int overlap_height = std::max(
+            0, std::min(window_y + window_height, area.y + area.height) -
+                   std::max(window_y, area.y));
+        const std::int64_t overlap =
+            static_cast<std::int64_t>(overlap_width) * overlap_height;
+        if (overlap > best_overlap) {
+            best_overlap = overlap;
+            best_monitor = monitors[index];
+        }
+    }
+    return best_monitor != nullptr ? best_monitor : glfwGetPrimaryMonitor();
+}
+
+float fitted_content_scale(float content_scale, const MonitorWorkArea& area) {
+    const float normalized = normalized_content_scale(content_scale, content_scale);
+    const float width_fit =
+        static_cast<float>(std::max(640, area.width - 48)) / 1024.0f;
+    const float height_fit =
+        static_cast<float>(std::max(480, area.height - 48)) / 768.0f;
+    return std::clamp(std::min({normalized, width_fit, height_fit}), 1.0f,
+                      normalized);
+}
+
+void configure_default_font() {
+    ImGuiIO& io = ImGui::GetIO();
+    io.FontDefault = io.Fonts->AddFontDefaultVector();
+}
+
 void configure_style(float scale) {
-    ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
+    style = ImGuiStyle{};
+    ImGui::StyleColorsDark();
     style.ScaleAllSizes(scale);
+    style.FontSizeBase = kBaseFontSize;
+    style.FontScaleDpi = scale;
     style.WindowRounding = 0.0f;
     style.ChildRounding = 5.0f * scale;
     style.FrameRounding = 4.0f * scale;
@@ -1246,36 +1434,86 @@ void configure_style(float scale) {
     style.Colors[ImGuiCol_ResizeGripHovered] = ImVec4(0.60f, 0.88f, 0.90f, 0.85f);
 }
 
+void update_window_size_limits(GLFWwindow* window, float scale,
+                               int& minimum_width, int& minimum_height) {
+    const MonitorWorkArea area = monitor_work_area(monitor_for_window(window));
+    minimum_width = std::min(
+        area.width, static_cast<int>(std::lround(kBaseMinimumWidth * scale)));
+    minimum_height = std::min(
+        area.height, static_cast<int>(std::lround(kBaseMinimumHeight * scale)));
+    glfwSetWindowSizeLimits(window, minimum_width, minimum_height,
+                            GLFW_DONT_CARE, GLFW_DONT_CARE);
+}
+
+bool update_runtime_dpi_scale(GLFWwindow* window, WindowState& window_state,
+                              float& current_scale,
+                              unsigned int& title_icon_texture,
+                              int& minimum_width, int& minimum_height) {
+    float scale_x = 1.0f;
+    float scale_y = 1.0f;
+    glfwGetWindowContentScale(window, &scale_x, &scale_y);
+    const float observed_scale = normalized_content_scale(scale_x, scale_y);
+    if (std::abs(observed_scale - window_state.content_scale) >
+        kDpiScaleEpsilon) {
+        window_state.content_scale = observed_scale;
+        window_state.dpi_change_pending = true;
+    }
+
+    const MonitorWorkArea area = monitor_work_area(monitor_for_window(window));
+    const float target_scale = fitted_content_scale(
+        window_state.content_scale, area);
+    if (!window_state.dpi_change_pending &&
+        std::abs(target_scale - current_scale) <= kDpiScaleEpsilon) {
+        return false;
+    }
+    window_state.dpi_change_pending = false;
+    if (std::abs(target_scale - current_scale) <= kDpiScaleEpsilon) {
+        return false;
+    }
+
+    current_scale = target_scale;
+    configure_style(current_scale);
+    update_window_size_limits(window, current_scale, minimum_width,
+                              minimum_height);
+    if (title_icon_texture != 0) {
+        glDeleteTextures(1, &title_icon_texture);
+    }
+    title_icon_texture = create_title_icon_texture(
+        std::max(32, static_cast<int>(std::lround(64.0f * current_scale))));
+    install_native_window_icon(window);
+    return true;
+}
+
 int run_gui(const std::filesystem::path& executable_path) {
-    if (!glfwInit()) throw std::runtime_error("Unable to initialize GLFW");
+    bool use_custom_frame = true;
+    if (!initialize_glfw(use_custom_frame)) {
+        throw std::runtime_error("Unable to initialize GLFW");
+    }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+    glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_NATIVE_CONTEXT_API);
+    glfwWindowHint(GLFW_DECORATED,
+                   use_custom_frame ? GLFW_FALSE : GLFW_TRUE);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
     GLFWmonitor* monitor = glfwGetPrimaryMonitor();
-    int work_x = 0, work_y = 0, work_width = 1024, work_height = 768;
+    const MonitorWorkArea initial_work_area = monitor_work_area(monitor);
     float monitor_scale_x = 1.0f;
     float monitor_scale_y = 1.0f;
     if (monitor != nullptr) {
-        glfwGetMonitorWorkarea(monitor, &work_x, &work_y, &work_width, &work_height);
         glfwGetMonitorContentScale(monitor, &monitor_scale_x, &monitor_scale_y);
     }
-    const float system_scale = std::clamp(
-        std::max(monitor_scale_x, monitor_scale_y), 1.0f, 2.5f);
-    const float width_fit = static_cast<float>(std::max(640, work_width - 48)) /
-                            1024.0f;
-    const float height_fit = static_cast<float>(std::max(480, work_height - 48)) /
-                             768.0f;
-    const float initial_scale = std::clamp(
-        std::min({system_scale, width_fit, height_fit}), 1.0f, system_scale);
+    const float system_scale = normalized_content_scale(
+        monitor_scale_x, monitor_scale_y);
+    const float initial_scale = fitted_content_scale(system_scale,
+                                                       initial_work_area);
     const int margin = static_cast<int>(std::lround(24.0f * initial_scale));
     const int desired_width = static_cast<int>(std::lround(1024.0f * initial_scale));
     const int desired_height = static_cast<int>(std::lround(768.0f * initial_scale));
     const int window_width = std::max(
-        640, std::min(desired_width, work_width - margin));
+        640, std::min(desired_width, initial_work_area.width - margin));
     const int window_height = std::max(
-        480, std::min(desired_height, work_height - margin));
+        480, std::min(desired_height, initial_work_area.height - margin));
     GLFWwindow* window = glfwCreateWindow(window_width, window_height,
                                           "Sipros Workflow", nullptr, nullptr);
     if (!window) {
@@ -1283,27 +1521,40 @@ int run_gui(const std::filesystem::path& executable_path) {
         throw std::runtime_error("Unable to create the Sipros Workflow window");
     }
     install_native_window_icon(window);
-    glfwSetWindowPos(window, work_x + std::max(0, (work_width - window_width) / 2),
-                     work_y + std::max(0, (work_height - window_height) / 2));
-    glfwSetWindowSizeLimits(
-        window,
-        std::min(work_width, static_cast<int>(std::lround(kBaseMinimumWidth * initial_scale))),
-        std::min(work_height, static_cast<int>(std::lround(kBaseMinimumHeight * initial_scale))),
-        GLFW_DONT_CARE, GLFW_DONT_CARE);
+    if (use_custom_frame) {
+        glfwSetWindowPos(
+            window,
+            initial_work_area.x +
+                std::max(0, (initial_work_area.width - window_width) / 2),
+            initial_work_area.y +
+                std::max(0, (initial_work_area.height - window_height) / 2));
+    }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
-    const unsigned int title_icon_texture = create_title_icon_texture(
-        std::max(32, static_cast<int>(std::lround(64.0f * initial_scale))));
+
+    WindowState window_state;
+    float current_scale_x = 1.0f;
+    float current_scale_y = 1.0f;
+    glfwGetWindowContentScale(window, &current_scale_x, &current_scale_y);
+    window_state.content_scale = normalized_content_scale(
+        current_scale_x, current_scale_y);
+    float current_scale = fitted_content_scale(
+        window_state.content_scale,
+        monitor_work_area(monitor_for_window(window)));
+    int minimum_width = 0;
+    int minimum_height = 0;
+    update_window_size_limits(window, current_scale, minimum_width,
+                              minimum_height);
+    unsigned int title_icon_texture = create_title_icon_texture(
+        std::max(32, static_cast<int>(std::lround(64.0f * current_scale))));
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    ImFontConfig font_config;
-    font_config.SizePixels = kBaseFontSize * initial_scale;
-    io.FontDefault = io.Fonts->AddFontDefaultVector(&font_config);
-    configure_style(initial_scale);
+    configure_default_font();
+    configure_style(current_scale);
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 130");
 
@@ -1317,31 +1568,51 @@ int run_gui(const std::filesystem::path& executable_path) {
     GuiState state;
     BrowserState browser;
     FramelessState frameless;
-    ExitState exit_state;
     reset_form(form, sip_range, precision, ptm_selection,
                max_ptm_count, isotope_index);
-    glfwSetWindowUserPointer(window, &exit_state);
+    glfwSetWindowUserPointer(window, &window_state);
     glfwSetWindowCloseCallback(window, handle_window_close);
-    const float title_height = kBaseTitleHeight * initial_scale;
-    const float title_button_width = kBaseTitleButtonWidth * initial_scale;
-    const float title_controls_width = 3.0f * title_button_width;
-    const int minimum_width = static_cast<int>(std::lround(kBaseMinimumWidth * initial_scale));
-    const int minimum_height = static_cast<int>(std::lround(kBaseMinimumHeight * initial_scale));
+    window_state.previous_content_scale_callback =
+        glfwSetWindowContentScaleCallback(window,
+                                          handle_window_content_scale);
 
+    bool first_frame = true;
     while (!glfwWindowShouldClose(window)) {
-        glfwPollEvents();
-        if (glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE) {
-            glfwWaitEventsTimeout(0.08);
-            continue;
+        if (first_frame) {
+            glfwPollEvents();
+            first_frame = false;
+        } else {
+            const bool iconified =
+                glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE;
+            if (state.running.load() && !iconified) {
+                glfwWaitEventsTimeout(kActiveEventWaitSeconds);
+            } else {
+                glfwWaitEvents();
+            }
+        }
+        if (glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE) continue;
+        if (update_runtime_dpi_scale(
+                window, window_state, current_scale, title_icon_texture,
+                minimum_width, minimum_height)) {
+            frameless = FramelessState{};
         }
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
         if (!state.running.load() && state.worker.joinable()) state.worker.join();
-        const int resize_cursor = update_frameless_interaction(
-            window, frameless, title_height, title_controls_width,
-            kBaseResizeBorder * initial_scale, minimum_width, minimum_height);
+        const float title_height = use_custom_frame
+            ? kBaseTitleHeight * current_scale
+            : 0.0f;
+        const float title_button_width = kBaseTitleButtonWidth * current_scale;
+        const float title_controls_width = 3.0f * title_button_width;
+        int resize_cursor = ResizeNone;
+        if (use_custom_frame) {
+            resize_cursor = update_frameless_interaction(
+                window, frameless, title_height, title_controls_width,
+                kBaseResizeBorder * current_scale, minimum_width,
+                minimum_height);
+        }
 
         ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
         ImGui::SetNextWindowSize(io.DisplaySize);
@@ -1351,12 +1622,15 @@ int run_gui(const std::filesystem::path& executable_path) {
                          ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
                          ImGuiWindowFlags_NoBringToFrontOnFocus);
         ImGui::PopStyleVar();
-        render_title_bar(window, initial_scale, title_height, title_button_width,
-                         title_icon_texture, exit_state);
+        if (use_custom_frame) {
+            render_title_bar(window, current_scale, title_height,
+                             title_button_width, title_icon_texture,
+                             window_state.exit);
+        }
 
         ImGui::SetCursorPos(ImVec2(0.0f, title_height));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
-                            ImVec2(14.0f * initial_scale, 12.0f * initial_scale));
+                            ImVec2(14.0f * current_scale, 12.0f * current_scale));
         const bool content_visible = ImGui::BeginChild(
             "##workflow_content", ImVec2(0.0f, 0.0f),
             ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_None);
@@ -1364,34 +1638,37 @@ int run_gui(const std::filesystem::path& executable_path) {
         if (content_visible) {
             const bool running = state.running.load();
             ImGui::BeginDisabled(running);
-            render_mode_selector(form, initial_scale);
-            render_path_rows(window, form, browser, state, initial_scale);
+            render_mode_selector(form, current_scale);
+            render_path_rows(window, form, browser, state, current_scale);
             render_sip_options(form, isotope_index, sip_range, precision,
-                               isotopes, IM_ARRAYSIZE(isotopes), initial_scale);
+                               isotopes, IM_ARRAYSIZE(isotopes), current_scale);
             render_advanced_options(window, form, ptm_selection, max_ptm_count,
-                                    browser, state, initial_scale);
+                                    browser, state, current_scale);
             ImGui::EndDisabled();
             sync_ptm_options(form, ptm_selection, max_ptm_count);
             if (render_command_and_actions(form, state, executable_path,
-                                           initial_scale)) {
+                                           current_scale)) {
                 reset_form(form, sip_range, precision, ptm_selection,
                            max_ptm_count, isotope_index);
                 set_status(state, "Ready");
             }
-            render_log(state, initial_scale);
+            render_log(state, current_scale);
         }
         ImGui::EndChild();
 
-        const ImVec2 window_size = io.DisplaySize;
-        ImGui::GetWindowDrawList()->AddTriangleFilled(
-            ImVec2(window_size.x, window_size.y),
-            ImVec2(window_size.x - 13.0f * initial_scale, window_size.y),
-            ImVec2(window_size.x, window_size.y - 13.0f * initial_scale),
-            ImGui::GetColorU32(ImGuiCol_ResizeGrip));
+        if (use_custom_frame) {
+            const ImVec2 window_size = io.DisplaySize;
+            ImGui::GetWindowDrawList()->AddTriangleFilled(
+                ImVec2(window_size.x, window_size.y),
+                ImVec2(window_size.x - 13.0f * current_scale, window_size.y),
+                ImVec2(window_size.x, window_size.y - 13.0f * current_scale),
+                ImGui::GetColorU32(ImGuiCol_ResizeGrip));
+        }
         ImGui::End();
 
-        render_browser(browser, form, initial_scale);
-        render_exit_confirmation(window, exit_state, state, initial_scale);
+        render_browser(browser, form, current_scale);
+        render_exit_confirmation(window, window_state.exit, state,
+                                 current_scale);
         if (resize_cursor != ResizeNone) set_resize_cursor(resize_cursor);
 
         ImGui::Render();
@@ -1406,6 +1683,8 @@ int run_gui(const std::filesystem::path& executable_path) {
 
     state.cancelled.store(true);
     if (state.worker.joinable()) state.worker.join();
+    glfwSetWindowContentScaleCallback(
+        window, window_state.previous_content_scale_callback);
     glfwSetWindowCloseCallback(window, nullptr);
     glfwSetWindowUserPointer(window, nullptr);
     if (title_icon_texture != 0) glDeleteTextures(1, &title_icon_texture);

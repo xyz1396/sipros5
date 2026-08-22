@@ -91,15 +91,23 @@ int run_application(const std::vector<std::string>& arguments,
         std::error_code error;
         const bool existed = std::filesystem::exists(parsed.options.output, error);
         std::filesystem::create_directories(parsed.options.output);
-        siproswf::Logger logger(std::filesystem::path(parsed.options.output) /
-                                "sipros_workflow.log");
+        const std::filesystem::path log_path =
+            std::filesystem::path(parsed.options.output) /
+            siproswf::kWorkflowLogFilename;
+        siproswf::Logger logger(log_path);
+        logger.info("Workflow log: " + log_path.string());
         if (existed) logger.warning(parsed.options.output +
                                     " exists and will be overwritten");
         for (const auto& warning : parsed.warnings) logger.warning(warning);
         std::atomic_bool cancelled{false};
-        siproswf::Workflow workflow(parsed.options, siproswf::locate_tools(self),
-                                    logger, cancelled);
-        workflow.run();
+        try {
+            siproswf::Workflow workflow(parsed.options, siproswf::locate_tools(self),
+                                        logger, cancelled);
+            workflow.run();
+        } catch (const std::exception& error) {
+            logger.error(std::string("Workflow failed: ") + error.what());
+            throw;
+        }
         return 0;
     } catch (const std::exception& error) {
 #ifdef _WIN32

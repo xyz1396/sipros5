@@ -135,7 +135,7 @@ siproswf -i sample.h5 -f proteins.fasta -o natural_cys_output \
   --fixed-ptm none
 
 # Show every compiled selector, token, and site
-tools/sipros search-fasta --list-ptms
+bin/sipros search-fasta --list-ptms
 ```
 
 The restored catalog contains phosphorylation and its two deterministic
@@ -368,7 +368,7 @@ There is no separate `quant.py` or IonQuant command in the workflow.
 Aerith can predict DIA-NN fragment spectra directly through LibTorch and add
 MSBooster-compatible `unweighted_spectral_entropy` to SVM rescoring. The
 renamed DIA-NN 2.6.1 fragmentation checkpoint is
-`tools/diann-2.6.1-fragmentation.pt`; the exact DIA-NN token dictionary is
+`bin/diann-2.6.1-fragmentation.pt`; the exact DIA-NN token dictionary is
 compiled into Aerith.
 The implementation keeps DIA-NN's predicted top fragments, applies each
 Raxport scan's MS2 m/z window, matches experimental peaks at 20 ppm by default,
@@ -396,7 +396,7 @@ non-MPI HDF5 2.x, PyTorch 2.12.1 CPU/MKL, and Dear ImGui 1.92.9 builds.
 Sipros, Aerith, and `siproswf`
 dynamically link their external Conda libraries. `package` bundles the complete
 non-glibc runtime closure, including HDF5, OpenMP, compiler runtimes, Torch,
-MKL, ImGui, GLFW, and OpenGL support libraries, under `tools/lib`.
+MKL, ImGui, GLFW, and OpenGL support libraries, under `bin/lib`.
 The resulting binaries require host glibc 2.17 or newer. Neither command
 configures, builds, or packages `siprosMPI`.
 
@@ -459,7 +459,7 @@ fragment matching, and entropy calculation.
 ### Native DIA-NN delta-RT in Aerith
 
 Aerith also loads the renamed DIA-NN 2.6.1 `models/rt.d0.pt` checkpoint from
-`tools/diann-2.6.1-retention-time.pt`. It predicts each unique modified peptide
+`bin/diann-2.6.1-retention-time.pt`. It predicts each unique modified peptide
 sequence once (RT is charge-independent in this graph), converts the raw model
 output to DIA-NN iRT, and fits a separate monotonic robust-LOESS calibration
 for each input sample. It computes three MSBooster-compatible values:
@@ -500,7 +500,7 @@ conda activate sipros5
 ```bash
 wget https://github.com/xyz1396/sipros5/releases/download/5.0.1/siprosRelease.zip
 unzip siprosRelease.zip
-chmod +x sipros/tools/* sipros/wf33/extractPro.sh
+chmod +x sipros/bin/* sipros/wf33/extractPro.sh
 ```
 
 ### 3. Example Commands
@@ -508,7 +508,7 @@ chmod +x sipros/tools/* sipros/wf33/extractPro.sh
 #### Regular Search
 
 ```bash
-sipros/tools/siproswf --regular-fasta-search -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o regular_output
+sipros/bin/siproswf --regular-fasta-search -i raw/Pan_062822_X1iso5.raw -f Ecoli.fasta -o regular_output
 ```
 
 #### Extract protein sequences identified in Regular search
@@ -520,13 +520,13 @@ sipros/wf33/extractPro.sh Ecoli.fasta regular_output/combined_protein.tsv db.faa
 #### Label Search
 
 ```bash
-sipros/tools/siproswf --sip-fasta-search -i raw -f db.faa -e C13 -o sip_output
+sipros/bin/siproswf --sip-fasta-search -i raw -f db.faa -e C13 -o sip_output
 ```
 
 #### Label Search with negative control using unlabeled sample
 
 ```bash
-sipros/tools/siproswf --sip-fasta-search -i raw -f db.faa -e C13 --negative_control Pan_062822_X1iso5 -o sip2_output
+sipros/bin/siproswf --sip-fasta-search -i raw -f db.faa -e C13 --negative_control Pan_062822_X1iso5 -o sip2_output
 ```
 
 ### 6. Citations
