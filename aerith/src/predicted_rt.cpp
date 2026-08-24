@@ -1,5 +1,6 @@
 #include "pipeline.hpp"
 #include "prediction_cache.hpp"
+#include "process_cpu_time.hpp"
 #include "torch_device.hpp"
 
 #include <algorithm>
@@ -370,7 +371,7 @@ RtCacheLoad load_rt_library_cache(
     const Config& config, const Dataset& unique_peptides,
     RtPredictionLibrary::Impl& library) {
     const auto timing_begin = std::chrono::steady_clock::now();
-    const auto timing_cpu_begin = std::clock();
+    const auto timing_cpu_begin = process_cpu_time_ticks();
     RtCacheLoad result;
     auto cache = read_prediction_cache(config, false);
     result.compatible = cache.compatible;
@@ -393,7 +394,7 @@ RtCacheLoad load_rt_library_cache(
     library.cache_read_timing = {
         std::chrono::duration<double>(
             std::chrono::steady_clock::now() - timing_begin).count(),
-        static_cast<double>(std::clock() - timing_cpu_begin) /
+        static_cast<double>(process_cpu_time_ticks() - timing_cpu_begin) /
             CLOCKS_PER_SEC};
     return result;
 }
@@ -404,7 +405,7 @@ StageTiming append_rt_library_cache(
     const std::unordered_map<std::string, float>& predictions,
     const RtCacheLoad& loaded) {
     const auto timing_begin = std::chrono::steady_clock::now();
-    const auto timing_cpu_begin = std::clock();
+    const auto timing_cpu_begin = process_cpu_time_ticks();
     std::unordered_map<std::string, PredictionCacheEntry> updates;
     updates.reserve(unique_peptides.rows.size());
     for (const auto& psm : unique_peptides.rows) {
@@ -422,7 +423,7 @@ StageTiming append_rt_library_cache(
     return {
         std::chrono::duration<double>(
             std::chrono::steady_clock::now() - timing_begin).count(),
-        static_cast<double>(std::clock() - timing_cpu_begin) /
+        static_cast<double>(process_cpu_time_ticks() - timing_cpu_begin) /
             CLOCKS_PER_SEC};
 }
 
@@ -900,11 +901,11 @@ RtPredictionLibrary PredictedRetentionTimeFeature::predict(
         return library;
     }
     const auto prediction_begin = std::chrono::steady_clock::now();
-    const std::clock_t prediction_cpu_begin = std::clock();
+    const ProcessCpuTick prediction_cpu_begin = process_cpu_time_ticks();
     std::string prediction_device;
     const auto predicted = predict_irt(
         model_path, missing, prediction_device);
-    const std::clock_t prediction_cpu_end = std::clock();
+    const ProcessCpuTick prediction_cpu_end = process_cpu_time_ticks();
     const auto prediction_end = std::chrono::steady_clock::now();
     library.impl_->timing = {
         std::chrono::duration<double>(prediction_end - prediction_begin).count(),

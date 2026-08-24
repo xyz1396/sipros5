@@ -1,6 +1,7 @@
 #include "filter.hpp"
 #include "isotope.hpp"
 #include "pipeline.hpp"
+#include "process_cpu_time.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -43,12 +44,12 @@ NegativeControlResult NegativeControlFilter::run(
     using Clock = std::chrono::steady_clock;
     NegativeControlResult result;
     const auto total_begin = Clock::now();
-    const auto total_cpu_begin = std::clock();
+    const auto total_cpu_begin = process_cpu_time_ticks();
     const auto record_stage = [&](
         std::string name, Clock::time_point wall_begin,
-        std::clock_t cpu_begin, bool uses_omp = false) {
+        ProcessCpuTick cpu_begin, bool uses_omp = false) {
         const auto wall_end = Clock::now();
-        const auto cpu_end = std::clock();
+        const auto cpu_end = process_cpu_time_ticks();
         result.stages.push_back({
             std::move(name),
             {std::chrono::duration<double>(
@@ -69,7 +70,7 @@ NegativeControlResult NegativeControlFilter::run(
     }
 
     const auto selection_begin = Clock::now();
-    const auto selection_cpu_begin = std::clock();
+    const auto selection_cpu_begin = process_cpu_time_ticks();
     std::vector<std::string> sample_names;
     sample_names.reserve(config.output_prefixes.size());
     std::unordered_map<std::string, std::size_t> sample_indices;
@@ -158,7 +159,7 @@ NegativeControlResult NegativeControlFilter::run(
     }
 
     const auto fold_begin = Clock::now();
-    const auto fold_cpu_begin = std::clock();
+    const auto fold_cpu_begin = process_cpu_time_ticks();
     std::vector<int> labels;
     labels.reserve(data.rows.size());
     for (const auto& psm : data.rows) {
@@ -170,7 +171,7 @@ NegativeControlResult NegativeControlFilter::run(
         fold_begin, fold_cpu_begin, true);
     RtResult rt;
     const auto svm_begin = Clock::now();
-    const auto svm_cpu_begin = std::clock();
+    const auto svm_cpu_begin = process_cpu_time_ticks();
     auto fitted = SvmRescorer::fit(
         data, rt.residuals, outer_folds, config.train_fdr,
         config.max_iterations, config.svm_c_pos, config.svm_c_neg);
@@ -179,7 +180,7 @@ NegativeControlResult NegativeControlFilter::run(
         "Fit and score SIP-Negative-control SVM folds",
         svm_begin, svm_cpu_begin, true);
     const auto statistics_begin = Clock::now();
-    const auto statistics_cpu_begin = std::clock();
+    const auto statistics_cpu_begin = process_cpu_time_ticks();
     double pi0 = 1.0;
     const bool model_valid = fitted.sample_valid.at(0) != 0;
     std::vector<double> q(data.rows.size(), 1.0);
@@ -229,7 +230,7 @@ NegativeControlResult NegativeControlFilter::run(
         statistics_begin, statistics_cpu_begin);
 
     const auto write_begin = Clock::now();
-    const auto write_cpu_begin = std::clock();
+    const auto write_cpu_begin = process_cpu_time_ticks();
     const std::filesystem::path output_dir(config.protein_output_dir);
     Config output_config = config;
     output_config.inputs.clear();
@@ -259,7 +260,7 @@ NegativeControlResult NegativeControlFilter::run(
         "Write native SIP-Negative-control reports",
         write_begin, write_cpu_begin, true);
     const auto total_end = Clock::now();
-    const auto total_cpu_end = std::clock();
+    const auto total_cpu_end = process_cpu_time_ticks();
     result.timing = {
         std::chrono::duration<double>(total_end - total_begin).count(),
         static_cast<double>(total_cpu_end - total_cpu_begin) /
@@ -272,33 +273,33 @@ Summary run_monolithic(const Config& config) {
     const auto elapsed_seconds = [](Clock::time_point begin, Clock::time_point end) {
         return std::chrono::duration<double>(end - begin).count();
     };
-    const auto cpu_seconds = [](std::clock_t begin, std::clock_t end) {
+    const auto cpu_seconds = [](ProcessCpuTick begin, ProcessCpuTick end) {
         return static_cast<double>(end - begin) / CLOCKS_PER_SEC;
     };
     const auto total_begin = Clock::now();
-    const std::clock_t cpu_begin = std::clock();
+    const ProcessCpuTick cpu_begin = process_cpu_time_ticks();
     const auto read_begin = Clock::now();
-    const std::clock_t read_cpu_begin = std::clock();
+    const ProcessCpuTick read_cpu_begin = process_cpu_time_ticks();
     auto data = PinReader::read(config);
     initialize_sip_isotope_model(config);
-    const std::clock_t read_cpu_end = std::clock();
+    const ProcessCpuTick read_cpu_end = process_cpu_time_ticks();
     const auto read_end = Clock::now();
 
     // This stage intentionally covers the whole generated entropy feature:
     // unique peptide-charge preparation, Torch spectrum prediction, HDF5
     // spectrum loading, fragment matching, and entropy calculation.
     const auto spectrum_entropy_begin = Clock::now();
-    const std::clock_t spectrum_entropy_cpu_begin = std::clock();
+    const ProcessCpuTick spectrum_entropy_cpu_begin = process_cpu_time_ticks();
     SpectralEntropyFeature::add(config, data);
-    const std::clock_t spectrum_entropy_cpu_end = std::clock();
+    const ProcessCpuTick spectrum_entropy_cpu_end = process_cpu_time_ticks();
     const auto spectrum_entropy_end = Clock::now();
 
     // DIA-NN RT inference and the sample-specific MSBooster-compatible LOESS
     // calibration are timed together as one generated-feature stage.
     const auto predicted_rt_begin = Clock::now();
-    const std::clock_t predicted_rt_cpu_begin = std::clock();
+    const ProcessCpuTick predicted_rt_cpu_begin = process_cpu_time_ticks();
     PredictedRetentionTimeFeature::add(config, data);
-    const std::clock_t predicted_rt_cpu_end = std::clock();
+    const ProcessCpuTick predicted_rt_cpu_end = process_cpu_time_ticks();
     const auto predicted_rt_end = Clock::now();
     const bool has_diann_rt = std::find(
         data.feature_names.begin(), data.feature_names.end(),
@@ -345,18 +346,18 @@ Summary run_monolithic(const Config& config) {
     }
 
     const auto fold_begin = Clock::now();
-    const std::clock_t fold_cpu_begin = std::clock();
+    const ProcessCpuTick fold_cpu_begin = process_cpu_time_ticks();
     const auto outer_folds = SvmRescorer::assign_folds(data);
     std::vector<double> diagnostic_q;
     if (use_internal_rt_model) {
         // Diagnostic only: every fitted value is recomputed inside training folds.
         diagnostic_q = target_decoy_qvalues(initial_scores, labels);
     }
-    const std::clock_t fold_cpu_end = std::clock();
+    const ProcessCpuTick fold_cpu_end = process_cpu_time_ticks();
     const auto fold_end = Clock::now();
 
     const auto rt_begin = Clock::now();
-    const std::clock_t rt_cpu_begin = std::clock();
+    const ProcessCpuTick rt_cpu_begin = process_cpu_time_ticks();
     RtResult rt;
     if (use_internal_rt_model) {
         rt = RetentionTimeModel::fit(
@@ -373,20 +374,20 @@ Summary run_monolithic(const Config& config) {
         summary.rt_training_targets = rt.training_count;
         summary.rt_r2 = rt.r2;
     }
-    const std::clock_t rt_cpu_end = std::clock();
+    const ProcessCpuTick rt_cpu_end = process_cpu_time_ticks();
     const auto rt_end = Clock::now();
 
     const auto svm_begin = Clock::now();
-    const std::clock_t svm_cpu_begin = std::clock();
+    const ProcessCpuTick svm_cpu_begin = process_cpu_time_ticks();
     auto fitted = SvmRescorer::fit(
         data, rt.residuals, outer_folds, config.train_fdr,
         config.max_iterations, config.svm_c_pos, config.svm_c_neg);
     std::vector<double> scores = std::move(fitted.scores);
-    const std::clock_t svm_cpu_end = std::clock();
+    const ProcessCpuTick svm_cpu_end = process_cpu_time_ticks();
     const auto svm_end = Clock::now();
 
     const auto statistics_begin = Clock::now();
-    const std::clock_t statistics_cpu_begin = std::clock();
+    const ProcessCpuTick statistics_cpu_begin = process_cpu_time_ticks();
     std::vector<double> q(data.rows.size(), 1.0), pep(data.rows.size(), 1.0);
     summary.sample_models.resize(data.input_paths.size());
     for (std::size_t file = 0; file < data.input_paths.size(); ++file) {
@@ -460,28 +461,28 @@ Summary run_monolithic(const Config& config) {
     summary.distinct_target_peptides = peptides.size();
     summary.distinct_target_peptide_forms = peptide_forms.size();
     summary.distinct_target_ptm_peptides = ptm_peptides.size();
-    const std::clock_t statistics_cpu_end = std::clock();
+    const ProcessCpuTick statistics_cpu_end = process_cpu_time_ticks();
     const auto statistics_end = Clock::now();
 
     const auto quantification_begin = Clock::now();
-    const std::clock_t quantification_cpu_begin = std::clock();
+    const ProcessCpuTick quantification_cpu_begin = process_cpu_time_ticks();
     auto quantification = ChromatographicQuantifier::add(config, data, q);
     summary.mbr_ions = data.transferred_ions.size();
     summary.quantification_stages = std::move(quantification.stages);
-    const std::clock_t quantification_cpu_end = std::clock();
+    const ProcessCpuTick quantification_cpu_end = process_cpu_time_ticks();
     const auto quantification_end = Clock::now();
 
     const auto write_begin = Clock::now();
-    const std::clock_t write_cpu_begin = std::clock();
+    const ProcessCpuTick write_cpu_begin = process_cpu_time_ticks();
     ResultWriter::write(config, data, scores, q, pep, rt, outer_folds);
     if (!config.sip_protein_output_path.empty()) {
         ProteinAssembler::write_sip_psm_mapping(config, data, q);
     }
-    const std::clock_t write_cpu_end = std::clock();
+    const ProcessCpuTick write_cpu_end = process_cpu_time_ticks();
     const auto write_end = Clock::now();
 
     const auto protein_begin = Clock::now();
-    const std::clock_t protein_cpu_begin = std::clock();
+    const ProcessCpuTick protein_cpu_begin = process_cpu_time_ticks();
     if (config.assemble_proteins && !config.database_path.empty() &&
         !config.decoy_database_path.empty()) {
         const auto assembly =
@@ -490,7 +491,7 @@ Summary run_monolithic(const Config& config) {
         summary.protein_output_dir = assembly.output_dir;
         summary.protein_assembly_stages = assembly.stages;
     }
-    const std::clock_t protein_cpu_end = std::clock();
+    const ProcessCpuTick protein_cpu_end = process_cpu_time_ticks();
     const auto protein_end = Clock::now();
     if (!config.negative_control_samples.empty()) {
         const auto negative =
@@ -518,7 +519,7 @@ Summary run_monolithic(const Config& config) {
         summary.negative_control_model = negative.model;
     }
     const auto completion_end = Clock::now();
-    const std::clock_t cpu_end = std::clock();
+    const ProcessCpuTick cpu_end = process_cpu_time_ticks();
 
     summary.read_timing = {
         elapsed_seconds(read_begin, read_end),
@@ -703,16 +704,16 @@ void write_stream_score_table(
 }
 
 void add_timing(StageTiming& total, Clock::time_point wall_begin,
-                std::clock_t cpu_begin) {
+                ProcessCpuTick cpu_begin) {
     total.wall_seconds += std::chrono::duration<double>(
         Clock::now() - wall_begin).count();
     total.cpu_seconds += static_cast<double>(
-        std::clock() - cpu_begin) / CLOCKS_PER_SEC;
+        process_cpu_time_ticks() - cpu_begin) / CLOCKS_PER_SEC;
 }
 
 Summary run_streamed(const Config& config) {
     const auto total_begin = Clock::now();
-    const auto total_cpu_begin = std::clock();
+    const auto total_cpu_begin = process_cpu_time_ticks();
     initialize_sip_isotope_model(config);
 
     Summary summary;
@@ -736,13 +737,13 @@ Summary run_streamed(const Config& config) {
     // The discovery pass parses only peptide and charge columns and retains
     // one exemplar per key. It does not instantiate complete PSM features.
     auto discovery_begin = Clock::now();
-    auto discovery_cpu_begin = std::clock();
+    auto discovery_cpu_begin = process_cpu_time_ticks();
     auto prediction_catalog = PinReader::discover_predictions(
         config, global_target_peptides);
     add_timing(read_timing, discovery_begin, discovery_cpu_begin);
 
     const auto spectrum_stage_begin = Clock::now();
-    const auto spectrum_stage_cpu_begin = std::clock();
+    const auto spectrum_stage_cpu_begin = process_cpu_time_ticks();
     auto spectrum_predictions =
         SpectralEntropyFeature::predict(config, prediction_catalog);
     summary.spectrum_prediction_device = spectrum_predictions.device();
@@ -754,11 +755,11 @@ Summary run_streamed(const Config& config) {
     const StageTiming spectrum_inference_outer{
         std::chrono::duration<double>(
             Clock::now() - spectrum_stage_begin).count(),
-        static_cast<double>(std::clock() - spectrum_stage_cpu_begin) /
+        static_cast<double>(process_cpu_time_ticks() - spectrum_stage_cpu_begin) /
             CLOCKS_PER_SEC};
 
     const auto rt_prediction_begin = Clock::now();
-    const auto rt_prediction_cpu_begin = std::clock();
+    const auto rt_prediction_cpu_begin = process_cpu_time_ticks();
     auto rt_predictions =
         PredictedRetentionTimeFeature::predict(config, prediction_catalog);
     summary.rt_prediction_device = rt_predictions.device();
@@ -768,7 +769,7 @@ Summary run_streamed(const Config& config) {
     const StageTiming rt_inference_outer{
         std::chrono::duration<double>(
             Clock::now() - rt_prediction_begin).count(),
-        static_cast<double>(std::clock() - rt_prediction_cpu_begin) /
+        static_cast<double>(process_cpu_time_ticks() - rt_prediction_cpu_begin) /
             CLOCKS_PER_SEC};
 
     // Prediction maps now own the canonical strings and model outputs.
@@ -802,7 +803,7 @@ Summary run_streamed(const Config& config) {
         }
         const auto run_phase = [&](StageTiming& timing, auto&& function) {
             const auto begin = Clock::now();
-            const auto cpu_begin = std::clock();
+            const auto cpu_begin = process_cpu_time_ticks();
             run_stream_sample_batch(
                 batch_count, summary.threads,
                 [&](std::size_t local) { function(batch[local]); });
@@ -874,7 +875,7 @@ Summary run_streamed(const Config& config) {
         });
 
         auto merge_begin = Clock::now();
-        auto merge_cpu_begin = std::clock();
+        auto merge_cpu_begin = process_cpu_time_ticks();
         std::size_t next_compact = data.rows.size();
         for (auto& state : batch) {
             auto& sample = state.data;
@@ -931,7 +932,7 @@ Summary run_streamed(const Config& config) {
         }
 
         merge_begin = Clock::now();
-        merge_cpu_begin = std::clock();
+        merge_cpu_begin = process_cpu_time_ticks();
         data.rows.reserve(next_compact);
         scores.reserve(next_compact);
         q.reserve(next_compact);
@@ -1002,14 +1003,14 @@ Summary run_streamed(const Config& config) {
     summary.distinct_target_ptm_peptides = ptm_peptides.size();
 
     auto begin = Clock::now();
-    auto cpu_begin = std::clock();
+    auto cpu_begin = process_cpu_time_ticks();
     auto quantification = ChromatographicQuantifier::add(config, data, q);
     summary.mbr_ions = data.transferred_ions.size();
     summary.quantification_stages = std::move(quantification.stages);
     add_timing(summary.quantification_timing, begin, cpu_begin);
 
     begin = Clock::now();
-    cpu_begin = std::clock();
+    cpu_begin = process_cpu_time_ticks();
     Config filtered_config = config;
     filtered_config.filtered_only = true;
     RtResult no_internal_rt;
@@ -1045,7 +1046,7 @@ Summary run_streamed(const Config& config) {
     add_timing(summary.write_timing, begin, cpu_begin);
 
     begin = Clock::now();
-    cpu_begin = std::clock();
+    cpu_begin = process_cpu_time_ticks();
     if (config.assemble_proteins && !config.database_path.empty() &&
         !config.decoy_database_path.empty()) {
         const auto assembly =
@@ -1081,7 +1082,7 @@ Summary run_streamed(const Config& config) {
 
     summary.total_timing = {
         std::chrono::duration<double>(Clock::now() - total_begin).count(),
-        static_cast<double>(std::clock() - total_cpu_begin) /
+        static_cast<double>(process_cpu_time_ticks() - total_cpu_begin) /
             CLOCKS_PER_SEC};
     return summary;
 }

@@ -1,5 +1,6 @@
 #include "workflow.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -36,6 +37,34 @@ void test_thread_allocation() {
     require(minimum.peak_threads() <= 15, "allocation may not oversubscribe");
     require_throws([] { siproswf::allocate_threads(0, 1); },
                    "zero total must be rejected");
+
+    constexpr std::uint64_t gib = std::uint64_t{1024} * 1024 * 1024;
+    require(siproswf::serialize_sipros_searches(8, 64 * gib),
+            "eight threads must serialize target and decoy searches");
+    require(siproswf::serialize_sipros_searches(16, 32 * gib),
+            "32 GiB usable RAM must serialize target and decoy searches");
+    require(!siproswf::serialize_sipros_searches(16, 32 * gib + 1),
+            "more than 32 GiB with more than eight threads may run concurrently");
+    require(!siproswf::serialize_sipros_searches(16, 0),
+            "unknown usable RAM must leave the thread rule authoritative");
+
+    const auto thread_limited = siproswf::allocate_sipros_search_threads(
+        8, 2, 1, 64 * gib);
+    require(thread_limited.worker_count == 1 &&
+                thread_limited.task_threads == std::vector<int>({8, 8}),
+            "serialized pair must give the full thread budget to each job");
+
+    const auto memory_limited = siproswf::allocate_sipros_search_threads(
+        16, 4, siproswf::kMinimumSiprosThreads, 32 * gib);
+    require(memory_limited.worker_count == 1 &&
+                memory_limited.task_threads == std::vector<int>({16, 16, 16, 16}),
+            "low usable RAM must serialize every Sipros target/decoy job");
+
+    const auto concurrent = siproswf::allocate_sipros_search_threads(
+        16, 2, 1, 64 * gib);
+    require(concurrent.worker_count == 2 &&
+                concurrent.task_threads == std::vector<int>({8, 8}),
+            "adequate threads and RAM must preserve paired concurrency");
 }
 
 void test_cli_modes() {
@@ -114,6 +143,9 @@ void test_persistent_workflow_log() {
         require(input.good() || input.eof(), "workflow log must be readable");
         require(contents.find("SIPROS WORKFLOW LOG") != std::string::npos,
                 "workflow log must contain a readable session header");
+        require(contents.find("Sipros version: " SIPROS_VERSION) !=
+                    std::string::npos,
+                "workflow log must contain the Sipros version");
         require(contents.find("| INFO  | persistent-info") !=
                     std::string::npos,
                 "workflow INFO message must be written to the output log");

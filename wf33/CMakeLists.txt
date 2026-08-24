@@ -18,6 +18,9 @@ target_include_directories(siproswf_core PUBLIC
 )
 target_link_libraries(siproswf_core PUBLIC Threads::Threads)
 target_compile_features(siproswf_core PUBLIC cxx_std_17)
+target_compile_definitions(siproswf_core PUBLIC
+  SIPROS_VERSION="${SIPROS_VERSION}"
+)
 
 if(MSVC)
   target_compile_options(siproswf_core PRIVATE /utf-8 /W4)

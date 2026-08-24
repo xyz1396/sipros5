@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <fstream>
@@ -18,6 +19,8 @@ namespace siproswf {
 inline constexpr const char kWorkflowLogFilename[] = "sipros_workflow.log";
 
 constexpr int kMinimumSiprosThreads = 8;
+inline constexpr std::uint64_t kParallelSiprosMinimumUsableMemoryBytes =
+    std::uint64_t{32} * 1024 * 1024 * 1024;
 
 enum class WorkflowMode {
     Auto,
@@ -107,9 +110,15 @@ private:
 };
 
 int physical_cpu_count();
+std::uint64_t usable_memory_bytes();
 int effective_thread_count(int requested, int available = 0);
 ThreadAllocation allocate_threads(int total_threads, int task_count,
                                   int minimum_threads_per_task = 1);
+bool serialize_sipros_searches(int total_threads,
+                               std::uint64_t usable_memory);
+ThreadAllocation allocate_sipros_search_threads(
+    int total_threads, int task_count, int minimum_threads_per_task,
+    std::uint64_t usable_memory);
 std::map<std::string, std::string> thread_environment(int thread_count);
 
 ParseResult parse_arguments(const std::vector<std::string>& arguments);

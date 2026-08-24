@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.12)
-project(Sipros)
+project(Sipros VERSION 6.0.0)
 include(CTest)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+set(SIPROS_VERSION "${PROJECT_VERSION}" CACHE STRING "Sipros release version")
 
 message("${CMAKE_BUILD_TYPE}")
 message("${CMAKE_CXX_COMPILER}")

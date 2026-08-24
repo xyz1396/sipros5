@@ -132,6 +132,46 @@ void log_allocation(State& state, const std::string& phase,
         std::to_string(state.options.threads) + " thread budget at peak");
 }
 
+std::string gibibytes(std::uint64_t bytes) {
+    std::ostringstream output;
+    output << std::fixed << std::setprecision(2)
+           << static_cast<long double>(bytes) /
+                  static_cast<long double>(std::uint64_t{1024} * 1024 * 1024);
+    return output.str();
+}
+
+template <typename State>
+ThreadAllocation sipros_search_allocation(
+    State& state, int task_count, int minimum_threads_per_task,
+    const std::string& phase) {
+    const std::uint64_t usable_memory = usable_memory_bytes();
+    const bool serial = serialize_sipros_searches(
+        state.options.threads, usable_memory);
+    if (serial && task_count > 1) {
+        std::vector<std::string> reasons;
+        if (state.options.threads <= kMinimumSiprosThreads) {
+            reasons.push_back(
+                "thread budget " + std::to_string(state.options.threads) +
+                " <= " + std::to_string(kMinimumSiprosThreads));
+        }
+        if (usable_memory > 0 &&
+            usable_memory <= kParallelSiprosMinimumUsableMemoryBytes) {
+            reasons.push_back(
+                "usable RAM " + gibibytes(usable_memory) + " GiB <= 32 GiB");
+        }
+        std::ostringstream message;
+        message << phase << ": target and decoy searches will run serially because ";
+        for (std::size_t index = 0; index < reasons.size(); ++index) {
+            if (index != 0) message << " and ";
+            message << reasons[index];
+        }
+        state.logger->info(message.str());
+    }
+    return allocate_sipros_search_threads(
+        state.options.threads, task_count, minimum_threads_per_task,
+        usable_memory);
+}
+
 template <typename State>
 void run_parallel(State& state, std::vector<Command> commands,
                   const ThreadAllocation& allocation) {
@@ -430,8 +470,11 @@ void regular_fasta_search(State& state) {
     run_command(state, preparation(state.fasta, target_cache));
     run_command(state, preparation(state.decoy, decoy_cache));
 
-    const ThreadAllocation pair_allocation = allocate_threads(state.options.threads, 2);
-    log_allocation(state, "Sipros Regular FASTA paired target/decoy cache-H5 search", pair_allocation);
+    const std::string phase =
+        "Sipros Regular FASTA paired target/decoy cache-H5 search";
+    const ThreadAllocation pair_allocation = sipros_search_allocation(
+        state, 2, 1, phase);
+    log_allocation(state, phase, pair_allocation);
     for (const auto& base : state.base_names) {
         const std::filesystem::path sample_dir = state.output / base;
         std::filesystem::create_directories(sample_dir);
@@ -474,8 +517,9 @@ void sip_fasta_search(State& state) {
         commands.push_back(search(state.fasta, base + "_target.pin", "1"));
         commands.push_back(search(state.decoy, base + "_decoy.pin", "-1"));
     }
-    const ThreadAllocation allocation = allocate_threads(
-        state.options.threads, static_cast<int>(commands.size()), kMinimumSiprosThreads);
+    const ThreadAllocation allocation = sipros_search_allocation(
+        state, static_cast<int>(commands.size()), kMinimumSiprosThreads,
+        "Sipros FASTA search");
     log_allocation(state, "Sipros FASTA search", allocation);
     run_parallel(state, std::move(commands), allocation);
 }
@@ -549,8 +593,11 @@ std::filesystem::path generate_or_reuse_spectra(State& state) {
 
 template <typename State>
 void search_spectra_samples(State& state, const std::filesystem::path& spectra) {
-    const ThreadAllocation allocation = allocate_threads(state.options.threads, 2);
-    log_allocation(state, "Sipros spectra paired target/decoy SFI-H5 search", allocation);
+    const std::string phase =
+        "Sipros spectra paired target/decoy SFI-H5 search";
+    const ThreadAllocation allocation = sipros_search_allocation(
+        state, 2, 1, phase);
+    log_allocation(state, phase, allocation);
     for (const auto& base : state.base_names) {
         const std::filesystem::path sample_dir = state.output / base;
         std::filesystem::create_directories(sample_dir);

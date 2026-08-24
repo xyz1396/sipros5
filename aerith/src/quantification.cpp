@@ -1,5 +1,6 @@
 #include "pipeline.hpp"
 #include "isotope.hpp"
+#include "process_cpu_time.hpp"
 #include "quantification.hpp"
 
 #include <algorithm>
@@ -2099,14 +2100,14 @@ QuantificationResult ChromatographicQuantifier::add(
                                     Clock::time_point end) {
         return std::chrono::duration<double>(end - begin).count();
     };
-    const auto cpu_seconds = [](std::clock_t begin, std::clock_t end) {
+    const auto cpu_seconds = [](ProcessCpuTick begin, ProcessCpuTick end) {
         return static_cast<double>(end - begin) / CLOCKS_PER_SEC;
     };
     const auto add_elapsed = [&](StageTiming& timing,
                                  Clock::time_point wall_begin,
-                                 std::clock_t cpu_begin) {
+                                 ProcessCpuTick cpu_begin) {
         timing.wall_seconds += elapsed_seconds(wall_begin, Clock::now());
-        timing.cpu_seconds += cpu_seconds(cpu_begin, std::clock());
+        timing.cpu_seconds += cpu_seconds(cpu_begin, process_cpu_time_ticks());
     };
     const auto record_stage = [&](std::string name, const StageTiming& timing,
                                   bool uses_omp = false,
@@ -2131,12 +2132,12 @@ QuantificationResult ChromatographicQuantifier::add(
     }
     for (std::size_t file = 0; file < file_count; ++file) {
         auto wall_begin = Clock::now();
-        auto cpu_begin = std::clock();
+        auto cpu_begin = process_cpu_time_ticks();
         const auto ms1 = load_quant_ms1(config.spectrum_paths[file]);
         add_elapsed(load_identified_timing, wall_begin, cpu_begin);
 
         wall_begin = Clock::now();
-        cpu_begin = std::clock();
+        cpu_begin = process_cpu_time_ticks();
         std::vector<std::size_t> rows;
         for (std::size_t row = 0; row < data.rows.size(); ++row) {
             if (data.rows[row].file_id == file &&
@@ -2149,7 +2150,7 @@ QuantificationResult ChromatographicQuantifier::add(
         add_elapsed(select_timing, wall_begin, cpu_begin);
 
         wall_begin = Clock::now();
-        cpu_begin = std::clock();
+        cpu_begin = process_cpu_time_ticks();
         #pragma omp parallel for schedule(dynamic, 32)
         for (std::ptrdiff_t index = 0;
              index < static_cast<std::ptrdiff_t>(rows.size()); ++index) {
@@ -2172,7 +2173,7 @@ QuantificationResult ChromatographicQuantifier::add(
         trace_identified_timing, true);
 
     const auto index_wall_begin = Clock::now();
-    const auto index_cpu_begin = std::clock();
+    const auto index_cpu_begin = process_cpu_time_ticks();
     std::size_t chromatographic_features = 0;
     for (std::size_t row = 0; row < data.rows.size(); ++row) {
         const auto& psm = data.rows[row];
@@ -2230,7 +2231,7 @@ QuantificationResult ChromatographicQuantifier::add(
     std::map<int, QuantPooledEvidence> pooled_evidence;
     for (std::size_t acceptor = 0; acceptor < file_count; ++acceptor) {
         auto wall_begin = Clock::now();
-        auto cpu_begin = std::clock();
+        auto cpu_begin = process_cpu_time_ticks();
         std::vector<QuantAlignment> alignments;
         for (std::size_t donor = 0; donor < file_count; ++donor) {
             if (donor == acceptor) continue;
@@ -2254,7 +2255,7 @@ QuantificationResult ChromatographicQuantifier::add(
         if (alignments.empty()) continue;
 
         wall_begin = Clock::now();
-        cpu_begin = std::clock();
+        cpu_begin = process_cpu_time_ticks();
         // Trace every eligible donor. A peptide can align differently from
         // each run, so choose its donor only after scoring acceptor evidence.
         // Count and fill each donor's stable output slice independently. This
@@ -2321,12 +2322,12 @@ QuantificationResult ChromatographicQuantifier::add(
         add_elapsed(scheduling_timing, wall_begin, cpu_begin);
 
         wall_begin = Clock::now();
-        cpu_begin = std::clock();
+        cpu_begin = process_cpu_time_ticks();
         const auto ms1 = load_quant_ms1(config.spectrum_paths[acceptor]);
         add_elapsed(load_mbr_timing, wall_begin, cpu_begin);
 
         wall_begin = Clock::now();
-        cpu_begin = std::clock();
+        cpu_begin = process_cpu_time_ticks();
         std::vector<QuantTransferCandidate> candidates(jobs.size());
         #pragma omp parallel for schedule(dynamic, 8)
         for (std::ptrdiff_t index = 0;
@@ -2409,7 +2410,7 @@ QuantificationResult ChromatographicQuantifier::add(
         add_elapsed(trace_mbr_timing, wall_begin, cpu_begin);
 
         wall_begin = Clock::now();
-        cpu_begin = std::clock();
+        cpu_begin = process_cpu_time_ticks();
         struct QuantBinEvidence {
             std::vector<QuantTransferFeatures> training_targets;
             std::vector<QuantTransferFeatures> training_decoys;
@@ -2637,7 +2638,7 @@ QuantificationResult ChromatographicQuantifier::add(
     std::map<int, double> null_tail_false_by_sip_bin;
     {
         const auto wall_begin = Clock::now();
-        const auto cpu_begin = std::clock();
+        const auto cpu_begin = process_cpu_time_ticks();
         // Models remain acceptor/bin specific, but transferred-ion FDR is
         // estimated over all acceptors within the same SIP-abundance bin.
         struct NullTailGroup {

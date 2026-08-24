@@ -2,20 +2,37 @@
 #include "isotope.hpp"
 #include "pipeline.hpp"
 #include "prediction_cache.hpp"
+#include "process_cpu_time.hpp"
 #include "quantification.hpp"
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <numeric>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 int main() {
+    const auto idle_wall_begin = std::chrono::steady_clock::now();
+    const auto idle_cpu_begin = aerith::process_cpu_time_ticks();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const double idle_wall_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - idle_wall_begin).count();
+    const double idle_cpu_seconds =
+        (aerith::process_cpu_time_ticks() - idle_cpu_begin) / CLOCKS_PER_SEC;
+    if (idle_wall_seconds < 0.15 ||
+        idle_cpu_seconds >= idle_wall_seconds * 0.5) {
+        throw std::runtime_error(
+            "Process CPU timer advanced like wall time while the process was idle");
+    }
+
     assert(aerith::Config{}.sample_parallelism == 3);
     const auto cache_root = std::filesystem::temp_directory_path() /
         "aerith_combined_prediction_cache_test";

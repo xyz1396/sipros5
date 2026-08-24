@@ -6,7 +6,7 @@ set -e
 # `build` and `package` run in a dedicated CPU release environment. The
 # environment is created automatically when it is missing or has stale pins:
 #   micromamba create -n sipros5-release -c conda-forge \
-#     sysroot_linux-64=2.17 gcc_linux-64 gxx_linux-64 cmake ninja patchelf \
+#     sysroot_linux-64=2.17 gcc_linux-64 gxx_linux-64 cmake ninja patchelf curl \
 #     "hdf5=2.*=nompi*" \
 #     "pytorch-cpu=2.12.1=cpu_mkl*" imgui=1.92.9 libvulkan-headers libgl-devel
 # 
@@ -28,6 +28,17 @@ if ! command -v "$MAMBA_EXE" >/dev/null 2>&1 && [ -x "$HOME/.local/bin/micromamb
 fi
 RELEASE_ENV_NAME="${RELEASE_ENV_NAME:-sipros5-release}"
 RELEASE_ENV_ACTIVE="${SIPROS_RELEASE_ENV_ACTIVE:-0}"
+SIPROS_VERSION="${SIPROS_VERSION:-6.0.0}"
+PACKAGE_BASENAME="sipros_linux_${SIPROS_VERSION}"
+APPIMAGE_FILENAME="${PACKAGE_BASENAME}_x86_64.AppImage"
+APPIMAGETOOL_VERSION="1.9.1"
+APPIMAGETOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+APPIMAGE_RUNTIME_VERSION="20251108"
+APPIMAGE_RUNTIME_SHA256="2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
+if [[ ! "$SIPROS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "SIPROS_VERSION must be a three-part numeric version; got '$SIPROS_VERSION'." >&2
+    exit 1
+fi
 
 ensure_release_environment() {
     if "$MAMBA_EXE" run -n "$RELEASE_ENV_NAME" python -c \
@@ -44,7 +55,9 @@ assert glob.glob(prefix + "/conda-meta/libvulkan-headers-*.json")
 assert glob.glob(prefix + "/conda-meta/libgl-devel-*.json")
 assert os.path.isfile(prefix + "/lib/libhdf5.so")
 assert os.path.isfile(prefix + "/lib/libhdf5_cpp.so")
-assert os.access(prefix + "/bin/patchelf", os.X_OK)' \
+assert os.path.isfile(prefix + "/lib/libSDL3.so.0")
+assert os.access(prefix + "/bin/patchelf", os.X_OK)
+assert os.access(prefix + "/bin/curl", os.X_OK)' \
         >/dev/null 2>&1; then
         return
     fi
@@ -56,7 +69,7 @@ assert os.access(prefix + "/bin/patchelf", os.X_OK)' \
     "$MAMBA_EXE" "$action" -y -n "$RELEASE_ENV_NAME" \
         -c conda-forge --strict-channel-priority \
         "sysroot_linux-64=2.17" \
-        gcc_linux-64 gxx_linux-64 cmake ninja patchelf \
+        gcc_linux-64 gxx_linux-64 cmake ninja patchelf curl \
         "hdf5=2.*=nompi*" \
         "pytorch-cpu=2.12.1=cpu_mkl*" \
         imgui=1.92.9 libvulkan-headers libgl-devel
@@ -69,6 +82,7 @@ if [[ "${1:-}" = "build" || "${1:-}" = "package" ]] &&
     ensure_release_environment
     exec "$MAMBA_EXE" run -n "$RELEASE_ENV_NAME" \
         env -u LD_LIBRARY_PATH -u LDFLAGS SIPROS_RELEASE_ENV_ACTIVE=1 \
+        SIPROS_VERSION="$SIPROS_VERSION" \
         "$REPO_DIR/make.sh" "$@"
 fi
 
@@ -93,7 +107,12 @@ else
     SYSTEM_TORCH_ROOT="${SYSTEM_TORCH_ROOT:-/opt/libtorch}"
 fi
 SYSTEM_TORCH_LIB_DIR="$SYSTEM_TORCH_ROOT/lib"
-BUILD_ROOT="$REPO_DIR/build"
+REPOSITORY_BUILD_ROOT="$REPO_DIR/build"
+BUILD_ROOT="$REPOSITORY_BUILD_ROOT/linux"
+if [ "$RELEASE_ENV_ACTIVE" = "1" ]; then
+    APPIMAGETOOL_PATH="$RELEASE_PREFIX/bin/appimagetool"
+    APPIMAGE_RUNTIME_PATH="$RELEASE_PREFIX/share/sipros5/appimage/runtime-x86_64"
+fi
 SYSTEM_BUILD_DIR="$BUILD_ROOT/system"
 CONDA_BUILD_DIR="$BUILD_ROOT/conda"
 CONDA_DEBUG_BUILD_DIR="$BUILD_ROOT/conda-debug"
@@ -114,6 +133,11 @@ MKL_DISPATCH_LIBRARIES=(
     libmkl_vml_avx2.so.3
     libmkl_vml_avx512.so.3
     libmkl_vml_def.so.3
+)
+GUI_RUNTIME_LIBRARIES=(
+    # Conda's SDL2 compatibility library loads SDL3 with dlopen, so SDL3 is
+    # intentionally absent from its ELF NEEDED records.
+    libSDL3.so.0
 )
 
 # Archive extraction and file copies can drop execute bits from the bundled
@@ -183,7 +207,7 @@ require_release_libraries() {
 prepare_conda_build_dir() {
     mkdir -p "$1"
     local cache="$1/CMakeCache.txt"
-    local hdf5_dir="=$CONDA_PREFIX/cmake"
+    local hdf5_dir="=$CONDA_HDF5_DIR"
     local torch_dir="=$TORCH_CMAKE_DIR"
     local torch_version="=$TORCH_VERSION"
     local cuda_compiler="=$CONDA_PREFIX/bin/nvcc"
@@ -195,6 +219,18 @@ prepare_conda_build_dir() {
            ! grep -F 'CMAKE_CUDA_COMPILER:' "$cache" | grep -Fq "$cuda_compiler"; }; }; then
         echo "Reconfiguring $1 with the current Conda HDF5, CUDA, and LibTorch"
         rm -rf "$cache" "$1/CMakeFiles"
+    fi
+}
+
+resolve_conda_hdf5() {
+    if [ -f "$CONDA_PREFIX/lib/cmake/hdf5/hdf5-config.cmake" ]; then
+        CONDA_HDF5_DIR="$CONDA_PREFIX/lib/cmake/hdf5"
+    else
+        CONDA_HDF5_DIR="$CONDA_PREFIX/cmake"
+    fi
+    if [ ! -f "$CONDA_HDF5_DIR/hdf5-config.cmake" ]; then
+        echo "Missing Conda HDF5 CMake package: $CONDA_HDF5_DIR" >&2
+        exit 1
     fi
 }
 
@@ -376,6 +412,7 @@ verify_packaged_release_binary() {
     local binary="$1"
     local library_dir="$2"
     local require_mkl="${3:-0}"
+    local expected_rpath="${4:-\$ORIGIN/lib}"
     local dependencies dynamic dependency arrow resolved remainder required
     dependencies=$(env -u LD_LIBRARY_PATH LD_LIBRARY_PATH="$library_dir" \
         ldd "$binary" 2>&1) || {
@@ -389,7 +426,7 @@ verify_packaged_release_binary() {
            <<<"$dependencies" ||
        grep -Fq "$SYSTEM_TORCH_LIB_DIR" <<<"$dynamic" ||
        ! grep -Fq '(RPATH)' <<<"$dynamic" ||
-       ! grep -Fq '$ORIGIN/lib' <<<"$dynamic"; then
+       ! grep -Fq "$expected_rpath" <<<"$dynamic"; then
         echo "Packaged release runtime is incomplete or not relocatable: $binary" >&2
         echo "$dependencies" >&2
         return 1
@@ -420,6 +457,12 @@ verify_packaged_release_binary() {
             fi
         done
     fi
+    for required in "${GUI_RUNTIME_LIBRARIES[@]}"; do
+        if [ ! -f "$library_dir/$required" ]; then
+            echo "Packaged workflow is missing runtime-selected library: $required" >&2
+            return 1
+        fi
+    done
 }
 
 stage_release_runtime() {
@@ -430,6 +473,18 @@ stage_release_runtime() {
     local -A visited=()
 
     mkdir -p "$destination"
+    for name in "${GUI_RUNTIME_LIBRARIES[@]}"; do
+        source="$SYSTEM_TORCH_LIB_DIR/$name"
+        if [ ! -f "$source" ]; then
+            echo "Missing required GUI runtime library: $source" >&2
+            return 1
+        fi
+        if [ ! -f "$destination/$name" ]; then
+            cp -L "$source" "$destination/$name"
+            chmod 0755 "$destination/$name"
+        fi
+        queue+=("$source")
+    done
     while [ "${#queue[@]}" -gt 0 ]; do
         current="${queue[0]}"
         queue=("${queue[@]:1}")
@@ -493,6 +548,92 @@ stage_release_runtime() {
             chmod 0755 "$destination/$name"
         fi
     done
+}
+
+verify_sha256() {
+    local path="$1"
+    local expected="$2"
+    local checksum
+    checksum=$("$SYSTEM_CMAKE" -E sha256sum "$path") || return 1
+    [ "${checksum%% *}" = "$expected" ]
+}
+
+physical_core_count() {
+    local cores
+    cores=$(LC_ALL=C lscpu -p=CORE,SOCKET 2>/dev/null |
+        awk -F, '!/^#/ { seen[$1 "," $2] = 1 } END { print length(seen) }')
+    if [[ ! "$cores" =~ ^[1-9][0-9]*$ ]]; then
+        cores=1
+    fi
+    printf '%s\n' "$cores"
+}
+
+download_verified_file() {
+    local url="$1"
+    local destination="$2"
+    local expected_sha256="$3"
+    local temporary
+
+    if [ -f "$destination" ] && verify_sha256 "$destination" "$expected_sha256"; then
+        return
+    fi
+
+    require_executable "$RELEASE_PREFIX/bin/curl"
+    mkdir -p "$(dirname "$destination")"
+    rm -f "$destination"
+    temporary=$(mktemp "$destination.download.XXXXXX")
+    if ! "$RELEASE_PREFIX/bin/curl" --fail --location --silent --show-error \
+        --retry 3 --retry-delay 1 --output "$temporary" "$url"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    if ! verify_sha256 "$temporary" "$expected_sha256"; then
+        echo "SHA-256 verification failed for $url" >&2
+        rm -f "$temporary"
+        return 1
+    fi
+    mv "$temporary" "$destination"
+}
+
+create_appimage() {
+    local appdir="$1"
+    local output="$2"
+    local desktop="$appdir/sipros.desktop"
+    local icon="$appdir/sipros.png"
+    local appimage_jobs
+
+    download_verified_file \
+        "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-x86_64.AppImage" \
+        "$APPIMAGETOOL_PATH" "$APPIMAGETOOL_SHA256"
+    download_verified_file \
+        "https://github.com/AppImage/type2-runtime/releases/download/$APPIMAGE_RUNTIME_VERSION/runtime-x86_64" \
+        "$APPIMAGE_RUNTIME_PATH" "$APPIMAGE_RUNTIME_SHA256"
+    chmod 0755 "$APPIMAGETOOL_PATH"
+    chmod 0644 "$APPIMAGE_RUNTIME_PATH"
+
+    ln -s siproswf "$appdir/AppRun"
+    install -m 0644 "$REPO_DIR/wf33/sipros_logo.png" "$icon"
+    printf '%s\n' \
+        '[Desktop Entry]' \
+        'Type=Application' \
+        'Name=Sipros5' \
+        'Comment=Proteomics database search and workflow' \
+        'Exec=siproswf' \
+        'Icon=sipros' \
+        'Terminal=false' \
+        'Categories=Science;' > "$desktop"
+
+    rm -f "$output"
+    appimage_jobs=$(physical_core_count)
+    APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 VERSION="$SIPROS_VERSION" \
+        "$APPIMAGETOOL_PATH" --no-appstream \
+        --runtime-file "$APPIMAGE_RUNTIME_PATH" \
+        --mksquashfs-opt=-processors --mksquashfs-opt="$appimage_jobs" \
+        "$appdir" "$output"
+    chmod 0755 "$output"
+    APPIMAGE_EXTRACT_AND_RUN=1 "$output" --help >/dev/null
+
+    rm -f "$appdir/AppRun" "$appdir/.DirIcon" "$desktop" "$icon"
 }
 
 stage_publish_bin() {
@@ -560,15 +701,25 @@ ensure_runtime_tool_permissions
 case $1 in
 "load") ;;
 "clean")
-    rm -rf "$BUILD_ROOT"
-    mkdir "$BUILD_ROOT"
+    rm -rf "$REPOSITORY_BUILD_ROOT"
     mkdir -p "$REPO_DIR/bin"
     rm -f \
         "$REPO_DIR/bin/aerith" \
+        "$REPO_DIR/bin/aerith.exe" \
         "$REPO_DIR/bin/sipros" \
+        "$REPO_DIR/bin/sipros.exe" \
         "$REPO_DIR/bin/siprosMPI" \
+        "$REPO_DIR/bin/siprosMPI.exe" \
         "$REPO_DIR/bin/siproswf" \
-        "$REPO_DIR/siprosRelease.zip"
+        "$REPO_DIR/bin/siproswf.exe"
+    find "$REPO_DIR" -maxdepth 1 -type f \
+        \( -name 'siprosRelease.zip' \
+        -o -name 'siprosRelease.msi' \
+        -o -name 'sipros_windows_*.zip' \
+        -o -name 'sipros_windows_*.msi' \
+        -o -name 'sipros_linux_*.zip' \
+        -o -name 'sipros_linux_*.AppImage' \) \
+        -delete
     rm -rf "$REPO_DIR/bin/lib"
     ;;
 "build")
@@ -583,12 +734,13 @@ case $1 in
         -DCMAKE_MAKE_PROGRAM="$SYSTEM_NINJA" \
         -DCMAKE_C_COMPILER="$SYSTEM_CC" -DCMAKE_CXX_COMPILER="$SYSTEM_CXX" \
         -DCMAKE_BUILD_TYPE=Release -DBUILD_CONDA=OFF \
+        -DSIPROS_VERSION="$SIPROS_VERSION" \
         -DSIPROS_BUILD_MPI=OFF \
         -DAERITH_ENABLE_TORCH=ON -DAERITH_TORCH_CPU_ONLY=ON \
         -DAERITH_TORCH_ROOT="$SYSTEM_TORCH_ROOT" \
         -DHDF5_USE_STATIC_LIBRARIES=OFF \
         -DHDF5_DIR="$RELEASE_HDF5_DIR" "$REPO_DIR"
-    "$SYSTEM_NINJA" sipros aerith siproswf
+    "$SYSTEM_NINJA" -j "$(physical_core_count)" sipros aerith siproswf
     "$RELEASE_PREFIX/bin/patchelf" --force-rpath --set-rpath '$ORIGIN/lib' \
         "$SYSTEM_BUILD_DIR/bin/sipros"
     "$RELEASE_PREFIX/bin/patchelf" --force-rpath --set-rpath '$ORIGIN/lib' \
@@ -617,6 +769,7 @@ case $1 in
     eval "$("$MAMBA_EXE" shell hook --shell=bash)"
     micromamba activate sipros5
     resolve_torch_cmake
+    resolve_conda_hdf5
     configure_mpi
     saved_ld_library_path="${LD_LIBRARY_PATH-}"
     unset LD_LIBRARY_PATH
@@ -635,9 +788,9 @@ case $1 in
         -DAERITH_TORCH_PACKAGE_VERSION="$TORCH_VERSION" \
         "${conda_cuda_args[@]}" \
         -DHDF5_USE_STATIC_LIBRARIES=OFF \
-        -DHDF5_DIR="$CONDA_PREFIX/cmake" "$REPO_DIR"
+        -DHDF5_DIR="$CONDA_HDF5_DIR" "$REPO_DIR"
     export LD_LIBRARY_PATH="${saved_ld_library_path:+$saved_ld_library_path:}${CONDA_PREFIX}/lib"
-    ninja
+    ninja -j "$(physical_core_count)"
     verify_fully_dynamic_conda "$CONDA_BUILD_DIR/bin"
     verify_dynamic_torch "$CONDA_BUILD_DIR/bin/aerith"
     verify_dynamic_gui "$CONDA_BUILD_DIR/bin/siproswf"
@@ -670,8 +823,7 @@ case $1 in
     "$SYSTEM_NINJA" -C "$SYSTEM_BUILD_DIR"
     ;;
 "package")
-    # Run clean and build before packaging
-    $0 clean
+    # Build incrementally; only the explicit clean command removes build outputs.
     $0 build
     tmpdir=$(mktemp -d)
     trap 'rm -rf "$tmpdir"' EXIT
@@ -694,23 +846,24 @@ case $1 in
     stage_release_runtime "$tmpdir/sipros/siproswf" "$tmpdir/sipros/lib"
     verify_glibc_217 "$tmpdir/sipros/lib/sipros"
     verify_packaged_release_binary "$tmpdir/sipros/lib/sipros" \
-        "$tmpdir/sipros/lib"
+        "$tmpdir/sipros/lib" 0 '$ORIGIN'
     verify_packaged_release_binary "$tmpdir/sipros/lib/aerith" \
-        "$tmpdir/sipros/lib" 1
+        "$tmpdir/sipros/lib" 1 '$ORIGIN'
     verify_glibc_217 "$tmpdir/sipros/lib/aerith" "$tmpdir/sipros/lib"
     verify_packaged_release_binary "$tmpdir/sipros/siproswf" \
         "$tmpdir/sipros/lib"
     verify_glibc_217 "$tmpdir/sipros/siproswf" "$tmpdir/sipros/lib"
-    if [ -f siprosRelease.zip ]; then
-        rm siprosRelease.zip
+    create_appimage "$tmpdir/sipros" "$REPO_DIR/$APPIMAGE_FILENAME"
+    if [ -f "${PACKAGE_BASENAME}.zip" ]; then
+        rm "${PACKAGE_BASENAME}.zip"
     fi
     cd "$tmpdir"
-    zip -r "$OLDPWD/siprosRelease.zip" "sipros" \
+    zip -r "$OLDPWD/${PACKAGE_BASENAME}.zip" "sipros" \
         -x "*/__pycache__/*"
     cd "$OLDPWD"
     rm -rf "$tmpdir"
     trap - EXIT
-    echo "Package created: siprosRelease.zip"
+    echo "Packages created: ${PACKAGE_BASENAME}.zip and $APPIMAGE_FILENAME"
     ;;
 "run")
     echo "Open the ImGui workflow or run a headless search, for example:"

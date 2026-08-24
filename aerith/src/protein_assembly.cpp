@@ -1,4 +1,5 @@
 #include "pipeline.hpp"
+#include "process_cpu_time.hpp"
 #include "quantification.hpp"
 
 #include <algorithm>
@@ -2707,10 +2708,10 @@ ProteinAssemblyResult ProteinAssembler::write(
     }
     ProteinAssemblyResult result;
     const auto record_stage = [&](std::string name, Clock::time_point wall_begin,
-                                  std::clock_t cpu_begin, bool uses_omp = false,
+                                  ProcessCpuTick cpu_begin, bool uses_omp = false,
                                   bool uses_simd = false) {
         const auto wall_end = Clock::now();
-        const auto cpu_end = std::clock();
+        const auto cpu_end = process_cpu_time_ticks();
         result.stages.push_back({
             std::move(name),
             {std::chrono::duration<double>(wall_end - wall_begin).count(),
@@ -2721,7 +2722,7 @@ ProteinAssemblyResult ProteinAssembler::write(
     };
 
     auto wall_begin = Clock::now();
-    auto cpu_begin = std::clock();
+    auto cpu_begin = process_cpu_time_ticks();
     auto fasta = read_fasta(
         config.database_path, config.decoy_prefix, false);
     auto decoy_fasta = read_fasta(
@@ -2732,7 +2733,7 @@ ProteinAssemblyResult ProteinAssembler::write(
     record_stage("Read and annotate target/decoy FASTAs", wall_begin, cpu_begin);
 
     wall_begin = Clock::now();
-    cpu_begin = std::clock();
+    cpu_begin = process_cpu_time_ticks();
     std::unordered_map<std::string, PeptideEvidence> peptides;
     std::unordered_map<std::string, std::set<std::string>> protein_peptides;
     for (std::size_t row = 0; row < data.rows.size(); ++row) {
@@ -2751,7 +2752,7 @@ ProteinAssemblyResult ProteinAssembler::write(
     record_stage("Build peptide-protein evidence maps", wall_begin, cpu_begin);
 
     wall_begin = Clock::now();
-    cpu_begin = std::clock();
+    cpu_begin = process_cpu_time_ticks();
     std::unordered_map<std::string, std::string> assignment;
     std::unordered_map<std::string, std::set<std::string>> assigned_peptides;
     std::unordered_map<std::string, double> group_weight;
@@ -2788,7 +2789,7 @@ ProteinAssemblyResult ProteinAssembler::write(
     record_stage("Assign unique and razor peptides", wall_begin, cpu_begin);
 
     wall_begin = Clock::now();
-    cpu_begin = std::clock();
+    cpu_begin = process_cpu_time_ticks();
     std::unordered_map<std::string, ProteinScore> protein_scores;
     for (const auto& [protein, assigned] : assigned_peptides) {
         if (assigned.empty()) continue;
@@ -2857,7 +2858,7 @@ ProteinAssemblyResult ProteinAssembler::write(
     record_stage("Picked competition and block protein FDR", wall_begin, cpu_begin);
 
     wall_begin = Clock::now();
-    cpu_begin = std::clock();
+    cpu_begin = process_cpu_time_ticks();
     const auto output_dir = default_output_dir(config);
     std::vector<std::pair<std::filesystem::path, std::size_t>> reports;
     if (config.output_prefixes.size() == data.input_paths.size()) {

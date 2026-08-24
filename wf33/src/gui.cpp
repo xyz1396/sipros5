@@ -120,6 +120,7 @@ struct BrowserState {
     PathTarget target = PathTarget::InputFiles;
     std::filesystem::path current_directory;
     std::filesystem::path selected_path;
+    std::vector<std::filesystem::path> selected_paths;
     std::string location;
     std::string error;
 };
@@ -711,11 +712,27 @@ bool browser_accepts_file(PathTarget target, const std::filesystem::path& path) 
     return false;
 }
 
+bool browser_selects_multiple_files(PathTarget target) {
+    return target == PathTarget::InputFiles ||
+           target == PathTarget::NegativeControlFiles;
+}
+
+std::string join_selected_paths(
+    const std::vector<std::filesystem::path>& selected_paths) {
+    std::ostringstream joined;
+    for (std::size_t index = 0; index < selected_paths.size(); ++index) {
+        if (index != 0) joined << ',';
+        joined << selected_paths[index].string();
+    }
+    return joined.str();
+}
+
 void initialize_browser(BrowserState& browser, PathTarget target,
                         const WorkflowOptions& form) {
     browser.target = target;
     browser.request_open = true;
     browser.selected_path.clear();
+    browser.selected_paths.clear();
     browser.error.clear();
     std::error_code error;
     std::filesystem::path start;
@@ -775,6 +792,7 @@ void navigate_browser(BrowserState& browser, const std::filesystem::path& direct
     browser.current_directory = resolved;
     browser.location = resolved.string();
     browser.selected_path.clear();
+    browser.selected_paths.clear();
     browser.error.clear();
 }
 
@@ -824,12 +842,18 @@ void render_browser(BrowserState& browser, WorkflowOptions& form, float scale) {
     }
     const bool selects_directory = browser.target == PathTarget::InputDirectory ||
                                    browser.target == PathTarget::OutputDirectory;
+    const bool selects_multiple_files =
+        browser_selects_multiple_files(browser.target);
     if (!selects_directory) {
         ImGui::Checkbox("Show all files", &browser.show_all_files);
         ImGui::SameLine();
         ImGui::TextDisabled(browser.target == PathTarget::FastaFile
                                 ? "FASTA files are shown by default"
                                 : "raw, .d.zip, and HDF5 files are shown by default");
+        if (selects_multiple_files) {
+            ImGui::TextDisabled(
+                "Click files to select or deselect them; multiple files may be selected.");
+        }
     }
 
     std::vector<BrowserEntry> entries;
@@ -872,17 +896,39 @@ void render_browser(BrowserState& browser, WorkflowOptions& form, float scale) {
             const std::string name = (entry.directory ? "[DIR] " : "") +
                                      entry.path.filename().string();
             const std::string id = name + "##" + entry.path.string();
-            const bool selected = browser.selected_path == entry.path;
+            const auto selected_file = std::find(browser.selected_paths.begin(),
+                                                 browser.selected_paths.end(),
+                                                 entry.path);
+            const bool selected = !entry.directory && selects_multiple_files
+                ? selected_file != browser.selected_paths.end()
+                : browser.selected_path == entry.path;
             if (ImGui::Selectable(id.c_str(), selected,
                                   ImGuiSelectableFlags_SpanAllColumns |
                                       ImGuiSelectableFlags_AllowDoubleClick)) {
-                browser.selected_path = entry.path;
-                if (entry.directory && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                    navigate_browser(browser, entry.path);
-                } else if (!entry.directory &&
-                           ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                    assign_path(browser.target, entry.path.string(), form);
-                    ImGui::CloseCurrentPopup();
+                const bool double_clicked =
+                    ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+                if (entry.directory) {
+                    browser.selected_path = entry.path;
+                    if (double_clicked) navigate_browser(browser, entry.path);
+                } else if (selects_multiple_files) {
+                    browser.selected_path.clear();
+                    if (double_clicked) {
+                        // The first click may already have toggled this entry. Keep
+                        // a double-click from toggling it off again.
+                        if (selected_file == browser.selected_paths.end()) {
+                            browser.selected_paths.push_back(entry.path);
+                        }
+                    } else if (selected_file == browser.selected_paths.end()) {
+                        browser.selected_paths.push_back(entry.path);
+                    } else {
+                        browser.selected_paths.erase(selected_file);
+                    }
+                } else {
+                    browser.selected_path = entry.path;
+                    if (double_clicked) {
+                        assign_path(browser.target, entry.path.string(), form);
+                        ImGui::CloseCurrentPopup();
+                    }
                 }
             }
             ImGui::TableSetColumnIndex(1);
@@ -894,21 +940,43 @@ void render_browser(BrowserState& browser, WorkflowOptions& form, float scale) {
     }
 
     bool can_select = selects_directory ||
-                      (!browser.selected_path.empty() &&
-                       std::filesystem::is_regular_file(browser.selected_path, error));
+                      (selects_multiple_files
+                           ? !browser.selected_paths.empty()
+                           : (!browser.selected_path.empty() &&
+                              std::filesystem::is_regular_file(
+                                  browser.selected_path, error)));
+    std::filesystem::path directory_selection = browser.current_directory;
+    bool uses_selected_directory = false;
+    if (browser.target == PathTarget::OutputDirectory &&
+        !browser.selected_path.empty()) {
+        std::error_code selection_error;
+        if (std::filesystem::is_directory(browser.selected_path,
+                                          selection_error)) {
+            directory_selection = browser.selected_path;
+            uses_selected_directory = true;
+        }
+    }
     ImGui::BeginDisabled(!can_select);
-    const char* select_label = selects_directory ? "Use this folder" : "Select file";
+    const char* select_label = selects_directory
+        ? uses_selected_directory ? "Use selected folder" : "Use this folder"
+        : selects_multiple_files ? "Select files" : "Select file";
     if (ImGui::Button(select_label, ImVec2(150.0f * scale, 0.0f))) {
-        const std::filesystem::path selection = selects_directory
-            ? browser.current_directory
-            : browser.selected_path;
-        assign_path(browser.target, selection.string(), form);
+        const std::string selection = selects_directory
+            ? directory_selection.string()
+            : selects_multiple_files
+                ? join_selected_paths(browser.selected_paths)
+                : browser.selected_path.string();
+        assign_path(browser.target, selection, form);
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(100.0f * scale, 0.0f))) {
         ImGui::CloseCurrentPopup();
+    }
+    if (selects_multiple_files) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%zu selected", browser.selected_paths.size());
     }
     ImGui::EndPopup();
 }
@@ -1057,11 +1125,11 @@ void render_advanced_options(GLFWwindow* window, WorkflowOptions& form,
             ImGui::SetNextItemWidth(-FLT_MIN);
             ImGui::InputInt(id, value);
         };
+        input_int("Threads", "##threads", &form.threads);
         input_double("MS1 tolerance (Da)", "##tolerance_ms1", &form.tolerance_ms1,
                      0.001, 0.01, "%.6f");
         input_double("MS2 tolerance (Da)", "##tolerance_ms2", &form.tolerance_ms2,
                      0.001, 0.01, "%.6f");
-        input_int("Physical-core budget", "##threads", &form.threads);
         input_int("Raxport precursors", "##n_precursor", &form.n_precursor);
         input_int("Top PSMs per scan", "##top_psms", &form.top_psms_per_scan);
         input_int("Product top isotopes", "##product_top", &form.product_top_isotopes);

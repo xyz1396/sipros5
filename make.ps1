@@ -11,7 +11,8 @@
 # CPU release environment:
 #   micromamba create -n sipros5-release -c conda-forge --strict-channel-priority `
 #     python=3.12 cmake ninja "hdf5=2.*=nompi*" `
-#     "pytorch-cpu=2.12.1=cpu_mkl*" imgui=1.92.9 libvulkan-headers
+#     "pytorch-cpu=2.12.1=cpu_mkl*" imgui=1.92.9 libvulkan-headers `
+#     "dotnet-sdk=8.*"
 #
 # NVIDIA GPU environment (PyTorch 2.12.1, CUDA 12.8, Python 3.12):
 #   micromamba create -n sipros5 -c conda-forge --strict-channel-priority `
@@ -27,7 +28,8 @@
 # Usage:
 #   .\make.ps1 build
 #   .\make.ps1 buildConda
-#   .\make.ps1 package
+#   .\make.ps1 package  # creates sipros_windows_<version>.zip and .msi
+# Set SIPROS_VERSION to override the default three-part MSI version.
 
 [CmdletBinding()]
 param(
@@ -47,10 +49,17 @@ $MambaExe = if ($env:MAMBA_EXE) {
     $pathMamba = Get-Command micromamba.exe -ErrorAction SilentlyContinue
     if ($pathMamba) { $pathMamba.Source } else { Join-Path $env:LOCALAPPDATA 'micromamba\micromamba.exe' }
 }
-$BuildRoot = Join-Path $RepoDir 'build\windows'
+$RepositoryBuildRoot = Join-Path $RepoDir 'build'
+$BuildRoot = Join-Path $RepositoryBuildRoot 'windows'
 $ReleaseBuildDir = Join-Path $BuildRoot 'system'
 $CondaBuildDir = Join-Path $BuildRoot 'conda'
 $DebugBuildDir = Join-Path $BuildRoot 'conda-debug'
+$PackageVersion = if ($env:SIPROS_VERSION) { $env:SIPROS_VERSION } else { '6.0.0' }
+$PackageBaseName = "sipros_windows_$PackageVersion"
+$InstallerProductName = 'Sipros'
+$InstallerManufacturerName = 'Sipros'
+$InstallerProductInfoUrl = 'https://github.com/xyz1396/sipros5'
+$WixVersion = '5.0.2'
 
 function Invoke-CheckedNative(
     [string]$Executable,
@@ -60,6 +69,42 @@ function Invoke-CheckedNative(
     & $Executable @ArgumentList
     $exitCode = $LASTEXITCODE
     if ($exitCode -ne 0) {
+        throw "$Description failed with exit code $exitCode."
+    }
+}
+
+function Wait-NinjaBuildDirectory([string]$Directory) {
+    $ninjaLock = Join-Path $Directory '.ninja_lock'
+    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    $announced = $false
+    while (Test-Path -LiteralPath $ninjaLock) {
+        if (-not $announced) {
+            Write-Warning "Another Ninja process is using $Directory; waiting for it to finish."
+            $announced = $true
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            throw "Another Ninja process is still using $Directory after 60 seconds. Stop the other build and retry."
+        }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+function Invoke-CheckedCMakeBuild(
+    [string]$Directory,
+    [string[]]$ArgumentList,
+    [string]$Description
+) {
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        Wait-NinjaBuildDirectory $Directory
+        & cmake @ArgumentList
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) { return }
+
+        $ninjaLock = Join-Path $Directory '.ninja_lock'
+        if ($attempt -eq 1 -and (Test-Path -LiteralPath $ninjaLock)) {
+            Write-Warning 'Ninja started concurrently after the lock check; waiting and retrying once.'
+            continue
+        }
         throw "$Description failed with exit code $exitCode."
     }
 }
@@ -79,24 +124,152 @@ function Enter-WindowsBuildLock {
 }
 
 function Clear-WindowsOutputs {
-    $buildDirectory = Join-Path $RepoDir 'build'
     $binDirectory = Join-Path $RepoDir 'bin'
-    if (Test-Path -LiteralPath $buildDirectory) {
-        Remove-Item -LiteralPath $buildDirectory -Recurse -Force
+    if (Test-Path -LiteralPath $RepositoryBuildRoot) {
+        $resolvedBuild = [System.IO.Path]::GetFullPath($RepositoryBuildRoot)
+        $expectedBuild = [System.IO.Path]::GetFullPath((Join-Path $RepoDir 'build'))
+        if ($resolvedBuild -ne $expectedBuild) {
+            throw "Refusing to remove unexpected build directory: $resolvedBuild"
+        }
+        Remove-Item -LiteralPath $resolvedBuild -Recurse -Force
     }
-    New-Item -ItemType Directory -Path $buildDirectory | Out-Null
     New-Item -ItemType Directory -Path $binDirectory -Force | Out-Null
     # Keep checked-in/downloaded runtime inputs (Raxport and DIA-NN models)
-    # available for the next configure. Only remove generated Windows outputs.
+    # available for the next configure. Remove generated binaries from both
+    # platform builds so either clean command leaves the same publish state.
     foreach ($path in @(
+        (Join-Path $binDirectory 'aerith'),
         (Join-Path $binDirectory 'aerith.exe'),
+        (Join-Path $binDirectory 'sipros'),
         (Join-Path $binDirectory 'sipros.exe'),
+        (Join-Path $binDirectory 'siproswf'),
         (Join-Path $binDirectory 'siproswf.exe'),
-        (Join-Path $binDirectory 'siprosMPI.exe'),
-        (Join-Path $RepoDir 'siprosRelease.zip')
+        (Join-Path $binDirectory 'siprosMPI'),
+        (Join-Path $binDirectory 'siprosMPI.exe')
     )) {
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
     }
+    $runtimeDirectory = [System.IO.Path]::GetFullPath((Join-Path $binDirectory 'lib'))
+    $expectedRuntimeDirectory = [System.IO.Path]::GetFullPath(
+        (Join-Path (Join-Path $RepoDir 'bin') 'lib'))
+    if ($runtimeDirectory -ne $expectedRuntimeDirectory) {
+        throw "Refusing to remove unexpected runtime directory: $runtimeDirectory"
+    }
+    if (Test-Path -LiteralPath $runtimeDirectory) {
+        Remove-Item -LiteralPath $runtimeDirectory -Recurse -Force
+    }
+    foreach ($pattern in @(
+        'siprosRelease.zip',
+        'siprosRelease.msi',
+        'sipros_windows_*.zip',
+        'sipros_windows_*.msi',
+        'sipros_linux_*.zip',
+        'sipros_linux_*.AppImage'
+    )) {
+        foreach ($package in (Get-ChildItem -LiteralPath $RepoDir -File -Filter $pattern)) {
+            if ([System.IO.Path]::GetFullPath($package.DirectoryName) -ne
+                [System.IO.Path]::GetFullPath($RepoDir)) {
+                throw "Refusing to remove release package outside the repository root: $($package.FullName)"
+            }
+            Remove-Item -LiteralPath $package.FullName -Force
+        }
+    }
+}
+
+function Get-ReleaseDotnetExecutable {
+    $dotnetCandidates = @(
+        (Join-Path $env:CONDA_PREFIX 'dotnet.exe'),
+        (Join-Path $env:CONDA_PREFIX 'dotnet\dotnet.exe'),
+        (Join-Path $env:CONDA_PREFIX 'Library\bin\dotnet.exe'),
+        (Join-Path $env:CONDA_PREFIX 'Scripts\dotnet.exe')
+    )
+    $dotnet = $dotnetCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $dotnet) {
+        throw "The '$ReleaseEnvironmentName' environment must provide dotnet-sdk. Install it with: micromamba install -n $ReleaseEnvironmentName -c conda-forge 'dotnet-sdk=8.*'"
+    }
+    return $dotnet
+}
+
+function Get-WixExecutable {
+    $dotnet = Get-ReleaseDotnetExecutable
+    if (-not $env:CONDA_PREFIX) {
+        throw "The '$ReleaseEnvironmentName' environment must be active before installing WiX."
+    }
+    $toolDirectory = Join-Path $env:CONDA_PREFIX "tools\wix-$WixVersion"
+    $wix = Join-Path $toolDirectory 'wix.exe'
+    if (-not (Test-Path -LiteralPath $wix)) {
+        New-Item -ItemType Directory -Path $toolDirectory -Force | Out-Null
+        Write-Host "Installing WiX $WixVersion in $toolDirectory with $dotnet"
+        Invoke-CheckedNative -Executable $dotnet `
+            -ArgumentList @(
+                'tool', 'install', 'wix', '--version', $WixVersion,
+                '--tool-path', $toolDirectory
+            ) `
+            -Description 'WiX tool installation' | Out-Host
+        if (-not (Test-Path -LiteralPath $wix)) {
+            throw "WiX installation did not create $wix"
+        }
+    }
+
+    $uiExtension = Join-Path $toolDirectory ".wix\extensions\WixToolset.UI.wixext\$WixVersion\wixext5\WixToolset.UI.wixext.dll"
+    if (-not (Test-Path -LiteralPath $uiExtension)) {
+        Write-Host "Installing WiX UI extension $WixVersion in $toolDirectory"
+        Push-Location -LiteralPath $toolDirectory
+        try {
+            Invoke-CheckedNative -Executable $wix `
+                -ArgumentList @('extension', 'add', "WixToolset.UI.wixext/$WixVersion") `
+                -Description 'WiX UI extension installation' | Out-Host
+        } finally {
+            Pop-Location
+        }
+        if (-not (Test-Path -LiteralPath $uiExtension)) {
+            throw "WiX UI extension installation did not create $uiExtension"
+        }
+    }
+    return $wix
+}
+
+function Assert-PackageVersion {
+    $match = [regex]::Match($PackageVersion, '^(\d+)\.(\d+)\.(\d+)$')
+    if (-not $match.Success) {
+        throw "SIPROS_VERSION must be an MSI-compatible three-part numeric version, for example 6.0.0; got '$PackageVersion'."
+    }
+    if ([int]$match.Groups[1].Value -gt 255 -or
+        [int]$match.Groups[2].Value -gt 255 -or
+        [int]$match.Groups[3].Value -gt 65535) {
+        throw "SIPROS_VERSION components exceed MSI limits (255.255.65535): '$PackageVersion'."
+    }
+}
+
+function Convert-TextLicenseToRtf(
+    [string]$Source,
+    [string]$Destination
+) {
+    $text = [System.IO.File]::ReadAllText($Source, [System.Text.Encoding]::UTF8)
+    $rtf = [System.Text.StringBuilder]::new()
+    [void]$rtf.Append('{\rtf1\ansi\deff0{\fonttbl{\f0\fnil Segoe UI;}}\uc1\pard\f0\fs18 ')
+    foreach ($character in $text.ToCharArray()) {
+        switch ($character) {
+            '\' { [void]$rtf.Append('\\') }
+            '{' { [void]$rtf.Append('\{') }
+            '}' { [void]$rtf.Append('\}') }
+            "`r" { }
+            "`n" { [void]$rtf.Append("\par`r`n") }
+            "`t" { [void]$rtf.Append('\tab ') }
+            default {
+                $codePoint = [int]$character
+                if ($codePoint -le 127) {
+                    [void]$rtf.Append($character)
+                } else {
+                    if ($codePoint -gt 32767) { $codePoint -= 65536 }
+                    [void]$rtf.Append("\u$codePoint?")
+                }
+            }
+        }
+    }
+    [void]$rtf.Append('}')
+    [System.IO.File]::WriteAllText(
+        $Destination, $rtf.ToString(), [System.Text.Encoding]::ASCII)
 }
 
 function Import-VisualStudioEnvironment {
@@ -163,12 +336,26 @@ function Require-CondaEnvironment {
 }
 
 function Enter-MicromambaEnvironment([string]$Name) {
-    $powershell = (Get-Process -Id $PID).Path
-    & $MambaExe run -n $Name $powershell -NoProfile -ExecutionPolicy Bypass `
-        -File $PSCommandPath -Command $Command -EnvironmentActive
+    $activation = & $MambaExe shell activate -n $Name -s powershell
     $exitCode = $LASTEXITCODE
     if ($exitCode -ne 0) {
-        throw "The '$Command' command failed in micromamba environment '$Name' with exit code $exitCode."
+        throw "Unable to activate micromamba environment '$Name' (exit code $exitCode)."
+    }
+    Invoke-Expression ($activation -join [Environment]::NewLine)
+    if (-not (Test-ActiveMicromambaEnvironment $Name)) {
+        throw "Micromamba activation did not select the expected '$Name' environment."
+    }
+    Write-Host "Activated micromamba environment '$Name'."
+}
+
+function Test-ActiveMicromambaEnvironment([string]$Name) {
+    if (-not $env:CONDA_PREFIX) { return $false }
+    $expectedPrefix = Join-Path $MambaRootPrefix "envs\$Name"
+    try {
+        return [System.IO.Path]::GetFullPath($env:CONDA_PREFIX).TrimEnd('\') -eq
+            [System.IO.Path]::GetFullPath($expectedPrefix).TrimEnd('\')
+    } catch {
+        return $false
     }
 }
 
@@ -180,6 +367,7 @@ function Invoke-WindowsBuild([string]$Directory, [string]$Configuration) {
     $arguments = @(
         '-S', $RepoDir, '-B', $Directory, '-G', 'Ninja',
         "-DCMAKE_BUILD_TYPE=$Configuration", '-DBUILD_CONDA=ON',
+        "-DSIPROS_VERSION=$PackageVersion",
         '-DSIPROS_BUILD_MPI=OFF', '-DAERITH_ENABLE_TORCH=ON',
         "-DTorch_DIR=$torchDir", '-DAERITH_TORCH_PACKAGE_VERSION=2.12.1',
         "-DHDF5_DIR=$hdf5Dir", "-DHDF5_ROOT=$env:CONDA_PREFIX",
@@ -196,6 +384,17 @@ function Invoke-WindowsBuild([string]$Directory, [string]$Configuration) {
         $null
     }
     if ($null -ne $nvcc) {
+        if (-not $env:CUDAARCHS) {
+            $env:CUDAARCHS = '50-real;52-real;60-real;61-real;70-real;75-real;80-real;86-real;89-real;90-real;100-real;101-real;120'
+        }
+        if (-not $env:TORCH_CUDA_ARCH_LIST) {
+            $env:TORCH_CUDA_ARCH_LIST = '5.0;5.2;6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0;10.0;10.1;12.0+PTX'
+        }
+        $cudaTargetInclude = Join-Path $env:CONDA_PREFIX 'Library\include\targets\x64'
+        if ((Test-Path -LiteralPath $cudaTargetInclude) -and
+            ($env:INCLUDE -split ';' -notcontains $cudaTargetInclude)) {
+            $env:INCLUDE = "$env:INCLUDE;$cudaTargetInclude"
+        }
         $arguments += '-DAERITH_ENABLE_CUDA=ON'
         $arguments += "-DCMAKE_CUDA_COMPILER=$($nvcc.Source)"
         $arguments += "-DCUDAToolkit_ROOT=$env:CONDA_PREFIX"
@@ -205,7 +404,7 @@ function Invoke-WindowsBuild([string]$Directory, [string]$Configuration) {
     }
     Invoke-CheckedNative -Executable 'cmake' -ArgumentList $arguments `
         -Description 'CMake configuration'
-    Invoke-CheckedNative -Executable 'cmake' `
+    Invoke-CheckedCMakeBuild -Directory $Directory `
         -ArgumentList @(
             '--build', $Directory, '--target',
             'sipros', 'aerith', 'siproswf'
@@ -269,10 +468,106 @@ function Test-PackagedExecutable(
     }
 }
 
+function Copy-WindowsRuntimeDependencies(
+    [string[]]$RootBinaries,
+    [string]$Destination
+) {
+    $dumpbin = Get-Command dumpbin.exe -ErrorAction SilentlyContinue
+    if (-not $dumpbin) {
+        throw 'Visual Studio dumpbin.exe is required to resolve package DLL dependencies.'
+    }
+
+    $condaBin = Join-Path $env:CONDA_PREFIX 'Library\bin'
+    if (-not (Test-Path -LiteralPath $condaBin)) {
+        throw "Conda runtime directory was not found: $condaBin"
+    }
+    $condaDlls = @{}
+    Get-ChildItem -LiteralPath $condaBin -Filter '*.dll' -File | ForEach-Object {
+        $condaDlls[$_.Name] = $_.FullName
+    }
+
+    $queue = [System.Collections.Generic.Queue[string]]::new()
+    $visited = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    $runtimeDlls = [System.Collections.Generic.SortedDictionary[string,string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($binary in $RootBinaries) { $queue.Enqueue($binary) }
+
+    while ($queue.Count -gt 0) {
+        $binary = $queue.Dequeue()
+        if (-not $visited.Add($binary)) { continue }
+        $imports = & $dumpbin.Source /nologo /dependents $binary 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Unable to inspect DLL dependencies for $binary"
+        }
+        $dependencyNames = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($line in $imports) {
+            if ($line -match '^\s+([^\s]+\.dll)\s*$') {
+                [void]$dependencyNames.Add($Matches[1])
+            }
+        }
+        # Conda's SDL2 compatibility library loads SDL3 at runtime instead of
+        # listing it in the PE import table.
+        if ([System.IO.Path]::GetFileName($binary) -ieq 'SDL2.dll') {
+            [void]$dependencyNames.Add('SDL3.dll')
+        }
+        # oneMKL selects both a general CPU kernel and a VML kernel at runtime.
+        # Include every shipped ISA alternative so the MSI works on supported
+        # CPUs without relying on DLLs from an existing Conda installation.
+        if ([System.IO.Path]::GetFileName($binary) -ieq 'mkl_core.3.dll') {
+            foreach ($name in @(
+                'mkl_avx10.3.dll',
+                'mkl_avx2.3.dll',
+                'mkl_avx512.3.dll',
+                'mkl_def.3.dll',
+                'mkl_mc3.3.dll',
+                'mkl_vml_avx10.3.dll',
+                'mkl_vml_avx2.3.dll',
+                'mkl_vml_avx512.3.dll',
+                'mkl_vml_cmpt.3.dll',
+                'mkl_vml_def.3.dll',
+                'mkl_vml_mc3.3.dll'
+            )) {
+                [void]$dependencyNames.Add($name)
+            }
+        }
+        foreach ($name in $dependencyNames) {
+            $adjacentDll = Join-Path (Split-Path -Parent $binary) $name
+            $source = if (Test-Path -LiteralPath $adjacentDll) {
+                $adjacentDll
+            } elseif ($condaDlls.ContainsKey($name)) {
+                $condaDlls[$name]
+            } else {
+                $null
+            }
+            if ($source) {
+                if (-not $runtimeDlls.ContainsKey($name)) {
+                    $runtimeDlls.Add($name, $source)
+                    $queue.Enqueue($source)
+                }
+                continue
+            }
+            $systemDll = Join-Path $env:SystemRoot "System32\$name"
+            if ((Test-Path -LiteralPath $systemDll) -or $name -match '^(api|ext)-ms-win-') {
+                continue
+            }
+            throw "Unresolved non-system DLL '$name' imported by $binary"
+        }
+    }
+
+    foreach ($entry in $runtimeDlls.GetEnumerator()) {
+        Copy-Item -LiteralPath $entry.Value -Destination (Join-Path $Destination $entry.Key)
+    }
+    Write-Host "Packaged $($runtimeDlls.Count) linked and runtime-selected DLLs."
+}
+
 function New-WindowsPackage([string]$SourceBinDirectory) {
+    Assert-PackageVersion
     $stageRoot = Join-Path $env:TEMP ("sipros5-package-" + [guid]::NewGuid().ToString('N'))
     $stage = Join-Path $stageRoot 'sipros'
-    $archive = Join-Path $RepoDir 'siprosRelease.zip'
+    $archive = Join-Path $RepoDir "$PackageBaseName.zip"
+    $installer = Join-Path $RepoDir "$PackageBaseName.msi"
     try {
         $lib = Join-Path $stage 'lib'
         New-Item -ItemType Directory -Path $lib -Force | Out-Null
@@ -293,8 +588,14 @@ function New-WindowsPackage([string]$SourceBinDirectory) {
             if (-not (Test-Path -LiteralPath $source)) { throw "Missing model file: $source" }
             Copy-Item -LiteralPath $source -Destination $lib
         }
-        Get-ChildItem -LiteralPath (Join-Path $env:CONDA_PREFIX 'Library\bin') -Filter '*.dll' |
-            Copy-Item -Destination $lib
+        Copy-WindowsRuntimeDependencies `
+            -RootBinaries @(
+                $workflow,
+                (Join-Path $SourceBinDirectory 'sipros.exe'),
+                (Join-Path $SourceBinDirectory 'aerith.exe'),
+                $raxport
+            ) `
+            -Destination $lib
         foreach ($name in @(
             'hdf5.dll', 'hdf5_cpp.dll', 'torch_cpu.dll', 'c10.dll',
             'libomp.dll', 'imgui.dll', 'glfw3.dll'
@@ -306,10 +607,40 @@ function New-WindowsPackage([string]$SourceBinDirectory) {
         }
         Test-PackagedExecutable (Join-Path $lib 'sipros.exe') @('--help')
         Test-PackagedExecutable (Join-Path $lib 'aerith.exe') @('--help')
-        Write-Host 'Packaged Sipros and Aerith runtime checks passed.'
+        Test-PackagedExecutable (Join-Path $stage 'siproswf.exe') @('--help')
+        Write-Host 'Packaged Sipros, Aerith, and Sipros workflow runtime checks passed.'
         if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
         Compress-Archive -LiteralPath $stage -DestinationPath $archive -CompressionLevel Optimal
         Write-Host "Package created: $archive"
+
+        $wix = Get-WixExecutable
+        $wixUiExtension = Join-Path (Split-Path -Parent $wix) ".wix\extensions\WixToolset.UI.wixext\$WixVersion\wixext5\WixToolset.UI.wixext.dll"
+        $licenseDirectory = Join-Path $stageRoot 'license-ui'
+        New-Item -ItemType Directory -Path $licenseDirectory -Force | Out-Null
+        Convert-TextLicenseToRtf `
+            -Source (Join-Path $RepoDir 'LICENSE') `
+            -Destination (Join-Path $licenseDirectory 'LICENSE.rtf')
+        $wixIntermediate = Join-Path $stageRoot 'wix'
+        New-Item -ItemType Directory -Path $wixIntermediate -Force | Out-Null
+        if (Test-Path -LiteralPath $installer) { Remove-Item -LiteralPath $installer -Force }
+        Invoke-CheckedNative -Executable $wix `
+            -ArgumentList @(
+                'build', (Join-Path $RepoDir 'wf33\sipros.wxs'),
+                '-arch', 'x64',
+                '-bindpath', "Stage=$stage",
+                '-bindpath', "Source=$RepoDir",
+                '-bindpath', "License=$licenseDirectory",
+                '-ext', $wixUiExtension,
+                '-define', "PackageVersion=$PackageVersion",
+                '-define', "ProductName=$InstallerProductName",
+                '-define', "ManufacturerName=$InstallerManufacturerName",
+                '-define', "ProductInfoUrl=$InstallerProductInfoUrl",
+                '-intermediateFolder', $wixIntermediate,
+                '-pdbtype', 'none',
+                '-out', $installer
+            ) `
+            -Description 'MSI package build'
+        Write-Host "Installer created: $installer"
     } finally {
         if (Test-Path -LiteralPath $stageRoot) { Remove-Item -LiteralPath $stageRoot -Recurse -Force }
     }
@@ -327,12 +658,19 @@ Import-VisualStudioEnvironment
 if (-not $EnvironmentActive) {
     if ($Command -in 'build', 'package', 'make', 'wfTest', 'run') {
         Require-ReleaseEnvironment
-        Enter-MicromambaEnvironment $ReleaseEnvironmentName
+        if (Test-ActiveMicromambaEnvironment $ReleaseEnvironmentName) {
+            Write-Host "Using active micromamba environment '$ReleaseEnvironmentName'."
+        } else {
+            Enter-MicromambaEnvironment $ReleaseEnvironmentName
+        }
     } elseif ($Command -in 'buildConda', 'debug', 'wfTestConda') {
         Require-CondaEnvironment
-        Enter-MicromambaEnvironment $CondaEnvironmentName
+        if (Test-ActiveMicromambaEnvironment $CondaEnvironmentName) {
+            Write-Host "Using active micromamba environment '$CondaEnvironmentName'."
+        } else {
+            Enter-MicromambaEnvironment $CondaEnvironmentName
+        }
     }
-    return
 }
 
 $buildLock = Enter-WindowsBuildLock
@@ -350,12 +688,12 @@ switch ($Command) {
     }
     'debug' { Invoke-WindowsBuild $DebugBuildDir 'Debug' }
     'make' {
-        Invoke-CheckedNative -Executable 'cmake' `
+        Invoke-CheckedCMakeBuild -Directory $ReleaseBuildDir `
             -ArgumentList @('--build', $ReleaseBuildDir) `
             -Description 'Native build'
     }
     'wfTest' {
-        Invoke-CheckedNative -Executable 'cmake' `
+        Invoke-CheckedCMakeBuild -Directory $ReleaseBuildDir `
             -ArgumentList @('--build', $ReleaseBuildDir, '--target', 'siproswf_test') `
             -Description 'siproswf test build'
         Invoke-CheckedNative -Executable 'ctest' `
@@ -363,7 +701,7 @@ switch ($Command) {
             -Description 'siproswf tests'
     }
     'wfTestConda' {
-        Invoke-CheckedNative -Executable 'cmake' `
+        Invoke-CheckedCMakeBuild -Directory $CondaBuildDir `
             -ArgumentList @('--build', $CondaBuildDir, '--target', 'siproswf_test') `
             -Description 'siproswf Conda test build'
         Invoke-CheckedNative -Executable 'ctest' `
@@ -371,7 +709,7 @@ switch ($Command) {
             -Description 'siproswf Conda tests'
     }
     'package' {
-        Clear-WindowsOutputs
+        [void](Get-ReleaseDotnetExecutable)
         Invoke-WindowsBuild $ReleaseBuildDir 'Release'
         Publish-WindowsBinaries (Join-Path $ReleaseBuildDir 'bin')
         New-WindowsPackage (Join-Path $ReleaseBuildDir 'bin')

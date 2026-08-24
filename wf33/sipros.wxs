@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix
+    xmlns="http://wixtoolset.org/schemas/v4/wxs"
+    xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package
+      Name="$(var.ProductName)"
+      Manufacturer="$(var.ManufacturerName)"
+      Version="$(var.PackageVersion)"
+      UpgradeCode="4C39B6E8-6759-46AB-844B-9CFA2E442504"
+      Scope="perMachine">
+    <MajorUpgrade
+        AllowSameVersionUpgrades="yes"
+        Schedule="afterInstallValidate"
+        DowngradeErrorMessage="A newer version of $(var.ProductName) is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <Icon Id="SiprosIcon" SourceFile="!(bindpath.Source)\wf33\siproswf.ico" />
+    <Property Id="ARPPRODUCTICON" Value="SiprosIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="$(var.ProductInfoUrl)" />
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="sipros" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="$(var.ProductName)">
+        <Component Id="ApplicationShortcuts" Guid="2C491FD2-0348-4414-95F9-272AAB5EFBFF">
+          <Shortcut
+              Id="ApplicationStartMenuShortcut"
+              Name="$(var.ProductName)"
+              Description="$(var.ProductName) workflow"
+              Target="[INSTALLFOLDER]siproswf.exe"
+              WorkingDirectory="INSTALLFOLDER"
+              Icon="SiprosIcon" />
+          <Shortcut
+              Id="UninstallStartMenuShortcut"
+              Name="Uninstall $(var.ProductName)"
+              Description="Uninstall $(var.ProductName)"
+              Target="[SystemFolder]msiexec.exe"
+              Arguments="/x [ProductCode]" />
+          <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+          <RegistryValue
+              Root="HKLM"
+              Key="Software\$(var.ProductName)"
+              Name="Installed"
+              Type="integer"
+              Value="1"
+              KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="53EA2E29-569B-4278-8BE3-376B151E19D3">
+        <Shortcut
+            Id="ApplicationDesktopShortcut"
+            Name="$(var.ProductName)"
+            Description="$(var.ProductName) workflow"
+            Target="[INSTALLFOLDER]siproswf.exe"
+            WorkingDirectory="INSTALLFOLDER"
+            Icon="SiprosIcon" />
+        <RegistryValue
+            Root="HKLM"
+            Key="Software\$(var.ProductName)"
+            Name="DesktopShortcut"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Files Include="!(bindpath.Stage)\**" Directory="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="!(bindpath.License)\LICENSE.rtf" />
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+  </Package>
+</Wix>

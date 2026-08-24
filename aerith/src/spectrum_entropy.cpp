@@ -1,6 +1,7 @@
 #include "pipeline.hpp"
 #include "isotope.hpp"
 #include "prediction_cache.hpp"
+#include "process_cpu_time.hpp"
 #include "torch_device.hpp"
 
 #include <algorithm>
@@ -130,7 +131,7 @@ SpectrumCacheLoad load_spectrum_library_cache(
     const Config& config, const Dataset& unique_peptides,
     SpectrumPredictionLibrary::Impl& library) {
     const auto timing_begin = std::chrono::steady_clock::now();
-    const auto timing_cpu_begin = std::clock();
+    const auto timing_cpu_begin = process_cpu_time_ticks();
     SpectrumCacheLoad result;
     auto cache = read_prediction_cache(config, true);
     result.compatible = cache.compatible;
@@ -158,7 +159,7 @@ SpectrumCacheLoad load_spectrum_library_cache(
     library.cache_read_timing = {
         std::chrono::duration<double>(
             std::chrono::steady_clock::now() - timing_begin).count(),
-        static_cast<double>(std::clock() - timing_cpu_begin) /
+        static_cast<double>(process_cpu_time_ticks() - timing_cpu_begin) /
             CLOCKS_PER_SEC};
     return result;
 }
@@ -168,7 +169,7 @@ StageTiming append_spectrum_library_cache(
     const std::unordered_map<std::string, std::vector<Fragment>>& predictions,
     const std::unordered_set<std::string>* allowed) {
     const auto timing_begin = std::chrono::steady_clock::now();
-    const auto timing_cpu_begin = std::clock();
+    const auto timing_cpu_begin = process_cpu_time_ticks();
     std::unordered_map<std::string, PredictionCacheEntry> updates;
     updates.reserve(predictions.size());
     for (const auto& [key, fragments] : predictions) {
@@ -189,7 +190,7 @@ StageTiming append_spectrum_library_cache(
     return {
         std::chrono::duration<double>(
             std::chrono::steady_clock::now() - timing_begin).count(),
-        static_cast<double>(std::clock() - timing_cpu_begin) /
+        static_cast<double>(process_cpu_time_ticks() - timing_cpu_begin) /
             CLOCKS_PER_SEC};
 }
 
@@ -953,11 +954,11 @@ SpectrumPredictionLibrary SpectralEntropyFeature::predict(
         return library;
     }
     const auto prediction_begin = std::chrono::steady_clock::now();
-    const std::clock_t prediction_cpu_begin = std::clock();
+    const ProcessCpuTick prediction_cpu_begin = process_cpu_time_ticks();
     std::string prediction_device;
     auto inferred = predict_fragments(
         model_path, missing, prediction_device);
-    const std::clock_t prediction_cpu_end = std::clock();
+    const ProcessCpuTick prediction_cpu_end = process_cpu_time_ticks();
     const auto prediction_end = std::chrono::steady_clock::now();
     library.impl_->timing = {
         std::chrono::duration<double>(prediction_end - prediction_begin).count(),

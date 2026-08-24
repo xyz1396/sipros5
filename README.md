@@ -498,8 +498,8 @@ conda activate sipros5
 ### 2. Download Sipros5 Release
 
 ```bash
-wget https://github.com/xyz1396/sipros5/releases/download/5.0.1/siprosRelease.zip
-unzip siprosRelease.zip
+wget https://github.com/xyz1396/sipros5/releases/download/6.0.0/sipros_linux_6.0.0.zip
+unzip sipros_linux_6.0.0.zip
 chmod +x sipros/bin/* sipros/wf33/extractPro.sh
 ```
 

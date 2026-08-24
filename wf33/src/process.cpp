@@ -5,8 +5,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -227,6 +229,7 @@ Logger::Logger(const std::filesystem::path& log_path, Sink sink) : sink_(std::mo
         if (!stream_) throw std::runtime_error("Unable to create workflow log: " + log_path.string());
         stream_ << kLogRule << '\n'
                 << "SIPROS WORKFLOW LOG" << '\n'
+                << "Sipros version: " << SIPROS_VERSION << '\n'
                 << "Session started: " << timestamp() << '\n'
                 << kLogRule << '\n';
         stream_.flush();
@@ -325,6 +328,39 @@ int physical_cpu_count() {
     return std::max(1, static_cast<int>(fallback == 0 ? 1 : fallback));
 }
 
+std::uint64_t usable_memory_bytes() {
+#ifdef _WIN32
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    return GlobalMemoryStatusEx(&status)
+        ? static_cast<std::uint64_t>(status.ullAvailPhys)
+        : 0;
+#else
+    std::ifstream input("/proc/meminfo");
+    std::string key;
+    std::uint64_t value_kib = 0;
+    std::string unit;
+    while (input >> key >> value_kib >> unit) {
+        if (key == "MemAvailable:") {
+            constexpr std::uint64_t scale = 1024;
+            if (value_kib > std::numeric_limits<std::uint64_t>::max() / scale) {
+                return std::numeric_limits<std::uint64_t>::max();
+            }
+            return value_kib * scale;
+        }
+    }
+    const long pages = sysconf(_SC_AVPHYS_PAGES);
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (pages <= 0 || page_size <= 0) return 0;
+    const auto page_count = static_cast<std::uint64_t>(pages);
+    const auto bytes_per_page = static_cast<std::uint64_t>(page_size);
+    if (page_count > std::numeric_limits<std::uint64_t>::max() / bytes_per_page) {
+        return std::numeric_limits<std::uint64_t>::max();
+    }
+    return page_count * bytes_per_page;
+#endif
+}
+
 int effective_thread_count(int requested, int available) {
     if (requested < 0) throw std::invalid_argument("Thread count must be non-negative");
     const int cpu_count = available > 0 ? available : physical_cpu_count();
@@ -352,6 +388,26 @@ ThreadAllocation allocate_threads(int total_threads, int task_count,
         allocation.task_threads.push_back(per_task);
     }
     return allocation;
+}
+
+bool serialize_sipros_searches(int total_threads,
+                               std::uint64_t usable_memory) {
+    if (total_threads <= 0) {
+        throw std::invalid_argument("total_threads must be positive");
+    }
+    return total_threads <= kMinimumSiprosThreads ||
+           (usable_memory > 0 &&
+            usable_memory <= kParallelSiprosMinimumUsableMemoryBytes);
+}
+
+ThreadAllocation allocate_sipros_search_threads(
+    int total_threads, int task_count, int minimum_threads_per_task,
+    std::uint64_t usable_memory) {
+    const int effective_minimum = serialize_sipros_searches(
+        total_threads, usable_memory)
+        ? total_threads
+        : minimum_threads_per_task;
+    return allocate_threads(total_threads, task_count, effective_minimum);
 }
 
 std::map<std::string, std::string> thread_environment(int thread_count) {
@@ -710,9 +766,6 @@ void validate_options(WorkflowOptions& options, std::vector<std::string>* warnin
                             std::to_string(available));
     }
     options.threads = effective_thread_count(options.threads, available);
-    if (options.threads < kMinimumSiprosThreads && warnings) {
-        warnings->push_back("The 8-thread Sipros minimum cannot fit within this workflow budget; jobs will run serially");
-    }
 }
 
 void print_help(std::ostream& output) {
