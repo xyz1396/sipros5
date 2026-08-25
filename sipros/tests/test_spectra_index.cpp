@@ -4,13 +4,14 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#ifdef _WIN32
+#include "windows_posix_compat.h"
+#else
 #include <unistd.h>
+#endif
 #include <vector>
 
-namespace fs = std::filesystem;
 
-namespace
-{
 
 bool expect(bool condition, const std::string &message)
 {
@@ -19,14 +20,13 @@ bool expect(bool condition, const std::string &message)
 	return condition;
 }
 
-} // namespace
 
 int main()
 {
-	const fs::path path = fs::path("/dev/shm") /
+	const std::filesystem::path path = std::filesystem::temp_directory_path() /
 		("sipros_spectra_index_test_" + std::to_string(getpid()) + ".sfi");
 	std::error_code ec;
-	fs::remove(path, ec);
+	std::filesystem::remove(path, ec);
 
 	sipros::SpectraIndexMetadata metadata;
 	metadata.chemistryProfileId = "builtin-sip-fixed-cam-v2";
@@ -91,7 +91,7 @@ int main()
 	ok = expect(index.recordCount() == 300, "wrong SFI record count") && ok;
 	ok = expect(buildStats.threadsUsed == 2 && buildStats.blockCount == 2,
 		"SFI packed product index was not built in parallel") && ok;
-	ok = expect(buildStats.fileBytes == fs::file_size(path),
+	ok = expect(buildStats.fileBytes == std::filesystem::file_size(path),
 		"SFI build statistics contain the wrong file size") && ok;
 	ok = expect(buildStats.rtBinCount == index.rtBinCount() && index.rtBinCount() >= 3,
 		"SFI RT-bin build statistics or mapped count are wrong") && ok;
@@ -114,6 +114,16 @@ int main()
 	ok = expect(fragments.second - fragments.first == 4 &&
 		std::fabs(fragments.first->mz() - 300.123) < 1e-12,
 		"compact fragment envelope was not top-3 pruned/quantized") && ok;
+	ok = expect(fragments.first->ionPosition() == 2 &&
+		fragments.first->ionKind() == static_cast<uint8_t>('b') &&
+		std::fabs(fragments.first->theoreticalIntensity() - 1.0F) < 1e-7,
+		"packed fragment metadata or theoretical intensity changed") && ok;
+	auto experimental = index.experimentalIntensities(firstId);
+	ok = expect(std::fabs(experimental.next() - 120.0F) < 1e-6 &&
+		std::fabs(experimental.next() - 96.0F) < 1e-6 &&
+		std::fabs(experimental.next() - 72.0F) < 1e-6 &&
+		std::fabs(experimental.next() - 60.0F) < 1e-6,
+		"sparse experimental intensities did not round-trip") && ok;
 	const auto precursorPeaks = index.precursors(firstId);
 	ok = expect(precursorPeaks.second - precursorPeaks.first == 3,
 		"compact precursor envelope was not top-3 pruned") && ok;
@@ -141,6 +151,6 @@ int main()
 			"RT-aware product lookup leaked a fragment from another RT segment") && ok;
 	}
 	index.close();
-	fs::remove(path, ec);
+	std::filesystem::remove(path, ec);
 	return ok ? 0 : 1;
 }

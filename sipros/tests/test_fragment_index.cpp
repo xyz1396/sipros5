@@ -16,14 +16,13 @@
 #include <unordered_set>
 #include <vector>
 
-#if defined(__unix__) || defined(__APPLE__)
+#if defined(_WIN32)
+#include <process.h>
+#elif defined(__unix__) || defined(__APPLE__)
 #include <unistd.h>
 #endif
 
-namespace fs = std::filesystem;
 
-namespace
-{
 
 void check(bool condition, const std::string &message)
 {
@@ -59,21 +58,22 @@ std::string canonicalNakedPeptide(std::string_view decorated)
 	return result;
 }
 
-} // namespace
 
 int main()
 {
 	try
 	{
 		const unsigned long processId =
-#if defined(__unix__) || defined(__APPLE__)
+#if defined(_WIN32)
+			static_cast<unsigned long>(_getpid());
+#elif defined(__unix__) || defined(__APPLE__)
 			static_cast<unsigned long>(getpid());
 #else
 			0;
 #endif
-		const fs::path fasta = fs::temp_directory_path() /
+		const std::filesystem::path fasta = std::filesystem::temp_directory_path() /
 			("sipros_fragment_index_test_" + std::to_string(processId) + ".fasta");
-		const fs::path cache = fs::temp_directory_path() /
+		const std::filesystem::path cache = std::filesystem::temp_directory_path() /
 			("sipros_fragment_index_test_" + std::to_string(processId) + ".sfi");
 		{
 			std::ofstream out(fasta);
@@ -123,9 +123,10 @@ int main()
 			}
 		}
 
-		sipros::FragmentIndex built;
 		std::string error;
-		check(built.loadOrBuild(cache.string(), true, error),
+		{
+			sipros::FragmentIndex built;
+			check(built.loadOrBuild(cache.string(), true, error),
 			"could not build fragment index: " + error);
 		check(!built.stats().loadedFromCache, "forced build unexpectedly used cache");
 		check(built.peptideCount() > 0, "fragment index has no peptides");
@@ -137,7 +138,7 @@ int main()
 			"sparse fragment-bin directory has invalid cardinality");
 		check(built.precursorBlockCount() > 1,
 			"fragment-index test did not cross a bounded precursor block");
-		check(fs::file_size(cache) == built.stats().cacheBytes,
+		check(std::filesystem::file_size(cache) == built.stats().cacheBytes,
 			"reported cache size does not match file size");
 
 		for (uint32_t peptideId = 0; peptideId < built.peptideCount(); ++peptideId)
@@ -200,15 +201,16 @@ int main()
 				"materialized scoring sequence differs from cache record");
 		}
 
-		sipros::FragmentIndex loaded;
-		check(loaded.loadOrBuild(cache.string(), false, error),
+			sipros::FragmentIndex loaded;
+			check(loaded.loadOrBuild(cache.string(), false, error),
 			"could not mmap fragment index: " + error);
-		check(loaded.stats().loadedFromCache, "warm load rebuilt the cache");
-		check(loaded.peptideCount() == built.peptideCount() &&
-			loaded.fragmentCount() == built.fragmentCount(),
+			check(loaded.stats().loadedFromCache, "warm load rebuilt the cache");
+			check(loaded.peptideCount() == built.peptideCount() &&
+				loaded.fragmentCount() == built.fragmentCount(),
 			"warm cache counts differ from built index");
-		check(loaded.peptideSequence(0) == built.peptideSequence(0),
+			check(loaded.peptideSequence(0) == built.peptideSequence(0),
 			"warm cache peptide differs from built index");
+		}
 
 		{
 			std::fstream corrupt(cache,
@@ -230,15 +232,15 @@ int main()
 		check(!repaired.stats().loadedFromCache,
 			"corrupted cache passed payload validation");
 
-		const fs::path guardDirectory = fs::temp_directory_path() /
+		const std::filesystem::path guardDirectory = std::filesystem::temp_directory_path() /
 			("sipros_fragment_index_guard_test_" +
 			 std::to_string(processId));
-		fs::create_directories(guardDirectory);
-		const fs::path targetFasta = guardDirectory / "target.fasta";
-		const fs::path decoyFasta = guardDirectory / "decoy.fasta";
-		const fs::path targetCache = guardDirectory / "target.sfi";
-		const fs::path legacyDecoyCache = guardDirectory / "legacy.sfi";
-		const fs::path decoyCache = guardDirectory / "decoy.sfi";
+		std::filesystem::create_directories(guardDirectory);
+		const std::filesystem::path targetFasta = guardDirectory / "target.fasta";
+		const std::filesystem::path decoyFasta = guardDirectory / "decoy.fasta";
+		const std::filesystem::path targetCache = guardDirectory / "target.sfi";
+		const std::filesystem::path legacyDecoyCache = guardDirectory / "legacy.sfi";
+		const std::filesystem::path decoyCache = guardDirectory / "decoy.sfi";
 		{
 			std::ofstream out(targetFasta);
 			out << ">target_collision\n"
@@ -266,27 +268,29 @@ int main()
 		}
 
 		ProNovoConfig::setFASTAfilename(decoyFasta.string());
-		sipros::FragmentIndex legacyDecoyIndex;
-		check(legacyDecoyIndex.loadOrBuild(
-			legacyDecoyCache.string(), true, error),
-			"could not build legacy unguarded decoy cache: " + error);
-		const uint64_t legacyDecoyPeptideCount =
-			legacyDecoyIndex.peptideCount();
+		uint64_t legacyDecoyPeptideCount = 0;
 		std::vector<std::string> expectedGuardedPeptides;
-		for (uint32_t peptideId = 0;
-			 peptideId < legacyDecoyIndex.peptideCount(); ++peptideId)
 		{
-			const std::string peptide(
-				legacyDecoyIndex.peptideSequence(peptideId));
-			if (targetIdentities.find(canonicalNakedPeptide(peptide)) ==
-				targetIdentities.end())
+			sipros::FragmentIndex legacyDecoyIndex;
+			check(legacyDecoyIndex.loadOrBuild(
+				legacyDecoyCache.string(), true, error),
+				"could not build legacy unguarded decoy cache: " + error);
+			legacyDecoyPeptideCount = legacyDecoyIndex.peptideCount();
+			for (uint32_t peptideId = 0;
+				 peptideId < legacyDecoyIndex.peptideCount(); ++peptideId)
 			{
-				expectedGuardedPeptides.push_back(peptide);
+				const std::string peptide(
+					legacyDecoyIndex.peptideSequence(peptideId));
+				if (targetIdentities.find(canonicalNakedPeptide(peptide)) ==
+					targetIdentities.end())
+				{
+					expectedGuardedPeptides.push_back(peptide);
+				}
 			}
 		}
 		std::sort(expectedGuardedPeptides.begin(),
 			expectedGuardedPeptides.end());
-		fs::rename(legacyDecoyCache, decoyCache);
+		std::filesystem::rename(legacyDecoyCache, decoyCache);
 
 		sipros::FragmentIndex guardedDecoyIndex;
 		check(guardedDecoyIndex.loadOrBuild(
@@ -332,9 +336,9 @@ int main()
 			"warm guarded decoy.sfi lost its collision audit count");
 
 		std::error_code ignored;
-		fs::remove(cache, ignored);
-		fs::remove(fasta, ignored);
-		fs::remove_all(guardDirectory, ignored);
+		std::filesystem::remove(cache, ignored);
+		std::filesystem::remove(fasta, ignored);
+		std::filesystem::remove_all(guardDirectory, ignored);
 		std::cout << "ok: fragment index preserves universal neutral ions, mmap cache, and default decoy collision guard\n";
 		return 0;
 	}

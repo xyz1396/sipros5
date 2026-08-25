@@ -103,40 +103,40 @@ class SfiHeader(ctypes.Structure):
         ("recordKind", ctypes.c_char * 24),
         ("envelopeTopN", ctypes.c_uint32),
         ("reservedEnvelope", ctypes.c_uint32),
-        ("reserved", ctypes.c_uint64 * 7),
+        ("experimentalValueCount", ctypes.c_uint64),
+        ("experimentalPresenceOffset", ctypes.c_uint64),
+        ("experimentalValueOffset", ctypes.c_uint64),
+        ("reserved", ctypes.c_uint64 * 4),
     ]
 
 
 class SfiRecord(ctypes.Structure):
     _fields_ = [
         ("topPrecursorMz", ctypes.c_double),
-        ("topPrecursorIntensity", ctypes.c_double),
         ("sumPrecursorIntensity", ctypes.c_double),
         ("retentionMinutes", ctypes.c_double),
         ("sipAbundancePct", ctypes.c_double),
-        ("precursorOffset", ctypes.c_uint64),
-        ("fragmentOffset", ctypes.c_uint64),
-        ("psmIdOffset", ctypes.c_uint64),
-        ("peptideOffset", ctypes.c_uint64),
-        ("proteinsOffset", ctypes.c_uint64),
-        ("precursorCount", ctypes.c_uint32),
-        ("fragmentCount", ctypes.c_uint32),
-        ("psmIdSize", ctypes.c_uint32),
-        ("peptideSize", ctypes.c_uint32),
-        ("proteinsSize", ctypes.c_uint32),
+        ("precursorOffset", ctypes.c_uint32),
+        ("fragmentOffset", ctypes.c_uint32),
+        ("experimentalOffset", ctypes.c_uint32),
+        ("psmIdOffset", ctypes.c_uint32),
+        ("peptideOffset", ctypes.c_uint32),
+        ("proteinsOffset", ctypes.c_uint32),
         ("generationOrdinal", ctypes.c_uint32),
-        ("charge", ctypes.c_int32),
-        ("reserved", ctypes.c_uint32),
+        ("precursorCount", ctypes.c_uint16),
+        ("fragmentCount", ctypes.c_uint16),
+        ("psmIdSize", ctypes.c_uint16),
+        ("peptideSize", ctypes.c_uint16),
+        ("proteinsSize", ctypes.c_uint16),
+        ("charge", ctypes.c_int16),
     ]
 
 
 PRECURSOR_DTYPE = np.dtype([("mz", "<f8"), ("intensity", "<f8")])
-FRAGMENT_DTYPE = np.dtype({
-    "names": ["mz_bin", "theory", "experiment", "position", "kind", "reserved"],
-    "formats": ["<u4", "<f4", "<f4", "<u2", "u1", "u1"],
-    "offsets": [0, 4, 8, 12, 14, 15],
-    "itemsize": 16,
-})
+FRAGMENT_DTYPE = np.dtype([
+    ("packed_mz_position", "<u4"),
+    ("theoretical_bits", "<u4"),
+])
 
 
 def parse_args():
@@ -249,11 +249,11 @@ class SfiIndex:
         self.header = SfiHeader.from_buffer_copy(
             self._mapping[: ctypes.sizeof(SfiHeader)]
         )
-        if bytes(self.header.magic) != b"SIPSFI05":
+        if bytes(self.header.magic) != b"SIPSFI06":
             raise ValueError(
-                f"{self.path}: not an SFI v5 file; theoretical-spectra HDF5 fallback is disabled"
+                f"{self.path}: not an SFI v6 file; theoretical-spectra HDF5 fallback is disabled"
             )
-        if self.header.version != 5 or self.header.endian != 0x01020304:
+        if self.header.version != 6 or self.header.endian != 0x01020304:
             raise ValueError(f"{self.path}: unsupported SFI version or byte order")
         expected = {
             "header": ctypes.sizeof(SfiHeader),
@@ -320,6 +320,34 @@ class SfiIndex:
             self._mapping, dtype=FRAGMENT_DTYPE,
             count=int(record.fragmentCount), offset=fragment_offset,
         ).copy()
+        packed_mz_position = fragments["packed_mz_position"]
+        theoretical_bits = fragments["theoretical_bits"]
+        theoretical_intensity = (
+            theoretical_bits & np.uint32(0x7FFFFFFF)
+        ).view("<f4")
+
+        fragment_count = int(record.fragmentCount)
+        fragment_indices = (
+            np.arange(fragment_count, dtype=np.uint64) +
+            np.uint64(record.fragmentOffset)
+        )
+        presence_word_count = (int(self.header.fragmentCount) + 63) // 64
+        presence_words = np.frombuffer(
+            self._mapping, dtype="<u8", count=presence_word_count,
+            offset=int(self.header.experimentalPresenceOffset),
+        )
+        present = (
+            (presence_words[fragment_indices >> np.uint64(6)] >>
+             (fragment_indices & np.uint64(63))) & np.uint64(1)
+        ).astype(bool)
+        experimental_intensity = np.zeros(fragment_count, dtype=np.float32)
+        stored_count = int(np.count_nonzero(present))
+        if stored_count:
+            experimental_intensity[present] = np.frombuffer(
+                self._mapping, dtype="<f4", count=stored_count,
+                offset=(int(self.header.experimentalValueOffset) +
+                        int(record.experimentalOffset) * 4),
+            )
         return SpectraRecord(
             source_file=self.path.name,
             record_kind=self.record_kind,
@@ -332,11 +360,14 @@ class SfiIndex:
             proteins=self._text(record.proteinsOffset, record.proteinsSize),
             precursor_mz=precursors["mz"].astype(float),
             precursor_intensity=precursors["intensity"].astype(float),
-            fragment_mz=fragments["mz_bin"].astype(float) * 0.001,
-            theoretical_intensity=fragments["theory"].astype(float),
-            experimental_intensity=fragments["experiment"].astype(float),
-            ion_kinds=[chr(int(value)) for value in fragments["kind"]],
-            ion_positions=fragments["position"].astype(int),
+            fragment_mz=(packed_mz_position & np.uint32(0x00FFFFFF)).astype(float) * 0.001,
+            theoretical_intensity=theoretical_intensity.astype(float),
+            experimental_intensity=experimental_intensity.astype(float),
+            ion_kinds=[
+                "y" if value & np.uint32(0x80000000) else "b"
+                for value in theoretical_bits
+            ],
+            ion_positions=(packed_mz_position >> np.uint32(24)).astype(int),
             source_index=index,
         )
 

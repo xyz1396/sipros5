@@ -26,14 +26,11 @@
 #endif
 #include <omp.h>
 
-namespace fs = std::filesystem;
 
 namespace sipros
 {
 
-namespace
-{
-int closeFileDescriptor(int fd)
+static int closeFileDescriptor(int fd)
 {
 #ifdef _WIN32
 	return sipros_close(fd);
@@ -42,8 +39,8 @@ int closeFileDescriptor(int fd)
 #endif
 }
 
-constexpr std::array<char, 8> Magic{{'S', 'I', 'P', 'S', 'F', 'I', '0', '5'}};
-constexpr uint32_t Version = 5;
+constexpr std::array<char, 8> Magic{{'S', 'I', 'P', 'S', 'F', 'I', '0', '6'}};
+constexpr uint32_t Version = 6;
 constexpr uint32_t EndianMarker = 0x01020304U;
 constexpr uint64_t Alignment = 64;
 constexpr uint64_t FnvOffsetBasis = 1469598103934665603ULL;
@@ -194,12 +191,12 @@ void parallelSort(std::vector<T> &values, uint32_t requestedThreads,
 		values.swap(buffer);
 }
 
-uint64_t alignUp(uint64_t value, uint64_t alignment)
+static uint64_t alignUp(uint64_t value, uint64_t alignment)
 {
 	return (value + alignment - 1) & ~(alignment - 1);
 }
 
-bool checkedAdd(uint64_t a, uint64_t b, uint64_t &out)
+static bool checkedAdd(uint64_t a, uint64_t b, uint64_t &out)
 {
 	if (a > std::numeric_limits<uint64_t>::max() - b)
 		return false;
@@ -207,7 +204,7 @@ bool checkedAdd(uint64_t a, uint64_t b, uint64_t &out)
 	return true;
 }
 
-bool checkedMultiply(uint64_t a, uint64_t b, uint64_t &out)
+static bool checkedMultiply(uint64_t a, uint64_t b, uint64_t &out)
 {
 	if (a != 0 && b > std::numeric_limits<uint64_t>::max() / a)
 		return false;
@@ -215,7 +212,7 @@ bool checkedMultiply(uint64_t a, uint64_t b, uint64_t &out)
 	return true;
 }
 
-void hashBytes(uint64_t &hash, const void *data, uint64_t size)
+static void hashBytes(uint64_t &hash, const void *data, uint64_t size)
 {
 	const auto *bytes = static_cast<const unsigned char *>(data);
 	for (uint64_t i = 0; i < size; ++i)
@@ -296,7 +293,7 @@ void retainCompactEnvelopePeaks(SpectraIndexRecordInput &record,
 	record.fragments = std::move(compact);
 }
 
-uint64_t mix64(uint64_t value)
+static uint64_t mix64(uint64_t value)
 {
 	value ^= value >> 30;
 	value *= 0xbf58476d1ce4e5b9ULL;
@@ -396,13 +393,12 @@ bool sectionFits(uint64_t offset, uint64_t count, uint64_t fileSize)
 		checkedAdd(offset, bytes, end) && end <= fileSize;
 }
 
-std::string systemError(const std::string &prefix)
+static std::string systemError(const std::string &prefix)
 {
 	return prefix + ": " +
 		std::error_code(errno, std::generic_category()).message();
 }
 
-} // namespace
 
 struct SpectraIndex::Header
 {
@@ -447,13 +443,17 @@ struct SpectraIndex::Header
 	char recordKind[24];
 	uint32_t envelopeTopN;
 	uint32_t reservedEnvelope;
-	uint64_t reserved[7];
+	uint64_t experimentalValueCount;
+	uint64_t experimentalPresenceOffset;
+	uint64_t experimentalValueOffset;
+	uint64_t reserved[4];
 };
 
 static_assert(std::is_trivially_copyable<SpectraIndexRecord>::value, "SFI record must be POD");
 static_assert(std::is_trivially_copyable<SpectraIndexPrecursorPeak>::value, "SFI precursor must be POD");
 static_assert(std::is_trivially_copyable<SpectraIndexFragmentPeak>::value, "SFI fragment must be POD");
-static_assert(sizeof(SpectraIndexFragmentPeak) == 16, "SFI fragment layout changed");
+static_assert(sizeof(SpectraIndexRecord) == 72, "SFI record layout changed");
+static_assert(sizeof(SpectraIndexFragmentPeak) == 8, "SFI fragment layout changed");
 static_assert(sizeof(SpectraIndexFragmentPosting) == 4, "SFI packed posting layout changed");
 static_assert(sizeof(SpectraIndexRtBin) == 8, "SFI RT-bin layout changed");
 
@@ -487,6 +487,8 @@ void SpectraIndex::moveFrom(SpectraIndex &other) noexcept
 	records_ = other.records_;
 	precursors_ = other.precursors_;
 	fragments_ = other.fragments_;
+	experimentalPresenceBits_ = other.experimentalPresenceBits_;
+	experimentalValues_ = other.experimentalValues_;
 	blockRtBinOffsets_ = other.blockRtBinOffsets_;
 	blockProductOffsets_ = other.blockProductOffsets_;
 	rtBins_ = other.rtBins_;
@@ -495,6 +497,7 @@ void SpectraIndex::moveFrom(SpectraIndex &other) noexcept
 	recordCount_ = other.recordCount_;
 	precursorCount_ = other.precursorCount_;
 	fragmentCount_ = other.fragmentCount_;
+	experimentalValueCount_ = other.experimentalValueCount_;
 	rtBinCount_ = other.rtBinCount_;
 	productPostingCount_ = other.productPostingCount_;
 	stringBytes_ = other.stringBytes_;
@@ -506,6 +509,8 @@ void SpectraIndex::moveFrom(SpectraIndex &other) noexcept
 	other.records_ = nullptr;
 	other.precursors_ = nullptr;
 	other.fragments_ = nullptr;
+	other.experimentalPresenceBits_ = nullptr;
+	other.experimentalValues_ = nullptr;
 	other.blockRtBinOffsets_ = nullptr;
 	other.blockProductOffsets_ = nullptr;
 	other.rtBins_ = nullptr;
@@ -514,6 +519,7 @@ void SpectraIndex::moveFrom(SpectraIndex &other) noexcept
 	other.recordCount_ = 0;
 	other.precursorCount_ = 0;
 	other.fragmentCount_ = 0;
+	other.experimentalValueCount_ = 0;
 	other.rtBinCount_ = 0;
 	other.productPostingCount_ = 0;
 	other.stringBytes_ = 0;
@@ -532,6 +538,8 @@ void SpectraIndex::close()
 	records_ = nullptr;
 	precursors_ = nullptr;
 	fragments_ = nullptr;
+	experimentalPresenceBits_ = nullptr;
+	experimentalValues_ = nullptr;
 	blockRtBinOffsets_ = nullptr;
 	blockProductOffsets_ = nullptr;
 	rtBins_ = nullptr;
@@ -540,6 +548,7 @@ void SpectraIndex::close()
 	recordCount_ = 0;
 	precursorCount_ = 0;
 	fragmentCount_ = 0;
+	experimentalValueCount_ = 0;
 	rtBinCount_ = 0;
 	productPostingCount_ = 0;
 	stringBytes_ = 0;
@@ -654,7 +663,8 @@ bool SpectraIndex::write(const std::string &path,
 	const auto reserveStart = Clock::now();
 	size_t precursorReserve = 0;
 	size_t fragmentReserve = 0;
-	size_t stringReserve = 0;
+	size_t experimentalReserve = 0;
+	size_t psmStringReserve = 0;
 	auto addReserve = [](size_t value, size_t &total)
 	{
 		if (value > std::numeric_limits<size_t>::max() - total)
@@ -662,55 +672,132 @@ bool SpectraIndex::write(const std::string &path,
 		total += value;
 		return true;
 	};
+	auto storesExperimentalIntensity = [](float value)
+	{
+		uint32_t bits = 0;
+		std::memcpy(&bits, &value, sizeof(bits));
+		return bits != 0;
+	};
 	for (const OrderedInput &entry : order)
 	{
 		const auto &source = input[entry.inputIndex];
+		if (source.precursors.size() > std::numeric_limits<uint16_t>::max() ||
+			source.fragments.size() > std::numeric_limits<uint16_t>::max() ||
+			source.psmId.size() > std::numeric_limits<uint16_t>::max() ||
+			source.peptide.size() > std::numeric_limits<uint16_t>::max() ||
+			source.proteins.size() > std::numeric_limits<uint16_t>::max() ||
+			source.charge < std::numeric_limits<int16_t>::min() ||
+			source.charge > std::numeric_limits<int16_t>::max())
+		{
+			error = "one SIP spectra record exceeds compact v6 field capacity";
+			return false;
+		}
 		if (!addReserve(source.precursors.size(), precursorReserve) ||
 			!addReserve(source.fragments.size(), fragmentReserve) ||
-			!addReserve(source.psmId.size(), stringReserve) ||
-			!addReserve(source.peptide.size(), stringReserve) ||
-			!addReserve(source.proteins.size(), stringReserve))
+			!addReserve(source.psmId.size(), psmStringReserve))
 		{
 			error = "SIP spectra index input size overflows size_t";
 			return false;
 		}
+		for (const auto &peak : source.fragments)
+			if (storesExperimentalIntensity(peak.experimentalIntensity) &&
+				!addReserve(1, experimentalReserve))
+			{
+				error = "SIP spectra experimental intensity count overflows size_t";
+				return false;
+			}
 	}
+	if (precursorReserve > std::numeric_limits<uint32_t>::max() ||
+		fragmentReserve > std::numeric_limits<uint32_t>::max() ||
+		experimentalReserve > std::numeric_limits<uint32_t>::max() ||
+		psmStringReserve > std::numeric_limits<uint32_t>::max())
+	{
+		error = "SIP spectra index exceeds compact v6 section capacity";
+		return false;
+	}
+
+	// PSM IDs are generally unique, while peptide and protein strings repeat for
+	// every SIP abundance. Keep the IDs contiguous and intern only the repeated
+	// search metadata so MVH peptide reads do not fault the large ID payload.
+	size_t stringReserve = psmStringReserve;
+	std::unordered_map<std::string, uint32_t> internedStrings;
+	internedStrings.reserve(std::min<size_t>(order.size(), 262144));
+	auto internString = [&](const std::string &value) -> bool
+	{
+		if (internedStrings.find(value) != internedStrings.end())
+			return true;
+		if (value.size() > std::numeric_limits<uint16_t>::max() ||
+			value.size() > std::numeric_limits<size_t>::max() - stringReserve ||
+			stringReserve + value.size() > std::numeric_limits<uint32_t>::max())
+			return false;
+		const uint32_t offset = static_cast<uint32_t>(stringReserve);
+		internedStrings.emplace(value, offset);
+		stringReserve += value.size();
+		return true;
+	};
+	for (const OrderedInput &entry : order)
+	{
+		const auto &source = input[entry.inputIndex];
+		if (!internString(source.peptide) || !internString(source.proteins))
+		{
+			error = "SIP spectra string dictionary exceeds compact v6 capacity";
+			return false;
+		}
+	}
+
 	RawArray<SpectraIndexRecord> records(order.size());
 	RawArray<SpectraIndexPrecursorPeak> precursors(precursorReserve);
 	RawArray<SpectraIndexFragmentPeak> fragments(fragmentReserve);
+	RawArray<uint64_t> experimentalPresence(
+		(fragmentReserve + 63U) / 64U);
+	RawArray<float> experimentalValues(experimentalReserve);
 	RawArray<char> strings(stringReserve);
+	if (experimentalPresence.size() != 0)
+		std::memset(experimentalPresence.data(), 0,
+			experimentalPresence.size() * sizeof(experimentalPresence[0]));
+	for (const auto &entry : internedStrings)
+		if (!entry.first.empty())
+			std::memcpy(strings.data() + entry.second,
+				entry.first.data(), entry.first.size());
 	size_t nextPrecursor = 0;
 	size_t nextFragment = 0;
-	size_t nextString = 0;
+	size_t nextExperimental = 0;
+	size_t nextPsmString = 0;
 	for (size_t ordinal = 0; ordinal < order.size(); ++ordinal)
 	{
 		const auto &source = input[order[ordinal].inputIndex];
-		if (source.precursors.size() > std::numeric_limits<uint32_t>::max() ||
-			source.fragments.size() > std::numeric_limits<uint32_t>::max() ||
-			source.psmId.size() > std::numeric_limits<uint32_t>::max() ||
-			source.peptide.size() > std::numeric_limits<uint32_t>::max() ||
-			source.proteins.size() > std::numeric_limits<uint32_t>::max())
-		{
-			error = "one SIP spectra record exceeds uint32 field capacity";
-			return false;
-		}
 		SpectraIndexRecord record{};
-		record.precursorOffset = nextPrecursor;
-		record.fragmentOffset = nextFragment;
-		record.precursorCount = static_cast<uint32_t>(source.precursors.size());
-		record.fragmentCount = static_cast<uint32_t>(source.fragments.size());
-		record.psmIdOffset = nextString;
-		record.psmIdSize = static_cast<uint32_t>(source.psmId.size());
-		nextString += source.psmId.size();
-		record.peptideOffset = nextString;
-		record.peptideSize = static_cast<uint32_t>(source.peptide.size());
-		nextString += source.peptide.size();
-		record.proteinsOffset = nextString;
-		record.proteinsSize = static_cast<uint32_t>(source.proteins.size());
-		nextString += source.proteins.size();
+		record.precursorOffset = static_cast<uint32_t>(nextPrecursor);
+		record.fragmentOffset = static_cast<uint32_t>(nextFragment);
+		record.experimentalOffset = static_cast<uint32_t>(nextExperimental);
+		record.precursorCount = static_cast<uint16_t>(source.precursors.size());
+		record.fragmentCount = static_cast<uint16_t>(source.fragments.size());
+		record.psmIdOffset = static_cast<uint32_t>(nextPsmString);
+		record.psmIdSize = static_cast<uint16_t>(source.psmId.size());
+		nextPsmString += source.psmId.size();
+		record.peptideOffset = internedStrings.find(source.peptide)->second;
+		record.peptideSize = static_cast<uint16_t>(source.peptide.size());
+		record.proteinsOffset = internedStrings.find(source.proteins)->second;
+		record.proteinsSize = static_cast<uint16_t>(source.proteins.size());
+		for (size_t index = 0; index < source.fragments.size(); ++index)
+		{
+			if (!storesExperimentalIntensity(
+					source.fragments[index].experimentalIntensity))
+				continue;
+			const size_t fragmentIndex = nextFragment + index;
+			experimentalPresence[fragmentIndex >> 6U] |=
+				uint64_t{1} << (fragmentIndex & 63U);
+			++nextExperimental;
+		}
 		nextPrecursor += source.precursors.size();
 		nextFragment += source.fragments.size();
 		records[ordinal] = record;
+	}
+	if (nextExperimental != experimentalReserve ||
+		nextPsmString != psmStringReserve)
+	{
+		error = "SIP spectra compact v6 layout accounting mismatch";
+		return false;
 	}
 	localStats.reserveSeconds = elapsed(reserveStart);
 	const auto flattenStart = Clock::now();
@@ -723,8 +810,9 @@ bool SpectraIndex::write(const std::string &path,
 		SpectraIndexRecord record = records[ordinal];
 			record.retentionMinutes = source.retentionMinutes;
 			record.sipAbundancePct = source.sipAbundancePct;
-			record.charge = source.charge;
+			record.charge = static_cast<int16_t>(source.charge);
 			record.generationOrdinal = static_cast<uint32_t>(order[ordinal].inputIndex);
+			double topPrecursorIntensity = 0.0;
 			for (size_t index = 0; index < source.precursors.size(); ++index)
 			{
 				const auto &peak = source.precursors[index];
@@ -733,38 +821,47 @@ bool SpectraIndex::write(const std::string &path,
 					record.sumPrecursorIntensity += peak.intensity;
 				if (std::isfinite(peak.mz) && peak.mz > 0.0 &&
 					std::isfinite(peak.intensity) &&
-					peak.intensity > record.topPrecursorIntensity)
+					peak.intensity > topPrecursorIntensity)
 				{
 					record.topPrecursorMz = peak.mz;
-					record.topPrecursorIntensity = peak.intensity;
+					topPrecursorIntensity = peak.intensity;
 				}
 			}
+			size_t experimentalIndex = record.experimentalOffset;
 			for (size_t index = 0; index < source.fragments.size(); ++index)
 			{
 				const auto &peak = source.fragments[index];
 				const uint32_t mzBin = fragmentBin(peak.mz);
 				if (mzBin == std::numeric_limits<uint32_t>::max() ||
-					peak.ionPosition > std::numeric_limits<uint16_t>::max() ||
+					peak.ionPosition > std::numeric_limits<uint8_t>::max() ||
 					!std::isfinite(peak.theoreticalIntensity) ||
-					!std::isfinite(peak.experimentalIntensity))
+					std::signbit(peak.theoreticalIntensity) ||
+					!std::isfinite(peak.experimentalIntensity) ||
+					(peak.ionKind != static_cast<uint8_t>('b') &&
+					 peak.ionKind != static_cast<uint8_t>('B') &&
+					 peak.ionKind != static_cast<uint8_t>('y') &&
+					 peak.ionKind != static_cast<uint8_t>('Y')))
 				{
 					flattenFailed.store(true, std::memory_order_relaxed);
 					return;
 				}
+				SpectraIndexFragmentPeak fragment{};
+				fragment.packedMzPosition = mzBin |
+					(static_cast<uint32_t>(peak.ionPosition) << 24U);
+				std::memcpy(&fragment.theoreticalBits,
+					&peak.theoreticalIntensity, sizeof(fragment.theoreticalBits));
+				if (peak.ionKind == static_cast<uint8_t>('y') ||
+					peak.ionKind == static_cast<uint8_t>('Y'))
+					fragment.theoreticalBits |= SpectraIndexFragmentPeak::KindMask;
 				fragments[static_cast<size_t>(record.fragmentOffset) + index] =
-					{mzBin, peak.theoreticalIntensity,
-					peak.experimentalIntensity, static_cast<uint16_t>(peak.ionPosition),
-					peak.ionKind, 0};
+					fragment;
+				if (storesExperimentalIntensity(peak.experimentalIntensity))
+					experimentalValues[experimentalIndex++] =
+						peak.experimentalIntensity;
 			}
 		if (record.psmIdSize != 0)
 			std::memcpy(strings.data() + record.psmIdOffset,
 				source.psmId.data(), record.psmIdSize);
-		if (record.peptideSize != 0)
-			std::memcpy(strings.data() + record.peptideOffset,
-				source.peptide.data(), record.peptideSize);
-		if (record.proteinsSize != 0)
-			std::memcpy(strings.data() + record.proteinsOffset,
-				source.proteins.data(), record.proteinsSize);
 		records[ordinal] = record;
 		source = SpectraIndexRecordInput{};
 	});
@@ -816,7 +913,7 @@ bool SpectraIndex::write(const std::string &path,
 					 i < record.fragmentOffset + record.fragmentCount; ++i)
 				{
 					const uint32_t posting = packFragmentPosting(
-						fragments[static_cast<size_t>(i)].mzBin,
+						fragments[static_cast<size_t>(i)].mzBin(),
 						static_cast<uint8_t>(recordId - begin));
 					entries.push_back((static_cast<uint64_t>(rtBin) << 32) | posting);
 				}
@@ -885,6 +982,7 @@ bool SpectraIndex::write(const std::string &path,
 	header.recordCount = records.size();
 	header.precursorCount = precursors.size();
 	header.fragmentCount = fragments.size();
+	header.experimentalValueCount = experimentalValues.size();
 	header.rtBinCount = blockRtBinOffsets.back();
 	header.productPostingCount = blockProductOffsets.back();
 	header.stringBytes = strings.size();
@@ -916,6 +1014,10 @@ bool SpectraIndex::write(const std::string &path,
 		!place(header.rtBinCount, sizeof(SpectraIndexRtBin), header.rtBinOffset) ||
 		!place(header.productPostingCount, sizeof(SpectraIndexFragmentPosting),
 			header.productPostingOffset) ||
+		!place(experimentalPresence.size(), sizeof(uint64_t),
+			header.experimentalPresenceOffset) ||
+		!place(experimentalValues.size(), sizeof(float),
+			header.experimentalValueOffset) ||
 		!place(strings.size(), sizeof(char), header.stringOffset))
 	{
 		error = "SIP spectra index layout overflows uint64";
@@ -932,6 +1034,12 @@ bool SpectraIndex::write(const std::string &path,
 	checksum = mix64(checksum ^ checksumBytes(fragments.data(),
 		fragments.size() * sizeof(fragments[0]), 0xa4093822299f31d0ULL,
 		threadsUsed));
+	checksum = mix64(checksum ^ checksumBytes(experimentalPresence.data(),
+		experimentalPresence.size() * sizeof(experimentalPresence[0]),
+		0x3bd39e10cb0ef593ULL, threadsUsed));
+	checksum = mix64(checksum ^ checksumBytes(experimentalValues.data(),
+		experimentalValues.size() * sizeof(experimentalValues[0]),
+		0xc0acf169b5f18a8cULL, threadsUsed));
 	checksum = mix64(checksum ^ checksumBytes(blockRtBinOffsets.data(),
 		blockRtBinOffsets.size() * sizeof(uint64_t), 0x299f31d0082efa98ULL,
 		threadsUsed));
@@ -959,18 +1067,18 @@ bool SpectraIndex::write(const std::string &path,
 	header.payloadChecksum = checksum;
 	localStats.layoutChecksumSeconds = elapsed(layoutStart);
 
-	const fs::path output(path);
+	const std::filesystem::path output(path);
 	std::error_code ec;
 	if (output.has_parent_path())
 	{
-		fs::create_directories(output.parent_path(), ec);
+		std::filesystem::create_directories(output.parent_path(), ec);
 		if (ec)
 		{
 			error = "cannot create SIP spectra index directory: " + ec.message();
 			return false;
 		}
 	}
-	const fs::path temporary = output.string() + ".tmp." + std::to_string(getpid());
+	const std::filesystem::path temporary = output.string() + ".tmp." + std::to_string(getpid());
 	const auto writeStart = Clock::now();
 	const int outputFd = ::open(temporary.c_str(),
 		O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0600);
@@ -984,7 +1092,7 @@ bool SpectraIndex::write(const std::string &path,
 	{
 		error = systemError("cannot size SIP spectra index " + temporary.string());
 		closeFileDescriptor(outputFd);
-		fs::remove(temporary, ec);
+		std::filesystem::remove(temporary, ec);
 		return false;
 	}
 	struct WriteTask
@@ -1016,6 +1124,11 @@ bool SpectraIndex::write(const std::string &path,
 		precursors.size() * sizeof(precursors[0]));
 	addWriteTasks(header.fragmentOffset, fragments.data(),
 		fragments.size() * sizeof(fragments[0]));
+	addWriteTasks(header.experimentalPresenceOffset,
+		experimentalPresence.data(),
+		experimentalPresence.size() * sizeof(experimentalPresence[0]));
+	addWriteTasks(header.experimentalValueOffset, experimentalValues.data(),
+		experimentalValues.size() * sizeof(experimentalValues[0]));
 	addWriteTasks(header.blockRtBinOffset, blockRtBinOffsets.data(),
 		blockRtBinOffsets.size() * sizeof(uint64_t));
 	addWriteTasks(header.blockProductOffset, blockProductOffsets.data(),
@@ -1066,20 +1179,21 @@ bool SpectraIndex::write(const std::string &path,
 	if (!writeOk)
 	{
 		error = "failed while writing SIP spectra index: " + temporary.string();
-		fs::remove(temporary, ec);
+		std::filesystem::remove(temporary, ec);
 		return false;
 	}
-	fs::rename(temporary, output, ec);
+	std::filesystem::rename(temporary, output, ec);
 	if (ec)
 	{
 		error = "cannot publish SIP spectra index: " + ec.message();
-		fs::remove(temporary, ec);
+		std::filesystem::remove(temporary, ec);
 		return false;
 	}
 	localStats.writeSeconds = elapsed(writeStart);
 	localStats.recordCount = header.recordCount;
 	localStats.precursorCount = header.precursorCount;
 	localStats.fragmentCount = header.fragmentCount;
+	localStats.experimentalValueCount = header.experimentalValueCount;
 	localStats.rtBinCount = header.rtBinCount;
 	localStats.productPostingCount = header.productPostingCount;
 	localStats.stringBytes = header.stringBytes;
@@ -1126,7 +1240,15 @@ bool SpectraIndex::load(const std::string &path, std::string &error)
 		return false;
 	};
 	if (std::memcmp(header->magic, Magic.data(), Magic.size()) != 0)
+	{
+		if (std::memcmp(header->magic, "SIPSFI", 6) == 0)
+		{
+			return reject("unsupported SFI version " +
+				std::to_string(header->version) +
+				"; regenerate the spectra library with this Sipros build");
+		}
 		return reject("bad magic (HDF5 spectra libraries are not supported)");
+	}
 	if (header->version != Version || header->endian != EndianMarker ||
 		header->headerSize != sizeof(Header) ||
 		header->recordSize != sizeof(SpectraIndexRecord) ||
@@ -1147,6 +1269,9 @@ bool SpectraIndex::load(const std::string &path, std::string &error)
 		return reject("unsupported or inconsistent layout");
 	const uint64_t expectedBlocks =
 		(header->recordCount + RecordsPerBlock - 1) / RecordsPerBlock;
+	const uint64_t experimentalPresenceWordCount =
+		header->fragmentCount / 64U +
+		(header->fragmentCount % 64U != 0 ? 1U : 0U);
 	if (header->blockCount != expectedBlocks ||
 		!sectionFits<SpectraIndexRecord>(header->recordOffset, header->recordCount, size) ||
 		!sectionFits<SpectraIndexPrecursorPeak>(header->precursorOffset, header->precursorCount, size) ||
@@ -1156,6 +1281,10 @@ bool SpectraIndex::load(const std::string &path, std::string &error)
 		!sectionFits<SpectraIndexRtBin>(header->rtBinOffset, header->rtBinCount, size) ||
 		!sectionFits<SpectraIndexFragmentPosting>(header->productPostingOffset,
 			header->productPostingCount, size) ||
+		!sectionFits<uint64_t>(header->experimentalPresenceOffset,
+			experimentalPresenceWordCount, size) ||
+		!sectionFits<float>(header->experimentalValueOffset,
+			header->experimentalValueCount, size) ||
 		!sectionFits<char>(header->stringOffset, header->stringBytes, size))
 		return reject("section outside file bounds");
 
@@ -1163,6 +1292,10 @@ bool SpectraIndex::load(const std::string &path, std::string &error)
 	const auto *records = reinterpret_cast<const SpectraIndexRecord *>(base + header->recordOffset);
 	const auto *precursors = reinterpret_cast<const SpectraIndexPrecursorPeak *>(base + header->precursorOffset);
 	const auto *fragments = reinterpret_cast<const SpectraIndexFragmentPeak *>(base + header->fragmentOffset);
+	const auto *experimentalPresence = reinterpret_cast<const uint64_t *>(
+		base + header->experimentalPresenceOffset);
+	const auto *experimentalValues = reinterpret_cast<const float *>(
+		base + header->experimentalValueOffset);
 	const auto *blockRtBins = reinterpret_cast<const uint64_t *>(base + header->blockRtBinOffset);
 	const auto *blockProducts = reinterpret_cast<const uint64_t *>(base + header->blockProductOffset);
 	const auto *rtBins = reinterpret_cast<const SpectraIndexRtBin *>(base + header->rtBinOffset);
@@ -1191,6 +1324,7 @@ bool SpectraIndex::load(const std::string &path, std::string &error)
 		}
 	}
 	double previousMz = -std::numeric_limits<double>::infinity();
+	uint32_t previousExperimentalOffset = 0;
 	for (uint64_t i = 0; i < header->recordCount; ++i)
 	{
 		const auto &record = records[i];
@@ -1203,6 +1337,8 @@ bool SpectraIndex::load(const std::string &path, std::string &error)
 			record.precursorCount > header->precursorCount - record.precursorOffset ||
 			record.fragmentOffset > header->fragmentCount ||
 			record.fragmentCount > header->fragmentCount - record.fragmentOffset ||
+			record.experimentalOffset > header->experimentalValueCount ||
+			(i != 0 && record.experimentalOffset < previousExperimentalOffset) ||
 			record.psmIdOffset > header->stringBytes ||
 			record.psmIdSize > header->stringBytes - record.psmIdOffset ||
 			record.peptideOffset > header->stringBytes ||
@@ -1211,7 +1347,24 @@ bool SpectraIndex::load(const std::string &path, std::string &error)
 			record.proteinsSize > header->stringBytes - record.proteinsOffset)
 			return reject("invalid record data");
 		previousMz = record.topPrecursorMz;
+		previousExperimentalOffset = record.experimentalOffset;
 	}
+	uint64_t presentExperimentalValues = 0;
+	for (uint64_t i = 0; i < experimentalPresenceWordCount; ++i)
+	{
+		uint64_t bits = experimentalPresence[i];
+		while (bits != 0)
+		{
+			bits &= bits - 1U;
+			++presentExperimentalValues;
+		}
+	}
+	if (header->fragmentCount % 64U != 0 &&
+		(experimentalPresence[experimentalPresenceWordCount - 1U] >>
+		 (header->fragmentCount % 64U)) != 0)
+		return reject("nonzero sparse-intensity padding bits");
+	if (presentExperimentalValues != header->experimentalValueCount)
+		return reject("sparse experimental-intensity count mismatch");
 	const uint32_t checksumThreads = static_cast<uint32_t>(
 		std::max(1, omp_get_max_threads()));
 	uint64_t checksum = 0x6a09e667f3bcc909ULL;
@@ -1224,6 +1377,12 @@ bool SpectraIndex::load(const std::string &path, std::string &error)
 	checksum = mix64(checksum ^ checksumBytes(fragments,
 		header->fragmentCount * sizeof(*fragments), 0xa4093822299f31d0ULL,
 		checksumThreads));
+	checksum = mix64(checksum ^ checksumBytes(experimentalPresence,
+		experimentalPresenceWordCount * sizeof(*experimentalPresence),
+		0x3bd39e10cb0ef593ULL, checksumThreads));
+	checksum = mix64(checksum ^ checksumBytes(experimentalValues,
+		header->experimentalValueCount * sizeof(*experimentalValues),
+		0xc0acf169b5f18a8cULL, checksumThreads));
 	checksum = mix64(checksum ^ checksumBytes(blockRtBins,
 		(header->blockCount + 1ULL) * sizeof(uint64_t), 0x299f31d0082efa98ULL,
 		checksumThreads));
@@ -1250,12 +1409,56 @@ bool SpectraIndex::load(const std::string &path, std::string &error)
 	if (checksum != header->payloadChecksum)
 		return reject("payload checksum mismatch");
 
+	// Payload validation deliberately reads every byte. Drop that fully touched
+	// view before search so clean checksum-only pages do not remain resident and
+	// overlap the scoring caches. The replacement view refers to the same open,
+	// read-only file; its pages are faulted back only when the search needs them.
+	const Header validatedHeader = *header;
+	if (::munmap(mapping, size) != 0)
+	{
+		error = systemError("cannot release validated SIP spectra index " + path);
+		closeFileDescriptor(fd);
+		return false;
+	}
+	mapping = ::mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+	if (mapping == MAP_FAILED)
+	{
+		error = systemError("cannot remap validated SIP spectra index " + path);
+		closeFileDescriptor(fd);
+		return false;
+	}
+	header = static_cast<const Header *>(mapping);
+	if (std::memcmp(header, &validatedHeader, sizeof(Header)) != 0)
+		return reject("header changed during validation");
+	base = static_cast<const unsigned char *>(mapping);
+	records = reinterpret_cast<const SpectraIndexRecord *>(
+		base + header->recordOffset);
+	precursors = reinterpret_cast<const SpectraIndexPrecursorPeak *>(
+		base + header->precursorOffset);
+	fragments = reinterpret_cast<const SpectraIndexFragmentPeak *>(
+		base + header->fragmentOffset);
+	experimentalPresence = reinterpret_cast<const uint64_t *>(
+		base + header->experimentalPresenceOffset);
+	experimentalValues = reinterpret_cast<const float *>(
+		base + header->experimentalValueOffset);
+	blockRtBins = reinterpret_cast<const uint64_t *>(
+		base + header->blockRtBinOffset);
+	blockProducts = reinterpret_cast<const uint64_t *>(
+		base + header->blockProductOffset);
+	rtBins = reinterpret_cast<const SpectraIndexRtBin *>(
+		base + header->rtBinOffset);
+	productPostings = reinterpret_cast<const SpectraIndexFragmentPosting *>(
+		base + header->productPostingOffset);
+	strings = reinterpret_cast<const char *>(base + header->stringOffset);
+
 	mapping_ = mapping;
 	mappingSize_ = size;
 	mappingFd_ = fd;
 	records_ = records;
 	precursors_ = precursors;
 	fragments_ = fragments;
+	experimentalPresenceBits_ = experimentalPresence;
+	experimentalValues_ = experimentalValues;
 	blockRtBinOffsets_ = blockRtBins;
 	blockProductOffsets_ = blockProducts;
 	rtBins_ = rtBins;
@@ -1264,6 +1467,7 @@ bool SpectraIndex::load(const std::string &path, std::string &error)
 	recordCount_ = header->recordCount;
 	precursorCount_ = header->precursorCount;
 	fragmentCount_ = header->fragmentCount;
+	experimentalValueCount_ = header->experimentalValueCount;
 	rtBinCount_ = header->rtBinCount;
 	productPostingCount_ = header->productPostingCount;
 	stringBytes_ = header->stringBytes;
@@ -1327,6 +1531,14 @@ SpectraIndex::fragments(uint32_t id) const
 	const auto &r = record(id);
 	return {fragments_ + r.fragmentOffset,
 		fragments_ + r.fragmentOffset + r.fragmentCount};
+}
+
+SpectraIndexExperimentalCursor SpectraIndex::experimentalIntensities(
+	uint32_t id) const
+{
+	const auto &r = record(id);
+	return SpectraIndexExperimentalCursor(experimentalPresenceBits_,
+		r.fragmentOffset, experimentalValues_ + r.experimentalOffset);
 }
 
 std::pair<uint32_t, uint32_t> SpectraIndex::precursorMzRange(

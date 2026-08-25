@@ -6,8 +6,6 @@
 #include <string>
 #include <vector>
 
-namespace
-{
 
 void require(bool condition, const std::string &message)
 {
@@ -37,7 +35,6 @@ bool parse(const std::vector<std::string> &values,
 	return result;
 }
 
-} // namespace
 
 int main()
 {

@@ -15,8 +15,6 @@
 namespace sipros
 {
 
-namespace
-{
 
 // Validated DDA first-gate settings. Square-root transformation does not
 // change which experimental peaks belong to the top-N set.
@@ -312,7 +310,6 @@ void gateIsolationWindowBlock(
 	}
 }
 
-} // namespace
 
 IndexedSearchCounters &IndexedSearchCounters::operator+=(
 	const IndexedSearchCounters &other)

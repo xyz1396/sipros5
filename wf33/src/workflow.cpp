@@ -638,7 +638,7 @@ Workflow::SearchState Workflow::make_search(
     state.cancelled = &cancelled_;
     state.output = output;
     state.fasta = options_.fasta;
-    state.decoy = output / "decoy.faa";
+    if (mode != WorkflowMode::Spectra) state.decoy = output / "decoy.faa";
     state.psm_tsv = std::move(psm_tsv);
     state.unlabeled_input = std::move(unlabeled_input);
     state.spectra_dir = std::move(spectra_dir);
@@ -689,9 +689,11 @@ void Workflow::run_filter(const SearchState& state, const std::filesystem::path&
         args.insert(args.end(), {"--prediction-cache", prediction_cache.string()});
     }
     if (assemble_proteins) {
-        args.insert(args.end(), {"--database", state.fasta.string(),
-                                 "--decoy-database", state.decoy.string(),
-                                 "--protein-output-dir", output.string()});
+        args.insert(args.end(), {"--database", state.fasta.string()});
+        if (!state.decoy.empty()) {
+            args.insert(args.end(), {"--decoy-database", state.decoy.string()});
+        }
+        args.insert(args.end(), {"--protein-output-dir", output.string()});
     } else {
         args.insert(args.end(), {"--no-protein-assembly", "--filtered-only"});
     }
@@ -812,7 +814,6 @@ void Workflow::run_fast_sip() {
     spectra.base_names = regular.base_names;
     spectra.hdf5_paths = regular.hdf5_paths;
     spectra.generated_spectra_dir = spectra_output;
-    reverse_fasta(spectra);
     if (!options_.dry_run) {
         const std::filesystem::path generated = generate_or_reuse_spectra(spectra);
         search_spectra_samples(spectra, generated);

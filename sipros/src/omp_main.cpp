@@ -5,10 +5,8 @@
 #include <string>
 #include <vector>
 
-namespace
-{
 
-void printUsage(const char *prog)
+static void printUsage(const char *prog)
 {
 	std::cerr << "Usage:\n"
 			  << "  " << prog << " search-fasta [options]\n"
@@ -32,7 +30,6 @@ int runShifted(int argc, char **argv, int skip, const std::string &displayName, 
 }
 
 
-} // namespace
 
 int main(int argc, char **argv)
 {

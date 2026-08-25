@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -44,19 +45,58 @@ struct SpectraIndexFragmentPeakInput
 	uint8_t reserved[3] = {0, 0, 0};
 };
 
-// SFI stores fragment m/z as a fixed-point 0.001-Da bin.  The resulting
-// 16-byte record is exact at the product-gate index resolution and remains
-// directly usable from the memory map.
+// SFI stores fragment m/z as a fixed-point 0.001-Da bin.  Position occupies
+// the upper byte of packedMzPosition; the sign bit of theoreticalBits records
+// b/y kind while the remaining bits preserve the original non-negative float
+// exactly. Experimental intensities live in a sparse cold sidecar because the
+// MVH hot path does not consume them.
 struct SpectraIndexFragmentPeak
 {
-	uint32_t mzBin = 0;
-	float theoreticalIntensity = 0.0F;
-	float experimentalIntensity = 0.0F;
-	uint16_t ionPosition = 0;
-	uint8_t ionKind = 0;
-	uint8_t reserved = 0;
+	static constexpr uint32_t MassMask = 0x00ffffffU;
+	static constexpr uint32_t KindMask = 0x80000000U;
 
-	double mz() const { return static_cast<double>(mzBin) * 0.001; }
+	uint32_t packedMzPosition = 0;
+	uint32_t theoreticalBits = 0;
+
+	uint32_t mzBin() const { return packedMzPosition & MassMask; }
+	uint16_t ionPosition() const {
+		return static_cast<uint16_t>(packedMzPosition >> 24U);
+	}
+	uint8_t ionKind() const {
+		return static_cast<uint8_t>(
+			(theoreticalBits & KindMask) != 0 ? 'y' : 'b');
+	}
+	float theoreticalIntensity() const {
+		const uint32_t magnitudeBits = theoreticalBits & ~KindMask;
+		float value = 0.0F;
+		std::memcpy(&value, &magnitudeBits, sizeof(value));
+		return value;
+	}
+	double mz() const { return static_cast<double>(mzBin()) * 0.001; }
+};
+
+class SpectraIndexExperimentalCursor
+{
+public:
+	float next()
+	{
+		const uint64_t fragment = fragmentIndex_++;
+		const bool present =
+			(presenceBits_[fragment >> 6U] &
+			 (uint64_t{1} << (fragment & 63U))) != 0;
+		return present ? *values_++ : 0.0F;
+	}
+
+private:
+	friend class SpectraIndex;
+	SpectraIndexExperimentalCursor(const uint64_t *presenceBits,
+		uint64_t fragmentIndex, const float *values)
+		: presenceBits_(presenceBits), fragmentIndex_(fragmentIndex),
+		  values_(values) {}
+
+	const uint64_t *presenceBits_ = nullptr;
+	uint64_t fragmentIndex_ = 0;
+	const float *values_ = nullptr;
 };
 
 struct SpectraIndexRecordInput
@@ -74,23 +114,22 @@ struct SpectraIndexRecordInput
 struct SpectraIndexRecord
 {
 	double topPrecursorMz = 0.0;
-	double topPrecursorIntensity = 0.0;
 	double sumPrecursorIntensity = 0.0;
 	double retentionMinutes = 0.0;
 	double sipAbundancePct = 0.0;
-	uint64_t precursorOffset = 0;
-	uint64_t fragmentOffset = 0;
-	uint64_t psmIdOffset = 0;
-	uint64_t peptideOffset = 0;
-	uint64_t proteinsOffset = 0;
-	uint32_t precursorCount = 0;
-	uint32_t fragmentCount = 0;
-	uint32_t psmIdSize = 0;
-	uint32_t peptideSize = 0;
-	uint32_t proteinsSize = 0;
+	uint32_t precursorOffset = 0;
+	uint32_t fragmentOffset = 0;
+	uint32_t experimentalOffset = 0;
+	uint32_t psmIdOffset = 0;
+	uint32_t peptideOffset = 0;
+	uint32_t proteinsOffset = 0;
 	uint32_t generationOrdinal = 0;
-	int32_t charge = 1;
-	uint32_t reserved = 0;
+	uint16_t precursorCount = 0;
+	uint16_t fragmentCount = 0;
+	uint16_t psmIdSize = 0;
+	uint16_t peptideSize = 0;
+	uint16_t proteinsSize = 0;
+	int16_t charge = 1;
 };
 
 struct SpectraIndexFragmentPosting
@@ -112,6 +151,7 @@ struct SpectraIndexBuildStats
 	uint64_t recordCount = 0;
 	uint64_t precursorCount = 0;
 	uint64_t fragmentCount = 0;
+	uint64_t experimentalValueCount = 0;
 	uint64_t productPostingCount = 0;
 	uint64_t rtBinCount = 0;
 	uint64_t stringBytes = 0;
@@ -168,6 +208,8 @@ public:
 	precursors(uint32_t recordId) const;
 	std::pair<const SpectraIndexFragmentPeak *, const SpectraIndexFragmentPeak *>
 	fragments(uint32_t recordId) const;
+	SpectraIndexExperimentalCursor experimentalIntensities(
+		uint32_t recordId) const;
 
 	// Records are sorted by their precursor-envelope apex m/z.
 	std::pair<uint32_t, uint32_t> precursorMzRange(double lowerMz,
@@ -201,6 +243,8 @@ private:
 	const SpectraIndexRecord *records_ = nullptr;
 	const SpectraIndexPrecursorPeak *precursors_ = nullptr;
 	const SpectraIndexFragmentPeak *fragments_ = nullptr;
+	const uint64_t *experimentalPresenceBits_ = nullptr;
+	const float *experimentalValues_ = nullptr;
 	const uint64_t *blockRtBinOffsets_ = nullptr;
 	const uint64_t *blockProductOffsets_ = nullptr;
 	const SpectraIndexRtBin *rtBins_ = nullptr;
@@ -209,6 +253,7 @@ private:
 	uint64_t recordCount_ = 0;
 	uint64_t precursorCount_ = 0;
 	uint64_t fragmentCount_ = 0;
+	uint64_t experimentalValueCount_ = 0;
 	uint64_t rtBinCount_ = 0;
 	uint64_t productPostingCount_ = 0;
 	uint64_t stringBytes_ = 0;

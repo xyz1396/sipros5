@@ -6,7 +6,6 @@
 #include <string_view>
 
 namespace aerith {
-namespace {
 
 constexpr std::uint64_t kPredictionCacheMagic = 0x4145525052454433ULL;
 constexpr std::uint8_t kHasSpectrum = 1;
@@ -16,17 +15,18 @@ constexpr std::uint32_t kMaximumKeySize = 65536;
 constexpr std::uint32_t kMaximumFragments = 10000;
 
 template <typename Value>
-bool read_value(std::istream& input, Value& value) {
+static bool read_value(std::istream& input, Value& value) {
     return static_cast<bool>(input.read(
         reinterpret_cast<char*>(&value), sizeof(value)));
 }
 
 template <typename Value>
-void write_value(std::ostream& output, const Value& value) {
+static void write_value(std::ostream& output, const Value& value) {
     output.write(reinterpret_cast<const char*>(&value), sizeof(value));
 }
 
-void hash_bytes(std::uint64_t& hash, const void* bytes, std::size_t size) {
+static void hash_bytes(
+    std::uint64_t& hash, const void* bytes, std::size_t size) {
     const auto* value = static_cast<const unsigned char*>(bytes);
     for (std::size_t index = 0; index < size; ++index) {
         hash ^= value[index];
@@ -34,20 +34,20 @@ void hash_bytes(std::uint64_t& hash, const void* bytes, std::size_t size) {
     }
 }
 
-void hash_string(std::uint64_t& hash, const std::string& value) {
+static void hash_string(std::uint64_t& hash, const std::string& value) {
     hash_bytes(hash, value.data(), value.size());
     constexpr unsigned char separator = 0xff;
     hash_bytes(hash, &separator, 1);
 }
 
-std::uint64_t prediction_cache_fingerprint(const Config& config) {
+static std::uint64_t prediction_cache_fingerprint(const Config& config) {
     std::uint64_t hash = 1469598103934665603ULL;
     hash_string(hash, config.spectrum_model_path);
     hash_string(hash, config.rt_model_path);
     return hash;
 }
 
-bool read_entry(
+static bool read_entry(
     std::istream& input, bool load_fragments,
     std::string& key, PredictionCacheEntry& entry) {
     std::uint32_t key_size = 0;
@@ -89,7 +89,7 @@ bool read_entry(
     return true;
 }
 
-void write_entry(
+static void write_entry(
     std::ostream& output, const std::string& key,
     const PredictionCacheEntry& entry) {
     write_value(output, static_cast<std::uint32_t>(key.size()));
@@ -109,8 +109,6 @@ void write_entry(
         write_value(output, fragment.charge);
     }
 }
-
-} // namespace
 
 std::filesystem::path prediction_cache_file_path(const Config& config) {
     return config.prediction_cache_path.empty()

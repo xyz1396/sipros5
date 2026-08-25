@@ -13,8 +13,6 @@
 
 #include <omp.h>
 
-namespace
-{
 
 constexpr size_t PinChunkSize = 10000;
 
@@ -164,7 +162,6 @@ std::string formatSearchSpectraChunk(
     return pin.str();
 }
 
-} // namespace
 
 void PinWriter::writePecorlatorPin(const std::string &fileName, const std::vector<sipPSM> &psms, bool doProteinInference)
 {
@@ -241,19 +238,6 @@ size_t PinWriter::writeSearchSpectraPin(const std::string &fileName,
         }
     }
 
-    std::vector<SearchSpectraPinFormatChunk> chunks;
-    for (size_t begin = 0; begin < rows.size(); begin += PinChunkSize)
-    {
-        chunks.push_back({begin, std::min(begin + PinChunkSize, rows.size()), {}});
-    }
-#pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < static_cast<int64_t>(chunks.size()); ++i)
-    {
-        SearchSpectraPinFormatChunk &chunk = chunks[static_cast<size_t>(i)];
-        chunk.text = formatSearchSpectraChunk(
-            sampleBasename, rows, topByScan, chunk.begin, chunk.end);
-    }
-
     std::ofstream os(fileName, std::ios::binary);
     if (!os)
     {
@@ -261,14 +245,42 @@ size_t PinWriter::writeSearchSpectraPin(const std::string &fileName,
         return 0;
     }
     os.write(header, static_cast<std::streamsize>(std::char_traits<char>::length(header)));
-    for (const SearchSpectraPinFormatChunk &chunk : chunks)
+    // Format a bounded wave in parallel, write it in row order, then reuse the
+    // buffers. Keeping formatted text for the entire PIN needlessly overlaps
+    // hundreds of megabytes of output with the source rows.
+    const size_t chunkCount =
+        (rows.size() + PinChunkSize - 1U) / PinChunkSize;
+    const size_t chunksPerWave = static_cast<size_t>(
+        std::max(1, omp_get_max_threads())) * 2U;
+    for (size_t waveBegin = 0; waveBegin < chunkCount;
+         waveBegin += chunksPerWave)
     {
-        os.write(chunk.text.data(), static_cast<std::streamsize>(chunk.text.size()));
-    }
-    if (!os)
-    {
-        std::cerr << "Failed while writing " << fileName << "\n";
-        return 0;
+        const size_t waveCount = std::min(
+            chunksPerWave, chunkCount - waveBegin);
+        std::vector<SearchSpectraPinFormatChunk> chunks(waveCount);
+        for (size_t i = 0; i < waveCount; ++i)
+        {
+            const size_t begin = (waveBegin + i) * PinChunkSize;
+            chunks[i].begin = begin;
+            chunks[i].end = std::min(begin + PinChunkSize, rows.size());
+        }
+#pragma omp parallel for schedule(static)
+        for (int64_t i = 0; i < static_cast<int64_t>(waveCount); ++i)
+        {
+            SearchSpectraPinFormatChunk &chunk = chunks[static_cast<size_t>(i)];
+            chunk.text = formatSearchSpectraChunk(
+                sampleBasename, rows, topByScan, chunk.begin, chunk.end);
+        }
+        for (const SearchSpectraPinFormatChunk &chunk : chunks)
+        {
+            os.write(chunk.text.data(),
+                     static_cast<std::streamsize>(chunk.text.size()));
+        }
+        if (!os)
+        {
+            std::cerr << "Failed while writing " << fileName << "\n";
+            return 0;
+        }
     }
     return rows.size();
 }

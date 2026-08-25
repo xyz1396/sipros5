@@ -11,8 +11,6 @@
 #include <string>
 #include <vector>
 
-namespace
-{
 
 using PtmDefinition = ProNovoConfig::PtmDefinition;
 
@@ -1113,7 +1111,6 @@ void checkSipProfile()
 			"SIP reload did not reset the PTM maximum");
 }
 
-} // namespace
 
 int main()
 {

@@ -11,8 +11,6 @@
 #include <string>
 #include <vector>
 
-namespace
-{
 void check(bool condition, const std::string &message)
 {
     if (!condition)
@@ -205,7 +203,6 @@ sipPSM makeClassicPsm()
     psm.isDecoys = {false};
     return psm;
 }
-} // namespace
 
 int main()
 {

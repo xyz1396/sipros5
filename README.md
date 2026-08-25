@@ -160,13 +160,15 @@ record stores its own abundance and retention time. Input is strictly Aerith
 `*_filtered_psms.tsv`; legacy `psm.tsv` and missing confidence-column fallbacks
 are not supported. For every modified-peptide mass class and precursor charge,
 the representative PSM is selected by lowest `posterior_error_prob`, then
-highest `SVMscore`, then highest `WDPscores`. SFI v5 stores only the top
+highest `SVMscore`, then highest `WDPscores`. SFI v6 stores only the top
 three peaks by default in every precursor and product-ion isotope envelope
 (`--envelope-top-n` / workflow `--sfi-envelope-top-n`), and stores fragment m/z
-at 0.001-Da fixed-point resolution in a 16-byte fragment record and uses a
-sorted 4-byte packed product-ion index partitioned into sparse five-minute RT
-segments. Candidate gating reads only segments overlapping the configured RT
-window. Spectrum generation, precursor ordering, compact-array flattening,
+at 0.001-Da fixed-point resolution in an 8-byte hot fragment record. Fragment
+position and b/y kind share otherwise unused bits, while the less frequently
+read experimental intensities use a sparse sidecar. The index uses a sorted
+4-byte packed product-ion index partitioned into sparse five-minute RT segments.
+Candidate gating reads only segments overlapping the configured RT window.
+Spectrum generation, precursor ordering, compact-array flattening,
 product-index blocks, payload validation, and SFI publication are parallel;
 generation logs report the worker count, fragment/posting counts, index-build
 time, checksum/layout time, parallel-write time, and final GiB. HDF5
@@ -284,9 +286,12 @@ precursor when the candidate list is empty.
   requested, Aerith also writes
   `combined_protein_with_SIP_filtered_PSM.tsv`; there is no Python report
   implementation or fallback.
-- FASTA workflows pass the original target FASTA and generated decoy FASTA to
-  Aerith separately; the workflow does not create `targetDecoy.faa`. SIP
-  spectra-search mode runs Aerith filtering only and produces the per-sample
+- FASTA search stages pass the original target FASTA and generated decoy FASTA
+  to Aerith separately; the workflow does not create `targetDecoy.faa`. The
+  fast-SIP spectra-search stage gets decoy protein evidence directly from its
+  decoy PIN files and uses only the target FASTA for report annotations, so it
+  does not generate `spectra_search/decoy.faa`. Standalone spectra-search mode
+  runs Aerith filtering only and produces the per-sample
   `*_filtered_psms.tsv` files without protein assembly outputs.
 - Before reranking, Aerith removes decoy PSMs whose stripped peptide sequence
   is also present in any target PSM from the input samples and reports the

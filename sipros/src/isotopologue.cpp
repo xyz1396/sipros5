@@ -5,8 +5,6 @@
 #include <unordered_map>
 #include <utility>
 
-namespace
-{
 
 bool hasNegativeAtomCount(const sipros::SourcedComposition &composition)
 {
@@ -17,7 +15,6 @@ bool hasNegativeAtomCount(const sipros::SourcedComposition &composition)
 	return false;
 }
 
-} // namespace
 
 IsotopeDistribution::IsotopeDistribution()
 {

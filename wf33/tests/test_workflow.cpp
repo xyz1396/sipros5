@@ -284,6 +284,20 @@ void test_decoy_rules() {
         const std::string sip_text((std::istreambuf_iterator<char>(sip_decoy)), {});
         require(sip_text.find(">Decoy_protein\nEDCBA") != std::string::npos,
                 "SIP decoy must retain full reversal");
+
+        siproswf::WorkflowOptions fast = sip;
+        fast.mode = siproswf::WorkflowMode::FastSip;
+        fast.output = (root / "fast").string();
+        std::filesystem::create_directories(fast.output);
+        siproswf::Logger fast_log(std::filesystem::path(fast.output) / "test.log");
+        siproswf::Workflow fast_workflow(fast, tools, fast_log, cancelled);
+        fast_workflow.run();
+        require(std::filesystem::exists(
+                    std::filesystem::path(fast.output) / "regular" / "decoy.faa"),
+                "fast SIP regular search must retain its decoy FASTA");
+        require(!std::filesystem::exists(
+                    std::filesystem::path(fast.output) / "spectra_search" / "decoy.faa"),
+                "fast SIP spectra search must not generate a decoy FASTA");
     } catch (...) {
         std::error_code ignored; std::filesystem::remove_all(root, ignored); throw;
     }

@@ -31,7 +31,7 @@ CometSearchMod::~CometSearchMod() {
  */
 bool CometSearchMod::Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, double *pdTmpRawData, double *pdTmpFastXcorrData, double *pdTmpCorrelationData,
 		double *pdTmpSmoothedSpectrum, double *pdTmpPeakExtracted,
-		double maximumArrayMz) {
+		double maximumArrayMz, bool buildSparseFastXcorrDirectly) {
 	int i;
 	int x;
 	int y;
@@ -109,29 +109,31 @@ bool CometSearchMod::Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, d
 		return false;
 	}
 
-	try {
-		pScoring->pfFastXcorrData = new float[pScoring->_spectrumInfoInternal.iArraySize]();
-	} catch (std::bad_alloc& ba) {
-		const string strErrorMsg = " Error - new(pfFastXcorrData[" +
-			to_string(pScoring->_spectrumInfoInternal.iArraySize) +
-			"]). bad_alloc: " + ba.what() +
-			".\nComet ran out of memory. Adjust spectrum_batch_size to mitigate memory use.\n";
-		logerr(strErrorMsg.c_str());
-		return false;
-	}
-
-	if (ProNovoConfig::ionInformation.bUseNeutralLoss
-			&& (ProNovoConfig::ionInformation.iIonVal[ION_SERIES_A] || ProNovoConfig::ionInformation.iIonVal[ION_SERIES_B]
-					|| ProNovoConfig::ionInformation.iIonVal[ION_SERIES_Y])) {
+	if (!buildSparseFastXcorrDirectly) {
 		try {
-			pScoring->pfFastXcorrDataNL = new float[pScoring->_spectrumInfoInternal.iArraySize]();
+			pScoring->pfFastXcorrData = new float[pScoring->_spectrumInfoInternal.iArraySize]();
 		} catch (std::bad_alloc& ba) {
-			const string strErrorMsg = " Error - new(pfFastXcorrDataNL[" +
+			const string strErrorMsg = " Error - new(pfFastXcorrData[" +
 				to_string(pScoring->_spectrumInfoInternal.iArraySize) +
 				"]). bad_alloc: " + ba.what() +
 				".\nComet ran out of memory. Adjust spectrum_batch_size to mitigate memory use.\n";
 			logerr(strErrorMsg.c_str());
 			return false;
+		}
+
+		if (ProNovoConfig::ionInformation.bUseNeutralLoss
+				&& (ProNovoConfig::ionInformation.iIonVal[ION_SERIES_A] || ProNovoConfig::ionInformation.iIonVal[ION_SERIES_B]
+						|| ProNovoConfig::ionInformation.iIonVal[ION_SERIES_Y])) {
+			try {
+				pScoring->pfFastXcorrDataNL = new float[pScoring->_spectrumInfoInternal.iArraySize]();
+			} catch (std::bad_alloc& ba) {
+				const string strErrorMsg = " Error - new(pfFastXcorrDataNL[" +
+					to_string(pScoring->_spectrumInfoInternal.iArraySize) +
+					"]). bad_alloc: " + ba.what() +
+					".\nComet ran out of memory. Adjust spectrum_batch_size to mitigate memory use.\n";
+				logerr(strErrorMsg.c_str());
+				return false;
+			}
 		}
 	}
 
@@ -161,6 +163,118 @@ bool CometSearchMod::Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, d
 		}
 		//seg debug e
 		pdTmpFastXcorrData[i - ProNovoConfig::iXcorrProcessingOffset] = (dSum - pdTmpCorrelationData[i - ProNovoConfig::iXcorrProcessingOffset]) * dTmp;
+	}
+
+	if (buildSparseFastXcorrDirectly) {
+		const bool useNeutralLoss =
+			ProNovoConfig::ionInformation.bUseNeutralLoss
+			&& (ProNovoConfig::ionInformation.iIonVal[ION_SERIES_A]
+				|| ProNovoConfig::ionInformation.iIonVal[ION_SERIES_B]
+				|| ProNovoConfig::ionInformation.iIonVal[ION_SERIES_Y]);
+		pScoring->iFastXcorrData =
+			pScoring->_spectrumInfoInternal.iArraySize /
+			SPARSE_MATRIX_SIZE + 1;
+		try {
+			pScoring->ppfSparseFastXcorrData =
+				new float*[pScoring->iFastXcorrData]();
+		} catch (std::bad_alloc& ba) {
+			const string strErrorMsg =
+				" Error - new(pScoring->ppfSparseFastXcorrData[" +
+				to_string(pScoring->iFastXcorrData) +
+				"]). bad_alloc: " + ba.what() +
+				".\nComet ran out of memory. Adjust spectrum_batch_size to mitigate memory use.\n";
+			logerr(strErrorMsg.c_str());
+			return false;
+		}
+		if (useNeutralLoss) {
+			pScoring->iFastXcorrDataNL =
+				pScoring->_spectrumInfoInternal.iArraySize /
+				SPARSE_MATRIX_SIZE + 1;
+			try {
+				pScoring->ppfSparseFastXcorrDataNL =
+					new float*[pScoring->iFastXcorrDataNL]();
+			} catch (std::bad_alloc& ba) {
+				const string strErrorMsg =
+					" Error - new(pScoring->ppfSparseFastXcorrDataNL[" +
+					to_string(pScoring->iFastXcorrDataNL) +
+					"]). bad_alloc: " + ba.what() +
+					".\nComet ran out of memory. Adjust spectrum_batch_size to mitigate memory use.\n";
+				logerr(strErrorMsg.c_str());
+				return false;
+			}
+		}
+
+		for (i = 1; i < pScoring->_spectrumInfoInternal.iArraySize; ++i) {
+			float fastXcorr = static_cast<float>(
+				pdTmpCorrelationData[i] - pdTmpFastXcorrData[i]);
+			if (mstSpectrum->isMS2HighRes) {
+				int flank = i - 1;
+				fastXcorr += static_cast<float>(
+					(pdTmpCorrelationData[flank] -
+					 pdTmpFastXcorrData[flank]) * 0.5);
+				flank = i + 1;
+				if (flank < pScoring->_spectrumInfoInternal.iArraySize) {
+					fastXcorr += static_cast<float>(
+						(pdTmpCorrelationData[flank] -
+						 pdTmpFastXcorrData[flank]) * 0.5);
+				}
+			}
+			if (fastXcorr > FLOAT_ZERO || fastXcorr < -FLOAT_ZERO) {
+				x = i / SPARSE_MATRIX_SIZE;
+				if (pScoring->ppfSparseFastXcorrData[x] == NULL) {
+					try {
+						pScoring->ppfSparseFastXcorrData[x] =
+							new float[SPARSE_MATRIX_SIZE]();
+					} catch (std::bad_alloc& ba) {
+						const string strErrorMsg =
+							" Error - new sparse fast XCorr block. bad_alloc: " +
+							string(ba.what()) +
+							".\nComet ran out of memory. Adjust spectrum_batch_size to mitigate memory use.\n";
+						logerr(strErrorMsg.c_str());
+						return false;
+					}
+				}
+				y = i - (x * SPARSE_MATRIX_SIZE);
+				pScoring->ppfSparseFastXcorrData[x][y] = fastXcorr;
+			}
+
+			if (useNeutralLoss) {
+				float fastXcorrNL = fastXcorr;
+				int lossBin = i - iMinus17;
+				if (lossBin >= 0) {
+					fastXcorrNL += static_cast<float>(
+						(pdTmpCorrelationData[lossBin] -
+						 pdTmpFastXcorrData[lossBin]) * 0.2);
+				}
+				lossBin = i - iMinus18;
+				if (lossBin >= 0) {
+					fastXcorrNL += static_cast<float>(
+						(pdTmpCorrelationData[lossBin] -
+						 pdTmpFastXcorrData[lossBin]) * 0.2);
+				}
+				if (fastXcorrNL > FLOAT_ZERO ||
+					fastXcorrNL < -FLOAT_ZERO) {
+					x = i / SPARSE_MATRIX_SIZE;
+					if (pScoring->ppfSparseFastXcorrDataNL[x] == NULL) {
+						try {
+							pScoring->ppfSparseFastXcorrDataNL[x] =
+								new float[SPARSE_MATRIX_SIZE]();
+						} catch (std::bad_alloc& ba) {
+							const string strErrorMsg =
+								" Error - new sparse neutral-loss XCorr block. bad_alloc: " +
+								string(ba.what()) +
+								".\nComet ran out of memory. Adjust spectrum_batch_size to mitigate memory use.\n";
+							logerr(strErrorMsg.c_str());
+							return false;
+						}
+					}
+					y = i - (x * SPARSE_MATRIX_SIZE);
+					pScoring->ppfSparseFastXcorrDataNL[x][y] =
+						fastXcorrNL;
+				}
+			}
+		}
+		return true;
 	}
 
 	pScoring->pfFastXcorrData[0] = 0.0;

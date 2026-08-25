@@ -18,11 +18,8 @@
 #include "ms2scan.h"
 #include "proNovoConfig.h"
 
-namespace fs = std::filesystem;
 
 namespace sipros
-{
-namespace
 {
 
 bool hasObject(hid_t location, const std::string &name)
@@ -32,7 +29,7 @@ bool hasObject(hid_t location, const std::string &name)
 
 std::string lowerExt(const std::string &path)
 {
-    std::string ext = fs::path(path).extension().string();
+    std::string ext = std::filesystem::path(path).extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
     });
@@ -230,7 +227,6 @@ void appendMs1Data(RaxportMs1Data &data,
     data.scans.push_back(std::move(scan));
 }
 
-} // namespace
 
 RaxportPrecursorMatch findRaxportPrecursorMatch(
     const RaxportMs1Data &ms1Data,

@@ -23,7 +23,6 @@
 #include "PSMfeatureExtractor.h"
 #include "PinWriter.h"
 
-namespace fs = std::filesystem;
 
 namespace sipros
 {
@@ -216,11 +215,11 @@ std::vector<std::string> SiprosSearchRunner::listFilesWithExtensions(const std::
 												 const std::vector<std::string> &extensions)
 {
 	std::vector<std::string> files;
-	if (!fs::is_directory(directory))
+	if (!std::filesystem::is_directory(directory))
 	{
 		return files;
 	}
-	for (const auto &entry : fs::directory_iterator(directory))
+	for (const auto &entry : std::filesystem::directory_iterator(directory))
 	{
 		if (!entry.is_regular_file())
 		{
@@ -302,7 +301,7 @@ static bool parseInt(const std::string &text, int &value)
 
 static bool isHdf5Path(const std::string &path)
 {
-	const std::string lower = TextUtils::toLower(fs::path(path).extension().string());
+	const std::string lower = TextUtils::toLower(std::filesystem::path(path).extension().string());
 	return lower == ".h5" || lower == ".hdf5";
 }
 
@@ -998,7 +997,7 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 	}
 	if (!args.pinOutputFile.empty())
 	{
-		const fs::path pinOutput(args.pinOutputFile);
+		const std::filesystem::path pinOutput(args.pinOutputFile);
 		if (pinOutput.has_parent_path() ||
 			pinOutput.filename().string() != args.pinOutputFile ||
 			pinOutput.extension() != ".pin")
@@ -1014,7 +1013,7 @@ bool SiprosSearchRunner::initializeArguments(int argc, char **argv,
 	}
 	if (!args.fragmentIndexCache.empty())
 	{
-		const fs::path cachePath(args.fragmentIndexCache);
+		const std::filesystem::path cachePath(args.fragmentIndexCache);
 		if (cachePath.extension() != ".sfi")
 		{
 			err << "--fragment-index-cache must use the .sfi extension\n";
@@ -1216,7 +1215,7 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 			return 1;
 		}
 	}
-	fs::create_directories(args.outputDirectory);
+	std::filesystem::create_directories(args.outputDirectory);
 
 	MS2ScanVector scanVector(scanFile, args.outputDirectory, args.raxportReadOptions);
 	scanVector.configureFragmentIndex(fragmentIndex_);
@@ -1255,7 +1254,7 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 		}
 		printPerformanceHeader(
 			std::cout,
-			"Search timing: " + fs::path(scanFile).filename().string(),
+			"Search timing: " + std::filesystem::path(scanFile).filename().string(),
 			omp_get_max_threads());
 	}
 
@@ -1376,7 +1375,7 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 			" rows matched in linked MS1 +/-5");
 	}
 
-	const std::string sampleName = fs::path(scanFile).stem().string();
+	const std::string sampleName = std::filesystem::path(scanFile).stem().string();
 	const PerformanceTimer pinBuildTimer;
 	sipPSM psm = buildSipPsm(sampleName, scoredRows);
 	const PerformanceTiming pinBuildTiming = pinBuildTimer.elapsed();
@@ -1400,7 +1399,7 @@ int SiprosSearchRunner::runScan(const std::string &scanFile,
 	{
 		pinFileName = sampleName + ".pin";
 	}
-	const fs::path pinPath = fs::path(args.outputDirectory) / pinFileName;
+	const std::filesystem::path pinPath = std::filesystem::path(args.outputDirectory) / pinFileName;
 	const PerformanceTimer pinWriteTimer;
 	PinWriter::writePecorlatorPin(pinPath.string(), extractor.sipPSMs, false);
 	const PerformanceTiming pinWriteTiming = pinWriteTimer.elapsed();

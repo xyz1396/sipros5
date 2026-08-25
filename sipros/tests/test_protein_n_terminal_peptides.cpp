@@ -11,8 +11,6 @@
 #include <string>
 #include <vector>
 
-namespace
-{
 
 struct Snapshot
 {
@@ -239,7 +237,6 @@ void checkSipLegacyBehavior()
 		}), "SIP unexpectedly emitted protein-N-terminal acetylation");
 }
 
-} // namespace
 
 int main()
 {

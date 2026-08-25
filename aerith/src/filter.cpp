@@ -425,8 +425,7 @@ Summary run_monolithic(const Config& config) {
             pep[i] = sample_pep[local];
         }
     }
-    if (config.assemble_proteins && !config.database_path.empty() &&
-        !config.decoy_database_path.empty()) {
+    if (config.assemble_proteins && !config.database_path.empty()) {
         ProteinAssembler::sequential_filter(config, data, scores, pep, q);
     }
 
@@ -483,8 +482,7 @@ Summary run_monolithic(const Config& config) {
 
     const auto protein_begin = Clock::now();
     const ProcessCpuTick protein_cpu_begin = process_cpu_time_ticks();
-    if (config.assemble_proteins && !config.database_path.empty() &&
-        !config.decoy_database_path.empty()) {
+    if (config.assemble_proteins && !config.database_path.empty()) {
         const auto assembly =
             ProteinAssembler::write(config, data, scores, q, pep);
         summary.protein_ids = assembly.proteins;
@@ -968,8 +966,7 @@ Summary run_streamed(const Config& config) {
     summary.svm_model_timing = svm_model;
     summary.statistics_timing = primary_statistics;
 
-    if (config.assemble_proteins && !config.database_path.empty() &&
-        !config.decoy_database_path.empty()) {
+    if (config.assemble_proteins && !config.database_path.empty()) {
         ProteinAssembler::sequential_filter(config, data, scores, pep, q);
     }
 
@@ -1019,8 +1016,7 @@ Summary run_streamed(const Config& config) {
         no_internal_rt, {});
     if (!config.filtered_only) {
         const bool protein_filtered = config.assemble_proteins &&
-            !config.database_path.empty() &&
-            !config.decoy_database_path.empty();
+            !config.database_path.empty();
         for (std::size_t batch_begin = 0; batch_begin < summary.files;
              batch_begin += summary.sample_parallelism) {
             const std::size_t batch_count = std::min<std::size_t>(
@@ -1047,8 +1043,7 @@ Summary run_streamed(const Config& config) {
 
     begin = Clock::now();
     cpu_begin = process_cpu_time_ticks();
-    if (config.assemble_proteins && !config.database_path.empty() &&
-        !config.decoy_database_path.empty()) {
+    if (config.assemble_proteins && !config.database_path.empty()) {
         const auto assembly =
             ProteinAssembler::write(config, data, scores, q, pep);
         summary.protein_ids = assembly.proteins;

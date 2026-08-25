@@ -2725,12 +2725,18 @@ ProteinAssemblyResult ProteinAssembler::write(
     auto cpu_begin = process_cpu_time_ticks();
     auto fasta = read_fasta(
         config.database_path, config.decoy_prefix, false);
-    auto decoy_fasta = read_fasta(
-        config.decoy_database_path, config.decoy_prefix, true);
-    for (auto& [protein, entry] : decoy_fasta) {
-        fasta.insert_or_assign(protein, std::move(entry));
+    if (!config.decoy_database_path.empty()) {
+        auto decoy_fasta = read_fasta(
+            config.decoy_database_path, config.decoy_prefix, true);
+        for (auto& [protein, entry] : decoy_fasta) {
+            fasta.insert_or_assign(protein, std::move(entry));
+        }
     }
-    record_stage("Read and annotate target/decoy FASTAs", wall_begin, cpu_begin);
+    record_stage(
+        config.decoy_database_path.empty()
+            ? "Read and annotate target FASTA"
+            : "Read and annotate target/decoy FASTAs",
+        wall_begin, cpu_begin);
 
     wall_begin = Clock::now();
     cpu_begin = process_cpu_time_ticks();

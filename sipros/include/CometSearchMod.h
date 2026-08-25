@@ -167,7 +167,8 @@ public:
 
 	static bool Preprocess(struct Query *pScoring, MS2Scan * mstSpectrum, double *pdTmpRawData, double *pdTmpFastXcorrData, double *pdTmpCorrelationData,
 			double *pdSmoothedSpectrum, double *pdTmpPeakExtracted,
-			double maximumArrayMz = -1.0);
+			double maximumArrayMz = -1.0,
+			bool buildSparseFastXcorrDirectly = false);
 	static bool LoadIons(struct Query *pScoring, double *pdTmpRawData, MS2Scan * mstSpectrum, struct PreprocessStruct *pPre);
 	static void MakeCorrData(double *pdTmpRawData, double *pdTmpCorrelationData, struct Query *pScoring, struct PreprocessStruct *pPre);
 	static bool Smooth(double *data, int iArraySize, double *pdSmoothedSpectrum);

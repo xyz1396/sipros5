@@ -25,8 +25,6 @@
 #include <stdexcept>
 #include <string>
 
-namespace
-{
 
 constexpr std::uint64_t kRoundSalt = UINT64_C(0x9e3779b97f4a7c15);
 constexpr std::uint64_t kThreadSalt = UINT64_C(0xd1b54a32d192ed03);
@@ -160,7 +158,6 @@ Options parseOptions(int argc, char **argv)
 	return options;
 }
 
-} // namespace
 
 int main(int argc, char **argv)
 {

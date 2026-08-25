@@ -9,8 +9,6 @@
 #include "PeptideIsotopeCalculator.h"
 #include "isotopologue.h"
 
-namespace
-{
 
 constexpr const char *kCamChemistryProfileId =
 	"sipros5/source-aware-cam-tryptic-water/v1";
@@ -461,7 +459,6 @@ bool buildChemistryState(const BuiltInConfig &config,
 	return true;
 }
 
-} // namespace
 
 std::string ProNovoConfig::sFASTAFilename;
 std::string ProNovoConfig::sSearchType;

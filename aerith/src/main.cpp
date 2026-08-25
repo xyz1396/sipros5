@@ -37,7 +37,7 @@ void CommandLine::usage(std::ostream& out) {
         << "  --train-fdr FLOAT        RT/SVM selection threshold (default 0.01)\n"
         << "  --rt-ridge FLOAT         RT OLS regularization (default 1e-4)\n"
         << "  --database FILE          Target FASTA used for protein assembly\n"
-        << "  --decoy-database FILE    Decoy FASTA used for protein assembly\n"
+        << "  --decoy-database FILE    Optional decoy FASTA annotations\n"
         << "  --protein-output-dir DIR Write combined_*.tsv reports here\n"
         << "  --no-protein-assembly    Skip native picked-FDR/razor protein assembly\n"
         << "  --filtered-only          Write only PREFIX_filtered_psms.tsv\n"
@@ -76,7 +76,7 @@ void CommandLine::usage(std::ostream& out) {
         << "  --ignore-pct             Exclude SIP abundance columns from the SVM\n"
         << "  -h, --help               Show this help\n\n"
         << "Outputs per sample are PREFIX_target_psms.tsv, PREFIX_decoy_psms.tsv,\n"
-        << "and PREFIX_filtered_psms.tsv. With target and decoy databases, Aerith writes\n"
+        << "and PREFIX_filtered_psms.tsv. With a target database, Aerith writes\n"
         << "native sample and combined reports directly from scored PSMs.\n";
 }
 
@@ -150,10 +150,9 @@ void CommandLine::validate(const aerith::Config& config, int& exit_status) {
             "FDR thresholds must be in (0,1], SVM costs and fragment ppm positive, "
             "quantification tolerances/minima valid, and RT ridge non-negative");
     }
-    if (!config.protein_output_dir.empty() &&
-        (config.database_path.empty() || config.decoy_database_path.empty())) {
+    if (!config.protein_output_dir.empty() && config.database_path.empty()) {
         throw std::runtime_error(
-            "--protein-output-dir requires --database and --decoy-database");
+            "--protein-output-dir requires --database");
     }
     if (config.protein_reference_path.empty() !=
         config.sip_protein_output_path.empty()) {
@@ -166,10 +165,10 @@ void CommandLine::validate(const aerith::Config& config, int& exit_status) {
             "Protein reference does not exist: " +
             config.protein_reference_path);
     }
-    if (config.assemble_proteins &&
-        (config.database_path.empty() != config.decoy_database_path.empty())) {
+    if (config.assemble_proteins && config.database_path.empty() &&
+        !config.decoy_database_path.empty()) {
         throw std::runtime_error(
-            "Protein assembly requires both --database and --decoy-database");
+            "--decoy-database requires --database for protein assembly");
     }
     if (config.assemble_proteins) {
         for (const auto& database : {

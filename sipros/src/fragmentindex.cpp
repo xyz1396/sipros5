@@ -40,14 +40,11 @@
 #include <unistd.h>
 #endif
 
-namespace fs = std::filesystem;
 
 namespace sipros
 {
 
-namespace
-{
-int closeFileDescriptor(int fd)
+static int closeFileDescriptor(int fd)
 {
 #if defined(_WIN32)
 	return sipros_close(fd);
@@ -55,10 +52,6 @@ int closeFileDescriptor(int fd)
 	return ::close(fd);
 #endif
 }
-} // namespace
-
-namespace
-{
 
 constexpr std::array<char, 8> CacheMagic{{'S', 'I', 'P', 'R', 'O', 'S', 'F', 'I'}};
 constexpr uint32_t CacheVersion = 5;
@@ -67,12 +60,12 @@ constexpr uint64_t FnvOffsetBasis = 1469598103934665603ULL;
 constexpr uint64_t FnvPrime = 1099511628211ULL;
 constexpr uint64_t CacheAlignment = 64;
 
-uint64_t alignUp(uint64_t value, uint64_t alignment)
+static uint64_t alignUp(uint64_t value, uint64_t alignment)
 {
 	return (value + alignment - 1) / alignment * alignment;
 }
 
-bool checkedMultiply(uint64_t left, uint64_t right, uint64_t &result)
+static bool checkedMultiply(uint64_t left, uint64_t right, uint64_t &result)
 {
 	if (left != 0 && right > std::numeric_limits<uint64_t>::max() / left)
 	{
@@ -82,7 +75,7 @@ bool checkedMultiply(uint64_t left, uint64_t right, uint64_t &result)
 	return true;
 }
 
-bool checkedAdd(uint64_t left, uint64_t right, uint64_t &result)
+static bool checkedAdd(uint64_t left, uint64_t right, uint64_t &result)
 {
 	if (right > std::numeric_limits<uint64_t>::max() - left)
 	{
@@ -92,7 +85,7 @@ bool checkedAdd(uint64_t left, uint64_t right, uint64_t &result)
 	return true;
 }
 
-void hashBytes(uint64_t &hash, const void *data, size_t size)
+static void hashBytes(uint64_t &hash, const void *data, size_t size)
 {
 	const auto *bytes = static_cast<const unsigned char *>(data);
 	for (size_t i = 0; i < size; ++i)
@@ -117,7 +110,7 @@ void hashString(uint64_t &hash, const std::string &value)
 	hashBytes(hash, value.data(), value.size());
 }
 
-uint64_t mix64(uint64_t value)
+static uint64_t mix64(uint64_t value)
 {
 	value ^= value >> 30;
 	value *= 0xbf58476d1ce4e5b9ULL;
@@ -264,7 +257,7 @@ bool readFastaEntries(const std::string &path,
 	return true;
 }
 
-std::string systemError(const std::string &prefix)
+static std::string systemError(const std::string &prefix)
 {
 	return prefix + ": " +
 		std::error_code(errno, std::generic_category()).message();
@@ -315,7 +308,6 @@ private:
 	int fd_ = -1;
 };
 
-} // namespace
 
 struct FragmentIndex::CacheHeader
 {
@@ -415,7 +407,7 @@ bool FragmentIndex::readCacheIdentity(
 		return false;
 	}
 	std::error_code sizeError;
-	const uint64_t actualSize = fs::file_size(path, sizeError);
+	const uint64_t actualSize = std::filesystem::file_size(path, sizeError);
 	if (sizeError || header.fileSize != actualSize)
 	{
 		error = "fragment-index cache size does not match its header: " + path;
@@ -566,10 +558,10 @@ bool FragmentIndex::loadOrBuild(const std::string &cachePath,
 	std::unordered_set<std::string> forbiddenTargetPeptides;
 	uint64_t collisionGuardFingerprint = 0;
 	bool guardedDecoyCache = false;
-	fs::path collisionTargetPath;
+	std::filesystem::path collisionTargetPath;
 	if (!cachePath.empty())
 	{
-		std::string cacheName = fs::path(cachePath).filename().string();
+		std::string cacheName = std::filesystem::path(cachePath).filename().string();
 		std::transform(cacheName.begin(), cacheName.end(), cacheName.begin(),
 			[](unsigned char symbol)
 			{
@@ -579,8 +571,8 @@ bool FragmentIndex::loadOrBuild(const std::string &cachePath,
 		{
 			guardedDecoyCache = true;
 			collisionTargetPath =
-				fs::path(cachePath).parent_path() / "target.sfi";
-			if (!fs::exists(collisionTargetPath))
+				std::filesystem::path(cachePath).parent_path() / "target.sfi";
+			if (!std::filesystem::exists(collisionTargetPath))
 			{
 				error = "decoy.sfi collision guard requires sibling target.sfi: " +
 					collisionTargetPath.string();
@@ -603,7 +595,7 @@ bool FragmentIndex::loadOrBuild(const std::string &cachePath,
 		return false;
 	}
 
-	if (!cachePath.empty() && !forceRebuild && fs::exists(cachePath))
+	if (!cachePath.empty() && !forceRebuild && std::filesystem::exists(cachePath))
 	{
 		const PerformanceTimer timer;
 		std::string loadError;
@@ -626,11 +618,11 @@ bool FragmentIndex::loadOrBuild(const std::string &cachePath,
 	CacheBuildLock buildLock;
 	if (!cachePath.empty())
 	{
-		const fs::path cacheFile(cachePath);
+		const std::filesystem::path cacheFile(cachePath);
 		if (cacheFile.has_parent_path())
 		{
 			std::error_code directoryError;
-			fs::create_directories(cacheFile.parent_path(), directoryError);
+			std::filesystem::create_directories(cacheFile.parent_path(), directoryError);
 			if (directoryError)
 			{
 				error = "cannot create fragment-index cache directory: " +
@@ -644,7 +636,7 @@ bool FragmentIndex::loadOrBuild(const std::string &cachePath,
 		}
 		// A sibling process may have published the cache while this process
 		// waited. Recheck under the lock before doing any expensive work.
-		if (!forceRebuild && fs::exists(cachePath))
+		if (!forceRebuild && std::filesystem::exists(cachePath))
 		{
 			const PerformanceTimer timer;
 			std::string loadError;
@@ -1394,18 +1386,18 @@ bool FragmentIndex::save(const std::string &path,
 	{
 		return true;
 	}
-	const fs::path output(path);
+	const std::filesystem::path output(path);
 	std::error_code ec;
 	if (output.has_parent_path())
 	{
-		fs::create_directories(output.parent_path(), ec);
+		std::filesystem::create_directories(output.parent_path(), ec);
 		if (ec)
 		{
 			error = "cannot create fragment-index cache directory: " + ec.message();
 			return false;
 		}
 	}
-	const fs::path temporary = output.string() + ".tmp." +
+	const std::filesystem::path temporary = output.string() + ".tmp." +
 		std::to_string(static_cast<unsigned long long>(
 #if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
 			getpid()
@@ -1539,7 +1531,7 @@ bool FragmentIndex::save(const std::string &path,
 	{
 		error = "failed while writing fragment-index cache: " + temporary.string();
 		out.close();
-		fs::remove(temporary, ec);
+		std::filesystem::remove(temporary, ec);
 		return false;
 	}
 	out.flush();
@@ -1547,14 +1539,14 @@ bool FragmentIndex::save(const std::string &path,
 	{
 		error = "failed to flush fragment-index cache: " + temporary.string();
 		out.close();
-		fs::remove(temporary, ec);
+		std::filesystem::remove(temporary, ec);
 		return false;
 	}
 	out.close();
 	if (!out)
 	{
 		error = "failed to close fragment-index cache: " + temporary.string();
-		fs::remove(temporary, ec);
+		std::filesystem::remove(temporary, ec);
 		return false;
 	}
 #if defined(__unix__) || defined(__APPLE__)
@@ -1568,22 +1560,22 @@ bool FragmentIndex::save(const std::string &path,
 		}
 		errno = syncError;
 		error = systemError("cannot sync fragment-index cache " + temporary.string());
-		fs::remove(temporary, ec);
+		std::filesystem::remove(temporary, ec);
 		return false;
 	}
 	closeFileDescriptor(temporaryFd);
 #endif
-	fs::rename(temporary, output, ec);
+	std::filesystem::rename(temporary, output, ec);
 	if (ec)
 	{
 		error = "cannot publish fragment-index cache: " + ec.message();
-		fs::remove(temporary, ec);
+		std::filesystem::remove(temporary, ec);
 		return false;
 	}
 #if defined(__unix__) || defined(__APPLE__)
-	const fs::path parent = output.has_parent_path()
+	const std::filesystem::path parent = output.has_parent_path()
 		? output.parent_path()
-		: fs::path(".");
+		: std::filesystem::path(".");
 	const int parentFd = open(parent.c_str(), O_RDONLY);
 	if (parentFd >= 0)
 	{

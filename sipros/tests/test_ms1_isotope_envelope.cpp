@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -17,14 +18,25 @@
 #include <vector>
 
 #include <omp.h>
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
-namespace
-{
 void check(bool condition, const std::string &message)
 {
     if (!condition)
         throw std::runtime_error(message);
+}
+
+long long processId()
+{
+#ifdef _WIN32
+    return static_cast<long long>(_getpid());
+#else
+    return static_cast<long long>(getpid());
+#endif
 }
 
 struct TargetCase
@@ -706,8 +718,10 @@ void checkDirectSearchUsesFullPtmComposition()
             std::remove(path.c_str());
         }
     } temporary{
-        "/tmp/sipros5_direct_ptm_precursor_" +
-        std::to_string(static_cast<long long>(getpid())) + ".fasta"};
+        (std::filesystem::temp_directory_path() /
+         ("sipros5_direct_ptm_precursor_" +
+          std::to_string(processId()) + ".fasta"))
+            .string()};
     {
         std::ofstream output(temporary.path);
         check(output.good(), "failed to create direct-search PTM fixture");
@@ -1245,7 +1259,6 @@ void checkEndpointStateIndependence()
           "failed to restore natural isotope state");
 }
 
-} // namespace
 
 int main(int argc, char **argv)
 {

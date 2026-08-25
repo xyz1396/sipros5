@@ -12,8 +12,6 @@
 #define WORKTAG 1
 #define DIETAG 2
 
-namespace
-{
 
 struct NullBuffer : std::streambuf
 {
@@ -102,7 +100,6 @@ void slaveProcess(const std::vector<UnitOfWork> &workload, const sipros::Databas
 	std::cout << "Slave process " << rank << " done" << std::endl;
 }
 
-} // namespace
 
 int main(int argc, char **argv)
 {

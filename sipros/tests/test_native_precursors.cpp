@@ -15,10 +15,7 @@
 #include <unistd.h>
 #endif
 
-namespace fs = std::filesystem;
 
-namespace
-{
 
 void check(bool condition, const std::string &message)
 {
@@ -41,7 +38,7 @@ void write1D(H5::H5File &file, const std::string &path,
 	}
 }
 
-void writeFixture(const fs::path &path, int reactionCharge,
+void writeFixture(const std::filesystem::path &path, int reactionCharge,
 				  bool hasNearbyPrecursor = true)
 {
 	H5::H5File file(path.string(), H5F_ACC_TRUNC);
@@ -106,7 +103,7 @@ void writeFixture(const fs::path &path, int reactionCharge,
 }
 
 std::vector<MS2Scan *> readNative(
-	const fs::path &path,
+	const std::filesystem::path &path,
 	sipros::RaxportMs1Data *ms1Data = nullptr)
 {
 	std::vector<MS2Scan *> scans;
@@ -120,7 +117,7 @@ std::vector<MS2Scan *> readNative(
 	return scans;
 }
 
-std::vector<MS2Scan *> readCandidates(const fs::path &path)
+std::vector<MS2Scan *> readCandidates(const std::filesystem::path &path)
 {
 	std::vector<MS2Scan *> scans;
 	std::string error;
@@ -181,7 +178,6 @@ void checkPostScoreFiveScanMatch()
 		"unassigned MS1 peak did not support a post-score charge-2 PSM");
 }
 
-} // namespace
 
 int main()
 {
@@ -191,11 +187,11 @@ int main()
 #else
 		0;
 #endif
-	const fs::path firstPath = fs::temp_directory_path() /
+	const std::filesystem::path firstPath = std::filesystem::temp_directory_path() /
 		("sipros_native_precursor_low_" + std::to_string(processId) + ".h5");
-	const fs::path secondPath = fs::temp_directory_path() /
+	const std::filesystem::path secondPath = std::filesystem::temp_directory_path() /
 		("sipros_native_precursor_high_" + std::to_string(processId) + ".h5");
-	const fs::path noPrecursorPath = fs::temp_directory_path() /
+	const std::filesystem::path noPrecursorPath = std::filesystem::temp_directory_path() /
 		("sipros_native_precursor_absent_" + std::to_string(processId) + ".h5");
 	std::vector<MS2Scan *> first;
 	std::vector<MS2Scan *> second;
@@ -267,9 +263,9 @@ int main()
 		destroy(second);
 		destroy(noPrecursor);
 		std::error_code ignored;
-		fs::remove(firstPath, ignored);
-		fs::remove(secondPath, ignored);
-		fs::remove(noPrecursorPath, ignored);
+		std::filesystem::remove(firstPath, ignored);
+		std::filesystem::remove(secondPath, ignored);
+		std::filesystem::remove(noPrecursorPath, ignored);
 		std::cout << "ok: Regular candidates are isolation-window-only and retain MS1 data\n";
 		return 0;
 	}
@@ -279,9 +275,9 @@ int main()
 		destroy(second);
 		destroy(noPrecursor);
 		std::error_code ignored;
-		fs::remove(firstPath, ignored);
-		fs::remove(secondPath, ignored);
-		fs::remove(noPrecursorPath, ignored);
+		std::filesystem::remove(firstPath, ignored);
+		std::filesystem::remove(secondPath, ignored);
+		std::filesystem::remove(noPrecursorPath, ignored);
 		std::cerr << ex.what() << '\n';
 		return 1;
 	}

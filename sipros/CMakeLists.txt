@@ -109,6 +109,11 @@ if(BUILD_TESTING)
   target_include_directories(fragment_index_test PUBLIC ${SIPROS_INCLUDE_DIRS})
   target_link_libraries(fragment_index_test PUBLIC sipros_core)
   sipros_optimization_options(fragment_index_test)
+  if(MSVC)
+    # This fixture exercises the same FASTA cache preparation as sipros and
+    # needs the same non-default process stack on Windows.
+    set_property(TARGET fragment_index_test APPEND_STRING PROPERTY LINK_FLAGS " /STACK:8388608")
+  endif()
   add_test(
     NAME fragment_index
     COMMAND fragment_index_test

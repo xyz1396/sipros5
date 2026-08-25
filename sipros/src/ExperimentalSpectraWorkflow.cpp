@@ -46,10 +46,7 @@
 #endif
 #endif
 
-namespace fs = std::filesystem;
 
-namespace
-{
 constexpr int kSpectraHdf5FormatVersion = 2;
 
 #if !defined(_WIN32)
@@ -214,7 +211,7 @@ struct TimingLogger
 	}
 };
 
-struct Args
+struct ExperimentalArgs
 {
 	std::string inputPath;
 	std::string hdf5Path;
@@ -236,7 +233,7 @@ struct Args
 	std::vector<std::string> fixedPtmSelectors;
 };
 
-struct PsmRow
+struct ExperimentalPsmRow
 {
 	std::string psmId;
 	std::string sample;
@@ -358,14 +355,14 @@ struct Hdf5OutputMetadata
 struct Hdf5SampleTask
 {
 	std::string sample;
-	fs::path path;
+	std::filesystem::path path;
 	std::unordered_set<int> requestedScans;
 	std::vector<size_t> rowIndices;
 };
 
 struct OutputFileJob
 {
-	fs::path path;
+	std::filesystem::path path;
 	Hdf5OutputMetadata metadata;
 	bool decoy = false;
 	std::vector<double> targetAbundancesPct;
@@ -410,9 +407,9 @@ struct ProcessingStats
 	std::atomic<size_t> decoyComputeFailed{0};
 };
 
-std::string peptideMassClassKey(const std::string &peptide);
+static std::string peptideMassClassKey(const std::string &peptide);
 
-void printUsage(const char *prog)
+static void printUsage(const char *prog)
 {
 	std::cerr << "Usage: " << prog
 			  << " -i <*_filtered_psms.tsv|filtered_dir> -f <h5_file|h5_dir> -o <output.sfi|output_dir/>"
@@ -447,7 +444,7 @@ bool parseDoubleStrict(const std::string &text, double &value)
 	}
 }
 
-bool parseSipAbundanceSpec(const std::string &spec, Args &args)
+bool parseSipAbundanceSpec(const std::string &spec, ExperimentalArgs &args)
 {
 	const std::string t = sipros::TextUtils::trim(spec);
 	const size_t dash = t.find('-', 1);
@@ -479,7 +476,7 @@ bool parseSipAbundanceSpec(const std::string &spec, Args &args)
 	return true;
 }
 
-bool parseArgs(int argc, char **argv, Args &args)
+static bool parseArgs(int argc, char **argv, ExperimentalArgs &args)
 {
 	for (int i = 1; i < argc; ++i)
 	{
@@ -747,7 +744,7 @@ bool parseArgs(int argc, char **argv, Args &args)
 	return true;
 }
 
-bool parseDoubleField(const std::string &s, double &value)
+static bool parseDoubleField(const std::string &s, double &value)
 {
 	try
 	{
@@ -766,7 +763,7 @@ bool parseDoubleField(const std::string &s, double &value)
 	}
 }
 
-bool parseIntField(const std::string &s, int &value)
+static bool parseIntField(const std::string &s, int &value)
 {
 	try
 	{
@@ -785,7 +782,7 @@ bool parseIntField(const std::string &s, int &value)
 	}
 }
 
-bool convertModifiedPeptide(const std::string &plainPeptide,
+static bool convertModifiedPeptide(const std::string &plainPeptide,
 							const std::string &modifiedPeptide,
 							const std::string &assignedModifications,
 							std::string &normalizedPeptide,
@@ -851,17 +848,17 @@ bool parseSpectrumId(const std::string &spectrum, std::string &sample, int &scan
 	return foundScan;
 }
 
-std::vector<fs::path> collectPsmFiles(const std::string &inputPath)
+std::vector<std::filesystem::path> collectPsmFiles(const std::string &inputPath)
 {
-	const fs::path path(inputPath);
-	if (!fs::exists(path))
+	const std::filesystem::path path(inputPath);
+	if (!std::filesystem::exists(path))
 	{
 		throw std::runtime_error("Input path does not exist: " + inputPath);
 	}
 
-	std::vector<fs::path> files;
+	std::vector<std::filesystem::path> files;
 	const std::string filteredSuffix = "_filtered_psms.tsv";
-	const auto isFilteredPsm = [&](const fs::path &candidate)
+	const auto isFilteredPsm = [&](const std::filesystem::path &candidate)
 	{
 		const std::string filename = candidate.filename().string();
 		return filename.size() >= filteredSuffix.size() &&
@@ -869,7 +866,7 @@ std::vector<fs::path> collectPsmFiles(const std::string &inputPath)
 				filteredSuffix.size(), filteredSuffix) == 0 &&
 			filename != "SIP_filtered_psms.tsv";
 	};
-	if (fs::is_regular_file(path))
+	if (std::filesystem::is_regular_file(path))
 	{
 		if (!isFilteredPsm(path))
 		{
@@ -879,10 +876,10 @@ std::vector<fs::path> collectPsmFiles(const std::string &inputPath)
 		}
 		files.push_back(path);
 	}
-	else if (fs::is_directory(path))
+	else if (std::filesystem::is_directory(path))
 	{
-		std::vector<fs::path> filteredFiles;
-		for (const auto &entry : fs::recursive_directory_iterator(path))
+		std::vector<std::filesystem::path> filteredFiles;
+		for (const auto &entry : std::filesystem::recursive_directory_iterator(path))
 		{
 			if (!entry.is_regular_file())
 			{
@@ -950,7 +947,7 @@ std::string requireProteinNames(const std::string &value, const std::string &con
 	return proteins;
 }
 
-std::vector<std::string> splitProteinList(const std::string &proteins)
+static std::vector<std::string> splitProteinList(const std::string &proteins)
 {
 	std::string inner = sipros::TextUtils::trim(proteins);
 	if (inner.size() >= 2 && inner.front() == '{' && inner.back() == '}')
@@ -972,7 +969,7 @@ std::vector<std::string> splitProteinList(const std::string &proteins)
 	return out;
 }
 
-std::string formatProteinList(const std::vector<std::string> &proteins)
+static std::string formatProteinList(const std::vector<std::string> &proteins)
 {
 	std::string out = "{";
 	for (const std::string &protein : proteins)
@@ -987,7 +984,7 @@ std::string formatProteinList(const std::vector<std::string> &proteins)
 	return out;
 }
 
-std::string mergeProteinLists(const std::string &a, const std::string &b)
+static std::string mergeProteinLists(const std::string &a, const std::string &b)
 {
 	std::set<std::string> seen;
 	std::vector<std::string> merged;
@@ -1071,7 +1068,7 @@ std::string decoyProteinNames(const std::string &value)
 	return braced ? "{" + out + "}" : out;
 }
 
-void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &stats, size_t &nextOrder)
+void readPsmFile(const std::filesystem::path &path, std::vector<ExperimentalPsmRow> &rows, ReadStats &stats, size_t &nextOrder)
 {
 	std::ifstream in(path);
 	if (!in)
@@ -1143,7 +1140,7 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 			continue;
 		}
 
-		PsmRow row;
+		ExperimentalPsmRow row;
 		if (idxLabel != std::string::npos)
 		{
 			int label = 0;
@@ -1248,22 +1245,22 @@ void readPsmFile(const fs::path &path, std::vector<PsmRow> &rows, ReadStats &sta
 	}
 }
 
-std::vector<PsmRow> readInputRows(const std::string &inputPath, ReadStats &stats)
+std::vector<ExperimentalPsmRow> readInputRows(const std::string &inputPath, ReadStats &stats)
 {
-	const std::vector<fs::path> files = collectPsmFiles(inputPath);
-	std::vector<PsmRow> rows;
+	const std::vector<std::filesystem::path> files = collectPsmFiles(inputPath);
+	std::vector<ExperimentalPsmRow> rows;
 	size_t nextOrder = 0;
-	for (const fs::path &path : files)
+	for (const std::filesystem::path &path : files)
 	{
 		readPsmFile(path, rows, stats, nextOrder);
 	}
 	return rows;
 }
 
-std::map<std::string, size_t> requestedScanCountsBySample(const std::vector<PsmRow> &rows)
+std::map<std::string, size_t> requestedScanCountsBySample(const std::vector<ExperimentalPsmRow> &rows)
 {
 	std::map<std::string, std::set<int>> scansBySample;
-	for (const PsmRow &row : rows)
+	for (const ExperimentalPsmRow &row : rows)
 	{
 		scansBySample[row.sample].insert(row.scanNumber);
 	}
@@ -1276,7 +1273,8 @@ std::map<std::string, size_t> requestedScanCountsBySample(const std::vector<PsmR
 	return counts;
 }
 
-bool isBetterPsm(const PsmRow &candidate, const PsmRow &current)
+static bool isBetterPsm(
+    const ExperimentalPsmRow &candidate, const ExperimentalPsmRow &current)
 {
 	constexpr double eps = 1e-15;
 	if (candidate.probability > current.probability + eps)
@@ -1304,11 +1302,12 @@ bool isBetterPsm(const PsmRow &candidate, const PsmRow &current)
 	return false;
 }
 
-std::vector<PsmRow> selectBestRowsByPeptideCharge(const std::vector<PsmRow> &rows)
+static std::vector<ExperimentalPsmRow> selectBestRowsByPeptideCharge(
+    const std::vector<ExperimentalPsmRow> &rows)
 {
 	std::unordered_map<std::string, size_t> bestIndex;
-	std::vector<PsmRow> selected;
-	for (const PsmRow &row : rows)
+	std::vector<ExperimentalPsmRow> selected;
+	for (const ExperimentalPsmRow &row : rows)
 	{
 		const std::string key = peptideMassClassKey(row.peptide) + "\t" + std::to_string(row.precursorCharge);
 		const auto it = bestIndex.find(key);
@@ -1318,7 +1317,7 @@ std::vector<PsmRow> selectBestRowsByPeptideCharge(const std::vector<PsmRow> &row
 			selected.push_back(row);
 			continue;
 		}
-		PsmRow &current = selected[it->second];
+		ExperimentalPsmRow &current = selected[it->second];
 		const std::string mergedProteins = mergeProteinLists(current.proteins, row.proteins);
 		if (isBetterPsm(row, current))
 		{
@@ -1332,27 +1331,27 @@ std::vector<PsmRow> selectBestRowsByPeptideCharge(const std::vector<PsmRow> &row
 	}
 
 	std::sort(selected.begin(), selected.end(),
-			  [](const PsmRow &a, const PsmRow &b)
+			  [](const ExperimentalPsmRow &a, const ExperimentalPsmRow &b)
 			  { return a.order < b.order; });
 	return selected;
 }
 
-std::unordered_map<std::string, fs::path> collectHdf5Files(const std::string &hdf5Path)
+std::unordered_map<std::string, std::filesystem::path> collectHdf5Files(const std::string &hdf5Path)
 {
-	const fs::path path(hdf5Path);
-	if (!fs::exists(path))
+	const std::filesystem::path path(hdf5Path);
+	if (!std::filesystem::exists(path))
 	{
 		throw std::runtime_error("Raxport HDF5 path does not exist: " + hdf5Path);
 	}
 
-	std::vector<fs::path> files;
-	if (fs::is_regular_file(path))
+	std::vector<std::filesystem::path> files;
+	if (std::filesystem::is_regular_file(path))
 	{
 		files.push_back(path);
 	}
-	else if (fs::is_directory(path))
+	else if (std::filesystem::is_directory(path))
 	{
-		for (const auto &entry : fs::recursive_directory_iterator(path))
+		for (const auto &entry : std::filesystem::recursive_directory_iterator(path))
 		{
 			if (!entry.is_regular_file())
 			{
@@ -1371,8 +1370,8 @@ std::unordered_map<std::string, fs::path> collectHdf5Files(const std::string &hd
 		throw std::runtime_error("No Raxport HDF5 files found under: " + hdf5Path);
 	}
 
-	std::unordered_map<std::string, fs::path> byStem;
-	for (const fs::path &file : files)
+	std::unordered_map<std::string, std::filesystem::path> byStem;
+	for (const std::filesystem::path &file : files)
 	{
 		const std::string stem = file.stem().string();
 		if (byStem.find(stem) == byStem.end())
@@ -1383,7 +1382,7 @@ std::unordered_map<std::string, fs::path> collectHdf5Files(const std::string &hd
 	return byStem;
 }
 
-std::unordered_map<int, ObservedScan> readRequestedScans(const fs::path &hdf5File,
+std::unordered_map<int, ObservedScan> readRequestedScans(const std::filesystem::path &hdf5File,
                                                          const std::unordered_set<int> &requestedScans)
 {
 	std::unordered_map<int, ObservedScan> scans;
@@ -1423,8 +1422,8 @@ std::unordered_map<int, ObservedScan> readRequestedScans(const fs::path &hdf5Fil
 	return scans;
 }
 
-std::vector<Hdf5SampleTask> buildHdf5SampleTasks(const std::vector<PsmRow> &rows,
-											   const std::unordered_map<std::string, fs::path> &hdf5FilesBySample,
+std::vector<Hdf5SampleTask> buildHdf5SampleTasks(const std::vector<ExperimentalPsmRow> &rows,
+											   const std::unordered_map<std::string, std::filesystem::path> &hdf5FilesBySample,
 											   ProcessingStats &processingStats)
 {
 	struct SampleRows
@@ -1436,7 +1435,7 @@ std::vector<Hdf5SampleTask> buildHdf5SampleTasks(const std::vector<PsmRow> &rows
 	std::map<std::string, SampleRows> groupedBySample;
 	for (size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
 	{
-		const PsmRow &row = rows[rowIndex];
+		const ExperimentalPsmRow &row = rows[rowIndex];
 		SampleRows &group = groupedBySample[row.sample];
 		group.requestedScans.insert(row.scanNumber);
 		group.rowIndices.push_back(rowIndex);
@@ -1516,7 +1515,7 @@ void buildPrecursorChargePeaks(const IsotopeDistribution &dist,
 	}
 }
 
-bool buildPrecursorDistributionFromProductIons(
+static bool buildPrecursorDistributionFromProductIons(
 	const Isotopologue &iso,
 	const std::vector<std::vector<double>> &yMass,
 	const std::vector<std::vector<double>> &yProb,
@@ -1647,10 +1646,10 @@ bool collectMatchedEnvelopeApexIntensities(const std::vector<std::vector<double>
 	return true;
 }
 
-void matchBaselineInHdf5Batches(const std::vector<PsmRow> &rows,
-							   const std::unordered_map<std::string, fs::path> &hdf5FilesBySample,
+void matchBaselineInHdf5Batches(const std::vector<ExperimentalPsmRow> &rows,
+							   const std::unordered_map<std::string, std::filesystem::path> &hdf5FilesBySample,
 							   const Isotopologue &baselineIso,
-							   const Args &args,
+							   const ExperimentalArgs &args,
 							   int effectiveThreads,
 							   std::vector<MatchedEnvelopeSet> &matchedEnvelopeSets,
 							   std::vector<char> &baselineOk,
@@ -1732,7 +1731,7 @@ void matchBaselineInHdf5Batches(const std::vector<PsmRow> &rows,
 					for (int i = 0; i < static_cast<int>(batchRows.size()); ++i)
 					{
 						const BatchRowRef &ref = batchRows[static_cast<size_t>(i)];
-						const PsmRow &row = rows[ref.rowIndex];
+						const ExperimentalPsmRow &row = rows[ref.rowIndex];
 						const auto scanIt = loadedScans[ref.localTaskIndex].find(row.scanNumber);
 						if (scanIt == loadedScans[ref.localTaskIndex].end())
 						{
@@ -1930,7 +1929,7 @@ std::string buildPeptideFromTokens(const PeptideTokens &tokens)
 	return peptide;
 }
 
-std::string peptideMassClassKey(const std::string &peptide)
+static std::string peptideMassClassKey(const std::string &peptide)
 {
 	std::string key = peptide;
 	for (char &c : key)
@@ -2189,7 +2188,7 @@ bool buildDecoyChargeOneFragmentEntries(const std::vector<std::vector<double>> &
 	return true;
 }
 
-std::vector<double> makeTargetAbundances(const Args &args)
+std::vector<double> makeTargetAbundances(const ExperimentalArgs &args)
 {
 	if (!args.sipAbundanceRange)
 	{
@@ -2224,27 +2223,27 @@ bool hasTrailingPathSeparator(const std::string &path)
 	return !path.empty() && (path.back() == '/' || path.back() == '\\');
 }
 
-fs::path appendSfiExtensionIfNeeded(const fs::path &path)
+std::filesystem::path appendSfiExtensionIfNeeded(const std::filesystem::path &path)
 {
 	if (sipros::TextUtils::toLower(path.extension().string()) == ".sfi")
 	{
 		return path;
 	}
-	fs::path sfiPath = path;
+	std::filesystem::path sfiPath = path;
 	sfiPath += ".sfi";
 	return sfiPath;
 }
 
-fs::path resolveOutputBasePath(const std::string &outputPath, bool multipleOutputFiles)
+std::filesystem::path resolveOutputBasePath(const std::string &outputPath, bool multipleOutputFiles)
 {
-	const fs::path path(outputPath);
+	const std::filesystem::path path(outputPath);
 	if (hasTrailingPathSeparator(outputPath) ||
-		(fs::exists(path) && fs::is_directory(path)))
+		(std::filesystem::exists(path) && std::filesystem::is_directory(path)))
 	{
 		return path / "spectra.sfi";
 	}
 
-	const fs::path sfiPath = appendSfiExtensionIfNeeded(path);
+	const std::filesystem::path sfiPath = appendSfiExtensionIfNeeded(path);
 	if (!multipleOutputFiles)
 	{
 		return sfiPath;
@@ -2268,32 +2267,32 @@ std::string sipLabelForPath(char sipAtom, int sipIsotopeMassNumber)
 	return label;
 }
 
-fs::path outputPathForAbundance(const fs::path &basePath, const std::string &sipLabel, double pct)
+std::filesystem::path outputPathForAbundance(const std::filesystem::path &basePath, const std::string &sipLabel, double pct)
 {
 	const std::string filename = basePath.stem().string() + "_" +
 								 sipLabel + "_" +
 								 formatAbundancePctForPath(pct) + "Pct" +
 								 basePath.extension().string();
-	const fs::path parent = basePath.parent_path();
-	return parent.empty() ? fs::path(filename) : parent / filename;
+	const std::filesystem::path parent = basePath.parent_path();
+	return parent.empty() ? std::filesystem::path(filename) : parent / filename;
 }
 
-fs::path decoyOutputPathForAbundance(const fs::path &basePath, const std::string &sipLabel, double pct)
+std::filesystem::path decoyOutputPathForAbundance(const std::filesystem::path &basePath, const std::string &sipLabel, double pct)
 {
 	const std::string filename = basePath.stem().string() + "_Decoy_" +
 								 sipLabel + "_" +
 								 formatAbundancePctForPath(pct) + "Pct" +
 								 basePath.extension().string();
-	const fs::path parent = basePath.parent_path();
-	return parent.empty() ? fs::path(filename) : parent / filename;
+	const std::filesystem::path parent = basePath.parent_path();
+	return parent.empty() ? std::filesystem::path(filename) : parent / filename;
 }
 
-fs::path decoyOutputPath(const fs::path &basePath)
+std::filesystem::path decoyOutputPath(const std::filesystem::path &basePath)
 {
 	const std::string filename = basePath.stem().string() + "_Decoy" +
 		basePath.extension().string();
-	const fs::path parent = basePath.parent_path();
-	return parent.empty() ? fs::path(filename) : parent / filename;
+	const std::filesystem::path parent = basePath.parent_path();
+	return parent.empty() ? std::filesystem::path(filename) : parent / filename;
 }
 
 std::string spectraHeaderId(const std::string &psmId, double targetSipAbundancePct, bool decoy)
@@ -2332,18 +2331,19 @@ void copyFragmentEntriesToRecord(const std::vector<FragmentEntry> &entries, Spec
 	}
 }
 
-H5::DataSpace createDataspace(size_t count)
+static H5::DataSpace createDataspace(size_t count)
 {
 	const hsize_t dim = static_cast<hsize_t>(count);
 	return H5::DataSpace(1, &dim);
 }
 
-H5::DataSpace createScalarDataspace()
+static H5::DataSpace createScalarDataspace()
 {
 	return H5::DataSpace(H5S_SCALAR);
 }
 
-H5::DSetCreatPropList createCompressedDatasetProperties(size_t count, size_t chunkSize)
+static H5::DSetCreatPropList createCompressedDatasetProperties(
+    size_t count, size_t chunkSize)
 {
 	H5::DSetCreatPropList plist;
 	if (count > 0)
@@ -2406,7 +2406,8 @@ void writeStringDataset(const H5::Group &group,
 	}
 }
 
-void writeStringAttribute(const H5::H5Object &object, const char *name, const std::string &value)
+static void writeStringAttribute(
+    const H5::H5Object &object, const char *name, const std::string &value)
 {
 	H5::StrType type(H5::PredType::C_S1, std::max<size_t>(1, value.size() + 1));
 	type.setStrpad(H5T_STR_NULLTERM);
@@ -2536,16 +2537,16 @@ Hdf5OutputData buildOutputDataFromRecords(const std::vector<SpectrumOutputRecord
 	return output;
 }
 
-bool writeSpectraHdf5File(const fs::path &path,
+bool writeSpectraHdf5File(const std::filesystem::path &path,
 						  const Hdf5OutputData &data,
 						  const Hdf5OutputMetadata &metadata)
 {
 	try
 	{
-		const fs::path parent = path.parent_path();
+		const std::filesystem::path parent = path.parent_path();
 		if (!parent.empty())
 		{
-			fs::create_directories(parent);
+			std::filesystem::create_directories(parent);
 		}
 
 		H5::H5File file(path.string(), H5F_ACC_TRUNC);
@@ -2633,7 +2634,7 @@ void appendSpectraIndexRecord(
 }
 
 bool writeGeneratedSpectraFile(
-	const fs::path &path,
+	const std::filesystem::path &path,
 	std::vector<sipros::SpectraIndexRecordInput> &indexRecords,
 	const Hdf5OutputMetadata &metadata,
 	size_t &written,
@@ -2670,13 +2671,13 @@ void addOutputJobStats(ProcessingStats &processingStats, const OutputJobStats &j
 }
 
 bool generateAndWriteOutputFileJob(OutputFileJob &job,
-								   const std::vector<PsmRow> &rows,
+								   const std::vector<ExperimentalPsmRow> &rows,
 								   const std::vector<char> &baselineOk,
 								   const std::vector<MatchedEnvelopeSet> &matchedEnvelopeSets,
 								   const std::vector<std::string> &decoyPeptides,
 								   const std::vector<char> &decoyAddedResidues,
 								   const Isotopologue &pristineIso,
-								   const Args &args,
+								   const ExperimentalArgs &args,
 								   char sipAtom,
 								   int targetSipIsotopeIndex,
 								   int workerThreads,
@@ -2746,7 +2747,7 @@ bool generateAndWriteOutputFileJob(OutputFileJob &job,
 						{
 							if (!baselineOk[rowIndex])
 								continue;
-							const PsmRow &row = rows[rowIndex];
+							const ExperimentalPsmRow &row = rows[rowIndex];
 							if (!job.decoy)
 							{
 								std::vector<std::vector<double>> yMass, yProb, bMass, bProb;
@@ -3084,19 +3085,25 @@ bool waitForOneOutputChild(std::vector<ActiveOutputChild> &activeChildren,
 }
 
 bool runOutputJobsWithFork(std::vector<OutputFileJob> &outputJobs,
-						   const std::vector<PsmRow> &rows,
+						   const std::vector<ExperimentalPsmRow> &rows,
 						   const std::vector<char> &baselineOk,
 						   const std::vector<MatchedEnvelopeSet> &matchedEnvelopeSets,
 						   const std::vector<std::string> &decoyPeptides,
 						   const std::vector<char> &decoyAddedResidues,
 						   const Isotopologue &pristineIso,
-						   const Args &args,
+						   const ExperimentalArgs &args,
 						   char sipAtom,
 						   int targetSipIsotopeIndex,
 						   int effectiveThreads,
 						   ProcessingStats &processingStats)
 {
-	const size_t processLimit = static_cast<size_t>(std::max(1, effectiveThreads));
+	// A full-range library can contain millions of records and needs several
+	// times its final file size while generation and compact-index arrays
+	// overlap.  Running the target and decoy writers together therefore doubles
+	// peak memory and can make the OOM killer terminate the entire workflow.
+	// Keep the fork boundary so each writer's heap is reclaimed on exit, but run
+	// one writer at a time and give it all available worker threads.
+	constexpr size_t processLimit = 1;
 	std::vector<ActiveOutputChild> activeChildren;
 	activeChildren.reserve(processLimit);
 
@@ -3133,10 +3140,7 @@ bool runOutputJobsWithFork(std::vector<OutputFileJob> &outputJobs,
 			closeFdIfOpen(pipeFd[0]);
 			omp_set_num_threads(1);
 			OutputJobStats childStats;
-			const int threadsPerJob = std::max(
-				1, effectiveThreads /
-					static_cast<int>(std::min(
-						outputJobs.size(), static_cast<size_t>(effectiveThreads))));
+			const int threadsPerJob = std::max(1, effectiveThreads);
 			generateAndWriteOutputFileJob(outputJobs[jobIndex], rows, baselineOk, matchedEnvelopeSets,
 										  decoyPeptides, decoyAddedResidues, pristineIso,
 										  args, sipAtom, targetSipIsotopeIndex,
@@ -3164,13 +3168,13 @@ bool runOutputJobsWithFork(std::vector<OutputFileJob> &outputJobs,
 #endif
 
 bool runOutputJobs(std::vector<OutputFileJob> &outputJobs,
-				   const std::vector<PsmRow> &rows,
+				   const std::vector<ExperimentalPsmRow> &rows,
 				   const std::vector<char> &baselineOk,
 				   const std::vector<MatchedEnvelopeSet> &matchedEnvelopeSets,
 				   const std::vector<std::string> &decoyPeptides,
 				   const std::vector<char> &decoyAddedResidues,
 				   const Isotopologue &pristineIso,
-				   const Args &args,
+				   const ExperimentalArgs &args,
 				   char sipAtom,
 				   int targetSipIsotopeIndex,
 				   int effectiveThreads,
@@ -3197,7 +3201,6 @@ bool runOutputJobs(std::vector<OutputFileJob> &outputJobs,
 #endif
 }
 
-} // namespace
 
 int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 {
@@ -3214,7 +3217,7 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 	std::setlocale(LC_ALL, "C");
 	std::ios_base::sync_with_stdio(false);
 
-	Args args;
+	ExperimentalArgs args;
 	if (!parseArgs(argc, argv, args))
 	{
 		return 1;
@@ -3292,7 +3295,7 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 	timing.printHeader();
 
 	ReadStats readStats;
-	std::vector<PsmRow> allRows;
+	std::vector<ExperimentalPsmRow> allRows;
 	try
 	{
 		timing.run("Read PSM", "read PSM rows", 0, "", [&]()
@@ -3308,12 +3311,12 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 
 	std::unordered_set<std::string> experimentalPeptideMassClasses;
 	experimentalPeptideMassClasses.reserve(allRows.size());
-	for (const PsmRow &row : allRows)
+	for (const ExperimentalPsmRow &row : allRows)
 	{
 		experimentalPeptideMassClasses.insert(peptideMassClassKey(row.peptide));
 	}
 
-	std::vector<PsmRow> rows;
+	std::vector<ExperimentalPsmRow> rows;
 	timing.run("Select PSM", "PEP/SVM/WDP peptide/charge", allRows.size(), "rows", [&]()
 	{
 		rows = selectBestRowsByPeptideCharge(allRows);
@@ -3330,7 +3333,7 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 				  << ", decoy=" << readStats.decoyRows << "\n";
 	}
 
-	std::unordered_map<std::string, fs::path> hdf5FilesBySample;
+	std::unordered_map<std::string, std::filesystem::path> hdf5FilesBySample;
 	try
 	{
 		timing.run("Collect HDF5", "collect HDF5 files", 0, "", [&]()
@@ -3344,7 +3347,7 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 		return 1;
 	}
 	const std::map<std::string, size_t> requestedScanCounts = requestedScanCountsBySample(rows);
-	std::vector<std::pair<std::string, fs::path>> sortedHdf5Files(hdf5FilesBySample.begin(), hdf5FilesBySample.end());
+	std::vector<std::pair<std::string, std::filesystem::path>> sortedHdf5Files(hdf5FilesBySample.begin(), hdf5FilesBySample.end());
 	std::sort(sortedHdf5Files.begin(), sortedHdf5Files.end(),
 			  [](const auto &a, const auto &b)
 			  { return a.second.string() < b.second.string(); });
@@ -3434,7 +3437,7 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 
 	const size_t plannedOutputFileCount = args.writeDecoy ? 2 : 1;
 	const bool multipleOutputFiles = plannedOutputFileCount > 1;
-	fs::path outputBasePath;
+	std::filesystem::path outputBasePath;
 	try
 	{
 		outputBasePath = resolveOutputBasePath(args.outputPath, multipleOutputFiles);
@@ -3510,19 +3513,20 @@ int ExperimentalSpectraWorkflow::run(int argc, char **argv)
 		}
 		const auto &build = job.buildStats;
 		std::ostringstream buildLog;
-		buildLog << "SFI v5 compact RT-aware index (top "
+		buildLog << "SFI v6 sparse RT-aware index (top "
 				 << job.metadata.envelopeTopN << " peaks/envelope): "
 				 << job.path << '\n'
 				 << "  records=" << build.recordCount
 				 << ", precursors=" << build.precursorCount
-				 << ", fragments=" << build.fragmentCount << " x 16 bytes"
+				 << ", fragments=" << build.fragmentCount << " x 8 hot bytes"
+				 << ", sparse_experimental_values="
+				 << build.experimentalValueCount
 				 << ", packed_product_postings=" << build.productPostingCount
 				 << " x 4 bytes, sparse_rt_bins=" << build.rtBinCount
 				 << ", blocks=" << build.blockCount << '\n'
 					 << "  parallel spectra generation: " << std::fixed
 				 << std::setprecision(3) << job.generationSeconds << "s (up to "
-				 << std::max(1, effectiveThreads /
-					static_cast<int>(outputJobs.size())) << " threads/job)\n"
+				 << effectiveThreads << " threads/job)\n"
 					 << "  combine generated records: " << job.combineSeconds << "s\n"
 					 << "  parallel compact/validate: "
 					 << build.compactValidateSeconds

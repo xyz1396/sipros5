@@ -361,6 +361,9 @@ int main() {
     add_psm("sample.2.1", "K[BBBBBBB]R", "{sp|P1|ONE,sp|P2|TWO}");
     add_psm(
         "sample.3.1", "K[M~M~CCCCCCC]R", "{sp|P2|TWO}");
+    add_psm(
+        "sample.4.1", "K[KKKKKKK]R", "{Decoy_sp|D1|DECOY}");
+    data.rows.back().label = -1;
     data.rows.front().calculated_mass = 777.0;
     data.rows.front().calculated_mz = 389.5073;
     aerith::TransferredIon transfer;
@@ -386,7 +389,8 @@ int main() {
     config.output_prefixes.push_back(
         (root / "negative_control" / "negative_control").string());
     const std::vector<double> protein_q(data.rows.size(), 0.001);
-    const std::vector<double> protein_pep(data.rows.size(), 0.001);
+    std::vector<double> protein_pep(data.rows.size(), 0.001);
+    protein_pep.back() = 0.49;
     const std::vector<double> protein_scores(data.rows.size(), 1.0);
     const auto assembly =
         aerith::ProteinAssembler::write(
@@ -785,6 +789,46 @@ int main() {
            std::string::npos);
     assert(combined_peptide_report.find("sample MaxLFQ Intensity") !=
            std::string::npos);
+
+    const auto target_only_root = root / "target_only";
+    aerith::Config target_only_config = config;
+    target_only_config.decoy_database_path.clear();
+    target_only_config.protein_output_dir = target_only_root.string();
+    target_only_config.output_prefixes = {
+        (target_only_root / "sample" / "sample").string(),
+        (target_only_root / "negative_control" / "negative_control").string()};
+    const auto target_only_assembly = aerith::ProteinAssembler::write(
+        target_only_config, data, protein_scores, protein_q, protein_pep);
+    assert(target_only_assembly.proteins == assembly.proteins);
+    assert(target_only_assembly.stages.size() == assembly.stages.size());
+    assert(target_only_assembly.stages.front().name ==
+           "Read and annotate target FASTA");
+    const auto file_contents = [](const std::filesystem::path& path) {
+        std::ifstream input(path, std::ios::binary);
+        assert(static_cast<bool>(input));
+        return std::string(
+            (std::istreambuf_iterator<char>(input)),
+            std::istreambuf_iterator<char>());
+    };
+    const std::vector<std::filesystem::path> equivalent_reports = {
+        "combined_protein.tsv",
+        "combined_protein_with_PSM.tsv",
+        "combined_peptide_with_PSM.tsv",
+        "combined_protein.fas",
+        "combined_psm.tsv",
+        "combined_ion.tsv",
+        "combined_modified_peptide.tsv",
+        "combined_peptide.tsv",
+        std::filesystem::path("sample") / "protein.tsv",
+        std::filesystem::path("sample") / "protein.fas",
+        std::filesystem::path("sample") / "psm.tsv",
+        std::filesystem::path("sample") / "ion.tsv",
+        std::filesystem::path("sample") / "modified_peptide.tsv",
+        std::filesystem::path("sample") / "peptide.tsv"};
+    for (const auto& relative : equivalent_reports) {
+        assert(file_contents(root / relative) ==
+               file_contents(target_only_root / relative));
+    }
     aerith::Summary summary;
     summary.files = 2;
     summary.psms = 13;
