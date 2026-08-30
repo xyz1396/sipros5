@@ -6,7 +6,8 @@ set -e
 # `build` and `package` run in a dedicated CPU release environment. The
 # environment is created automatically when it is missing or has stale pins:
 #   micromamba create -n sipros5-release -c conda-forge \
-#     sysroot_linux-64=2.17 gcc_linux-64 gxx_linux-64 cmake ninja patchelf curl \
+#     python=3.12 sysroot_linux-64=2.17 gcc_linux-64 gxx_linux-64 \
+#     cmake ninja patchelf curl zip \
 #     "hdf5=2.*=nompi*" \
 #     "pytorch-cpu=2.12.1=cpu_mkl*" imgui=1.92.9 libvulkan-headers libgl-devel
 # 
@@ -35,6 +36,7 @@ APPIMAGETOOL_VERSION="1.9.1"
 APPIMAGETOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
 APPIMAGE_RUNTIME_VERSION="20251108"
 APPIMAGE_RUNTIME_SHA256="2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
+REMOTE_X11_BRIDGE_LIBRARY="libsipros_remote_x11_bridge.so"
 if [[ ! "$SIPROS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "SIPROS_VERSION must be a three-part numeric version; got '$SIPROS_VERSION'." >&2
     exit 1
@@ -45,6 +47,7 @@ ensure_release_environment() {
         'import glob, os, torch
 prefix = os.environ["CONDA_PREFIX"]
 assert torch.__version__.split("+")[0] == "2.12.1"
+assert tuple(map(int, __import__("sys").version_info[:2])) == (3, 12)
 assert glob.glob(prefix + "/conda-meta/pytorch-2.12.1-cpu_mkl*.json")
 assert glob.glob(prefix + "/conda-meta/sysroot_linux-64-2.17-*.json")
 assert glob.glob(prefix + "/conda-meta/gcc_linux-64-*.json")
@@ -57,7 +60,8 @@ assert os.path.isfile(prefix + "/lib/libhdf5.so")
 assert os.path.isfile(prefix + "/lib/libhdf5_cpp.so")
 assert os.path.isfile(prefix + "/lib/libSDL3.so.0")
 assert os.access(prefix + "/bin/patchelf", os.X_OK)
-assert os.access(prefix + "/bin/curl", os.X_OK)' \
+assert os.access(prefix + "/bin/curl", os.X_OK)
+assert os.access(prefix + "/bin/zip", os.X_OK)' \
         >/dev/null 2>&1; then
         return
     fi
@@ -68,8 +72,9 @@ assert os.access(prefix + "/bin/curl", os.X_OK)' \
     fi
     "$MAMBA_EXE" "$action" -y -n "$RELEASE_ENV_NAME" \
         -c conda-forge --strict-channel-priority \
+        "python=3.12" \
         "sysroot_linux-64=2.17" \
-        gcc_linux-64 gxx_linux-64 cmake ninja patchelf curl \
+        gcc_linux-64 gxx_linux-64 cmake ninja patchelf curl zip \
         "hdf5=2.*=nompi*" \
         "pytorch-cpu=2.12.1=cpu_mkl*" \
         imgui=1.92.9 libvulkan-headers libgl-devel
@@ -140,6 +145,41 @@ GUI_RUNTIME_LIBRARIES=(
     libSDL3.so.0
 )
 
+# OpenGL/GLX dispatch and X11 client libraries must match the host display
+# driver. Bundling Conda's copies prevents GLVND from selecting the host vendor
+# implementation correctly, which is especially visible with SSH-forwarded
+# MobaXterm X11. Keep GLFW, ImGui, and SDL relocatable, but resolve the display
+# stack from the host at runtime.
+is_appimage_host_graphics_library() {
+    case "$1" in
+        libEGL.so|libEGL.so.*|\
+        libGL.so|libGL.so.*|\
+        libGLESv1_CM.so|libGLESv1_CM.so.*|\
+        libGLESv2.so|libGLESv2.so.*|\
+        libGLX.so|libGLX.so.*|\
+        libGLdispatch.so|libGLdispatch.so.*|\
+        libOpenGL.so|libOpenGL.so.*|\
+        libX11.so|libX11.so.*|libX11-xcb.so|libX11-xcb.so.*|\
+        libXau.so|libXau.so.*|\
+        libXcursor.so|libXcursor.so.*|\
+        libXdmcp.so|libXdmcp.so.*|\
+        libXext.so|libXext.so.*|\
+        libXfixes.so|libXfixes.so.*|\
+        libXi.so|libXi.so.*|\
+        libXinerama.so|libXinerama.so.*|\
+        libXrandr.so|libXrandr.so.*|\
+        libXrender.so|libXrender.so.*|\
+        libXss.so|libXss.so.*|\
+        libXtst.so|libXtst.so.*|\
+        libxcb.so|libxcb.so.*|libxcb-*.so|libxcb-*.so.*|\
+        libxkbcommon.so|libxkbcommon.so.*|\
+        libxkbcommon-x11.so|libxkbcommon-x11.so.*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 # Archive extraction and file copies can drop execute bits from the bundled
 # tools.  Normalize every runtime binary before any build/run action so that
 # `./make.sh load` can also repair an existing checkout without rebuilding it.
@@ -163,16 +203,29 @@ require_executable() {
 prepare_release_build_dir() {
     mkdir -p "$1"
     local cache="$1/CMakeCache.txt"
+    local ninja_deps="$1/.ninja_deps"
     local hdf5_dir="=$RELEASE_HDF5_DIR"
     local compiler="=$SYSTEM_CXX"
     local torch_root="=$SYSTEM_TORCH_ROOT"
+    local dependency_prefix stale_ninja_deps=0
+    if [ -f "$ninja_deps" ]; then
+        while read -r dependency_prefix; do
+            if [ "$dependency_prefix" != "$RELEASE_PREFIX" ]; then
+                stale_ninja_deps=1
+                break
+            fi
+        done < <(grep -aoE "/[^[:space:]]*/micromamba/envs/$RELEASE_ENV_NAME" \
+            "$ninja_deps" 2>/dev/null | sort -u)
+    fi
     if [ -f "$cache" ] &&
        { ! grep -F 'HDF5_DIR:' "$cache" | grep -Fq "$hdf5_dir" ||
          ! grep -F 'CMAKE_CXX_COMPILER:' "$cache" | grep -Fq "$compiler" ||
          ! grep -F 'AERITH_TORCH_ROOT:' "$cache" | grep -Fq "$torch_root" ||
-         ! grep -F 'AERITH_TORCH_CPU_ONLY:' "$cache" | grep -Fq '=ON'; }; then
+         ! grep -F 'AERITH_TORCH_CPU_ONLY:' "$cache" | grep -Fq '=ON' ||
+         [ "$stale_ninja_deps" = "1" ]; }; then
         echo "Reconfiguring $1 with the dynamic release environment"
         rm -rf "$cache" "$1/CMakeFiles"
+        rm -f "$1/.ninja_deps" "$1/.ninja_log"
     fi
 }
 
@@ -437,14 +490,16 @@ verify_packaged_release_binary() {
         case "$resolved" in
             "$library_dir"/*) ;;
             /lib/*|/lib64/*|/usr/lib/*|/usr/lib64/*)
-                case "$dependency" in
-                    libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|\
-                    libresolv.so.*|libutil.so.*|libnsl.so.*|libanl.so.*) ;;
-                    *)
-                        echo "Packaged runtime uses host library $dependency: $resolved" >&2
-                        return 1
-                        ;;
-                esac
+                if ! is_appimage_host_graphics_library "$dependency"; then
+                    case "$dependency" in
+                        libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|\
+                        libresolv.so.*|libutil.so.*|libnsl.so.*|libanl.so.*) ;;
+                        *)
+                            echo "Packaged runtime uses host library $dependency: $resolved" >&2
+                            return 1
+                            ;;
+                    esac
+                fi
                 ;;
         esac
     done <<<"$dependencies"
@@ -488,6 +543,10 @@ stage_release_runtime() {
     while [ "${#queue[@]}" -gt 0 ]; do
         current="${queue[0]}"
         queue=("${queue[@]:1}")
+        current=$(readlink -f "$current") || {
+            echo "Unable to resolve runtime dependency path: $current" >&2
+            return 1
+        }
         if [ -n "${visited[$current]+x}" ]; then
             continue
         fi
@@ -498,6 +557,9 @@ stage_release_runtime() {
         # NEEDED entries as well so every runtime name is present in the
         # relocatable package.
         while read -r needed; do
+            if is_appimage_host_graphics_library "$needed"; then
+                continue
+            fi
             source="$SYSTEM_TORCH_LIB_DIR/$needed"
             if [ -f "$source" ] && [ ! -f "$destination/$needed" ]; then
                 if [[ "$needed" =~ (torch_cuda|c10_cuda|cuda|cudnn|cublas|cupti|cusparse|cufft|curand|cusolver) ]]; then
@@ -519,6 +581,9 @@ stage_release_runtime() {
             case "$resolved" in
                 "$SYSTEM_TORCH_LIB_DIR"/*)
                     name=$(basename "$resolved")
+                    if is_appimage_host_graphics_library "$name"; then
+                        continue
+                    fi
                     if [[ "$name" =~ (torch_cuda|c10_cuda|cuda|cudnn|cublas|cupti|cusparse|cufft|curand|cusolver) ]]; then
                         echo "CPU-only package unexpectedly requires $name" >&2
                         return 1
@@ -611,7 +676,21 @@ create_appimage() {
     chmod 0755 "$APPIMAGETOOL_PATH"
     chmod 0644 "$APPIMAGE_RUNTIME_PATH"
 
-    ln -s siproswf "$appdir/AppRun"
+    # Moba/X can expose ordinary X11 without usable GLX framebuffer configs.
+    # Use the packaged EGL bridge for SSH-forwarded X11 sessions unless the
+    # user explicitly opts out. APPDIR is supplied by the AppImage runtime.
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'if [ -n "${DISPLAY:-}" ] && [ -n "${SSH_CONNECTION:-}" ] &&' \
+        '   [ "${SIPROSWF_REMOTE_X11_EGL:-1}" != "0" ]; then' \
+        '    if [ -z "${LIBGL_ALWAYS_SOFTWARE+x}" ]; then' \
+        '        export LIBGL_ALWAYS_SOFTWARE=1' \
+        '    fi' \
+        '    LD_PRELOAD="$APPDIR/lib/'"$REMOTE_X11_BRIDGE_LIBRARY"'${LD_PRELOAD:+:$LD_PRELOAD}"' \
+        '    export LD_PRELOAD' \
+        'fi' \
+        'exec "$APPDIR/siproswf" "$@"' > "$appdir/AppRun"
+    chmod 0755 "$appdir/AppRun"
     install -m 0644 "$REPO_DIR/wf33/sipros_logo.png" "$icon"
     printf '%s\n' \
         '[Desktop Entry]' \
@@ -829,6 +908,11 @@ case $1 in
     trap 'rm -rf "$tmpdir"' EXIT
     mkdir -p "$tmpdir/sipros/lib"
     install -m 0755 "bin/siproswf" "$tmpdir/sipros/siproswf"
+    "$SYSTEM_CC" -shared -fPIC \
+        "$REPO_DIR/wf33/appimage_remote_x11_bridge.c" \
+        -Wl,-soname,"$REMOTE_X11_BRIDGE_LIBRARY" -ldl \
+        -o "$tmpdir/sipros/lib/$REMOTE_X11_BRIDGE_LIBRARY"
+    chmod 0755 "$tmpdir/sipros/lib/$REMOTE_X11_BRIDGE_LIBRARY"
     for binary in sipros aerith Raxport-linux-x64; do
         install -m 0755 "bin/$binary" "$tmpdir/sipros/lib/$binary"
     done
@@ -850,6 +934,7 @@ case $1 in
     verify_packaged_release_binary "$tmpdir/sipros/lib/aerith" \
         "$tmpdir/sipros/lib" 1 '$ORIGIN'
     verify_glibc_217 "$tmpdir/sipros/lib/aerith" "$tmpdir/sipros/lib"
+    verify_glibc_217 "$tmpdir/sipros/lib/$REMOTE_X11_BRIDGE_LIBRARY"
     verify_packaged_release_binary "$tmpdir/sipros/siproswf" \
         "$tmpdir/sipros/lib"
     verify_glibc_217 "$tmpdir/sipros/siproswf" "$tmpdir/sipros/lib"
