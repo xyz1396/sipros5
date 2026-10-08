@@ -494,6 +494,9 @@ verify_packaged_release_binary() {
                     case "$dependency" in
                         libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|\
                         libresolv.so.*|libutil.so.*|libnsl.so.*|libanl.so.*) ;;
+                        # Host libXdmcp can depend on libbsd, which in turn
+                        # depends on libmd. Keep these with the host X11 stack.
+                        libbsd.so.*|libmd.so.*) ;;
                         *)
                             echo "Packaged runtime uses host library $dependency: $resolved" >&2
                             return 1

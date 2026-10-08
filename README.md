@@ -405,6 +405,27 @@ MKL, ImGui, GLFW, and OpenGL support libraries, under `bin/lib`.
 The resulting binaries require host glibc 2.17 or newer. Neither command
 configures, builds, or packages `siprosMPI`.
 
+When launched through SSH with X11 forwarding (`DISPLAY` and `SSH_CONNECTION`
+set), the Linux AppImage defaults to software rendering through EGL. The GUI
+uses the host window manager's title bar for moving and resizing and disables
+vertical synchronization. Visible windows process ImGui frames at least once
+every 1/30 second when rendering and X11 calls are not blocking, so batched
+mouse presses/releases do not wait indefinitely for another X11 event.
+
+If MobaXterm still displays an unresponsive window, try **Settings > X11 >
+Windowed mode with Fvwm**, then reconnect and relaunch. MobaXterm documents
+this as a workaround for input problems in its multiwindow mode:
+[MobaXterm X11 troubleshooting](https://mobaxterm.mobatek.net/documentation.html).
+For rendering diagnostics, launch from the SSH terminal with:
+
+```bash
+EGL_LOG_LEVEL=debug LIBGL_DEBUG=verbose ./sipros_linux_6.0.0_x86_64.AppImage 2>sipros-x11.log
+```
+
+`SIPROSWF_REMOTE_X11_EGL=0` disables the AppImage's EGL bridge for comparison
+with native GLX, but requires a working GLX/OpenGL 3.0 implementation on the
+forwarded display.
+
 The optional Conda GPU build remains available from the `sipros5` environment:
 
 ```bash

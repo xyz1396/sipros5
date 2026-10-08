@@ -50,7 +50,7 @@ constexpr int kRegularDefaultMaxPtmCount = 3;
 constexpr float kMaximumDpiScale = 5.0f;
 constexpr float kDpiScaleEpsilon = 0.01f;
 constexpr std::size_t kMaximumGuiLogLines = 10000;
-constexpr double kActiveEventWaitSeconds = 0.50;
+constexpr double kGuiEventWaitSeconds = 1.0 / 30.0;
 
 struct PtmChoice {
     const char* selector;
@@ -161,6 +161,17 @@ enum class TitleControl {
     Close,
 };
 
+bool is_remote_x11_session() {
+#if defined(__linux__)
+    const char* display = std::getenv("DISPLAY");
+    const char* ssh_connection = std::getenv("SSH_CONNECTION");
+    return display != nullptr && *display != '\0' &&
+           ssh_connection != nullptr && *ssh_connection != '\0';
+#else
+    return false;
+#endif
+}
+
 bool initialize_glfw(bool& use_custom_frame) {
 #if defined(__linux__)
     use_custom_frame = false;
@@ -173,7 +184,9 @@ bool initialize_glfw(bool& use_custom_frame) {
         glfwPlatformSupported(GLFW_PLATFORM_X11) == GLFW_TRUE) {
         glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
         if (glfwInit() == GLFW_TRUE) {
-            use_custom_frame = true;
+            // Let the remote window manager handle moving and resizing.
+            // A custom frame requires round trips through SSH for each move.
+            use_custom_frame = !is_remote_x11_session();
             return true;
         }
         glfwInitHint(GLFW_PLATFORM, GLFW_ANY_PLATFORM);
@@ -1598,7 +1611,8 @@ int run_gui(const std::filesystem::path& executable_path) {
                 std::max(0, (initial_work_area.height - window_height) / 2));
     }
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
+    // Forwarded X11 has no local display refresh to synchronize with.
+    glfwSwapInterval(is_remote_x11_session() ? 0 : 1);
 
     WindowState window_state;
     float current_scale_x = 1.0f;
@@ -1652,8 +1666,11 @@ int run_gui(const std::filesystem::path& executable_path) {
         } else {
             const bool iconified =
                 glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE;
-            if (state.running.load() && !iconified) {
-                glfwWaitEventsTimeout(kActiveEventWaitSeconds);
+            if (!iconified) {
+                // ImGui can spread a batch of press/release events across
+                // multiple frames. Waiting indefinitely for another X11
+                // event leaves those queued inputs (and popups) unfinished.
+                glfwWaitEventsTimeout(kGuiEventWaitSeconds);
             } else {
                 glfwWaitEvents();
             }
